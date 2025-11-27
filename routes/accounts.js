@@ -31,7 +31,17 @@ router.get('/groups', authenticate, async (req, res, next) => {
     });
   } catch (error) {
     console.error('Get MT5 groups error:', error);
-    next(error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      hint: error.hint
+    });
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch MT5 groups',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 });
 
@@ -45,7 +55,8 @@ router.get('/', authenticate, async (req, res, next) => {
       `SELECT 
         id, account_number, platform, account_type, currency,
         is_swap_free, is_copy_account, leverage, reason_for_account,
-        account_status, is_demo, trading_server, api_account_number, created_at
+        account_status, is_demo, trading_server, api_account_number, 
+        mt5_group_name, created_at
        FROM trading_accounts
        WHERE user_id = $1
        ORDER BY created_at DESC`,
@@ -58,7 +69,18 @@ router.get('/', authenticate, async (req, res, next) => {
     });
   } catch (error) {
     console.error('Get accounts error:', error);
-    next(error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      hint: error.hint,
+      userId: req.user?.id
+    });
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch accounts',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 });
 
