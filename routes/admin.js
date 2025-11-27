@@ -7,6 +7,11 @@ import bcrypt from 'bcryptjs';
 
 const router = express.Router();
 
+// Test endpoint to verify admin routes are working
+router.get('/test', (req, res) => {
+  res.json({ success: true, message: 'Admin routes are working' });
+});
+
 /**
  * POST /api/admin/login
  * Admin login
