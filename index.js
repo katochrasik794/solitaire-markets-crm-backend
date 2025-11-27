@@ -21,10 +21,21 @@ const PORT = process.env.PORT || 5000;
 pool.query('SELECT NOW()', (err, res) => {
   if (err) {
     console.error('❌ Database connection error:', err.message);
-    console.error('Please check your .env file and ensure:');
-    console.error('1. DB_PASSWORD is set correctly');
+    console.error('Error code:', err.code);
+    console.error('Error details:', {
+      hasDatabaseUrl: !!process.env.DATABASE_URL,
+      host: process.env.DB_HOST || 'not set',
+      database: process.env.DB_NAME || 'not set',
+      user: process.env.DB_USER || 'not set',
+      port: process.env.DB_PORT || 'not set',
+      nodeEnv: process.env.NODE_ENV,
+      sslRequired: process.env.NODE_ENV === 'production'
+    });
+    console.error('Please check your environment variables:');
+    console.error('1. DATABASE_URL (recommended) or DB_HOST, DB_USER, DB_PASSWORD, DB_NAME are set correctly');
     console.error('2. PostgreSQL is running');
-    console.error('3. Database "solitaire" exists');
+    console.error('3. Database exists');
+    console.error('4. SSL is configured if required (Render.com requires SSL)');
     process.exit(1);
   } else {
     console.log('✅ Connected to PostgreSQL database');
