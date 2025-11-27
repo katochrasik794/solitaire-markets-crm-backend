@@ -74,6 +74,23 @@ console.log('  - /api/kyc');
 console.log('  - /api/accounts');
 console.log('  - /api/admin');
 
+// Debug endpoint to list all registered routes
+app.get('/api/debug/routes', (req, res) => {
+  res.json({
+    success: true,
+    routes: [
+      '/api/auth',
+      '/api/countries',
+      '/api/kyc',
+      '/api/accounts',
+      '/api/admin',
+      '/api/admin/test',
+      '/api/admin/login'
+    ],
+    message: 'All routes are registered'
+  });
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Error:', err);
@@ -86,9 +103,12 @@ app.use((err, req, res, next) => {
 
 // 404 handler
 app.use((req, res) => {
+  console.log(`❌ 404 - Route not found: ${req.method} ${req.path}`);
   res.status(404).json({
     success: false,
-    message: 'Route not found'
+    message: 'Route not found',
+    path: req.path,
+    method: req.method
   });
 });
 
