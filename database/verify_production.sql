@@ -31,3 +31,4 @@ FROM information_schema.columns
 WHERE table_name = 'trading_accounts' 
 AND column_name = 'mt5_group_name';
 
+

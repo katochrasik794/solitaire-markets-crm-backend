@@ -7,12 +7,13 @@ const { Pool } = pkg;
 
 let poolConfig;
 
-// Check if DATABASE_URL is provided (common in production environments like Render.com)
+// Always use DATABASE_URL if provided (works for both local and production)
 if (process.env.DATABASE_URL) {
   // Use DATABASE_URL directly - it includes all connection details
+  // Render.com PostgreSQL requires SSL, so always enable it when using DATABASE_URL
   poolConfig = {
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    ssl: { rejectUnauthorized: false }, // Required for Render.com PostgreSQL
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
