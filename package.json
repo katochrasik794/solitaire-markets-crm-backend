@@ -6,7 +6,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "node --watch index.js",
+    "setup-admin": "node database/setup_admin_tables.js"
   },
   "keywords": [],
   "author": "",

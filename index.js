@@ -7,6 +7,7 @@ import authRoutes from './routes/auth.js';
 import countriesRoutes from './routes/countries.js';
 import kycRoutes from './routes/kyc.js';
 import accountsRoutes from './routes/accounts.js';
+import adminRoutes from './routes/admin.js';
 import pool from './config/database.js';
 
 dotenv.config();
@@ -63,6 +64,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/countries', countriesRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/accounts', accountsRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Debug: Log registered routes
 console.log('✅ Routes registered:');
@@ -70,6 +72,7 @@ console.log('  - /api/auth');
 console.log('  - /api/countries');
 console.log('  - /api/kyc');
 console.log('  - /api/accounts');
+console.log('  - /api/admin');
 
 // Error handling middleware
 app.use((err, req, res, next) => {
