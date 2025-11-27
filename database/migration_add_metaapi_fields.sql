@@ -128,3 +128,4 @@ CREATE INDEX IF NOT EXISTS idx_accounts_api_account_number ON trading_accounts(a
 -- Create index on group for faster lookups
 CREATE INDEX IF NOT EXISTS idx_accounts_group ON trading_accounts("group");
 
+
