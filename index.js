@@ -44,36 +44,12 @@ pool.query('SELECT NOW()', (err, res) => {
 });
 
 // Middleware
-// CORS: allow all origins by default (including portal.solitairemarkets.com)
-// If you want to restrict, set FRONTEND_URL or FRONTEND_URLS in env and adjust this logic.
+// CORS: fully open for all origins (including https://portal.solitairemarkets.com)
+// The request Origin will be reflected back in Access-Control-Allow-Origin.
+// If you later want to restrict origins, this block should be updated accordingly.
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow non-browser or same-origin requests with no Origin header
-    if (!origin) return callback(null, true);
-
-    // If you want to restrict origins, define FRONTEND_URLS as a comma-separated list
-    const allowed =
-      process.env.FRONTEND_URLS ||
-      process.env.FRONTEND_URL ||
-      '';
-
-    if (!allowed) {
-      // No restriction configured: allow all origins
-      return callback(null, true);
-    }
-
-    const allowedOrigins = allowed
-      .split(',')
-      .map(o => o.trim())
-      .filter(Boolean);
-
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
-  },
-  credentials: true
+  origin: true,        // reflect request origin
+  credentials: true    // allow cookies/authorization headers
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
