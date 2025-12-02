@@ -2,12 +2,12 @@ import express from 'express';
 import pool from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
 import { comparePassword, encryptPassword, generateRandomPassword } from '../utils/helpers.js';
+import * as mt5Service from '../services/mt5.service.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const router = express.Router();
-const METAAPI_BASE_URL = process.env.METAAPI_BASE_URL || 'https://metaapi.zuperior.com';
 
 /**
  * GET /api/accounts/groups
@@ -179,14 +179,13 @@ router.post('/create', authenticate, async (req, res, next) => {
       : user.phone_number || '';
     const country = user.country || '';
 
-    // Prepare MetaAPI request
-    const metaApiPayload = {
+    // Prepare MT5 account creation data
+    const accountData = {
       name: accountName,
       group: groupName, // Use group_name from database
       leverage: finalLeverage, // Just the number (50, 100, 200, etc.)
       masterPassword: masterPassword, // Portal password
       investorPassword: investorPassword, // Random + Inv@900
-      password: mainPassword, // Main password
       email: user.email,
       country: country,
       city: '', // Empty string - city not saved in database
@@ -194,73 +193,26 @@ router.post('/create', authenticate, async (req, res, next) => {
       comment: reasonForAccount || 'Created via API'
     };
 
-    // Call MetaAPI
-    let metaApiResponse;
+    // Call MT5 Manager API using /Users endpoint
+    let mt5Response;
     try {
-      const metaApiUrl = `${METAAPI_BASE_URL}/api/User/create`;
-      const metaApiOptions = {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(process.env.METAAPI_API_KEY && { 'Authorization': `Bearer ${process.env.METAAPI_API_KEY}` }),
-          ...(process.env.METAAPI_TOKEN && { 'X-API-Token': process.env.METAAPI_TOKEN })
-        },
-        body: JSON.stringify(metaApiPayload)
-      };
-
-      console.log('Calling MetaAPI:', metaApiUrl);
-      console.log('Request payload:', JSON.stringify(metaApiPayload, null, 2));
-      console.log('Request headers:', JSON.stringify(metaApiOptions.headers, null, 2));
-
-      const metaApiRes = await fetch(metaApiUrl, metaApiOptions);
-      const responseText = await metaApiRes.text();
-      
-      console.log('MetaAPI Status:', metaApiRes.status, metaApiRes.statusText);
-      console.log('MetaAPI Raw Response:', responseText);
-      
-      // Check if response is empty
-      if (!responseText || responseText.trim() === '') {
-        throw new Error(`MetaAPI returned empty response. Status: ${metaApiRes.status}`);
-      }
-      
-      // Try to parse as JSON
-      try {
-        metaApiResponse = JSON.parse(responseText);
-      } catch (parseError) {
-        console.error('MetaAPI response is not JSON. Full response:', responseText);
-        console.error('Response length:', responseText.length);
-        console.error('Response type:', typeof responseText);
-        throw new Error(`Invalid response from MetaAPI (Status ${metaApiRes.status}): ${responseText.substring(0, 500)}`);
-      }
-
-      console.log('MetaAPI parsed response:', JSON.stringify(metaApiResponse, null, 2));
-
-      // Check if response indicates an error
-      if (!metaApiRes.ok) {
-        const errorMsg = metaApiResponse.message || metaApiResponse.error || metaApiResponse.msg || JSON.stringify(metaApiResponse);
-        throw new Error(`MetaAPI error (Status ${metaApiRes.status}): ${errorMsg}`);
-      }
-      
-      // Check if response has error field even if status is ok
-      if (metaApiResponse.error || metaApiResponse.status === 'error') {
-        const errorMsg = metaApiResponse.message || metaApiResponse.error || JSON.stringify(metaApiResponse);
-        throw new Error(`MetaAPI returned error: ${errorMsg}`);
-      }
+      const result = await mt5Service.createAccount(accountData);
+      mt5Response = result.data;
+      console.log('MT5 account created successfully:', JSON.stringify(mt5Response, null, 2));
     } catch (apiError) {
-      console.error('MetaAPI error:', apiError);
+      console.error('MT5 API error:', apiError);
       console.error('Error details:', {
         message: apiError.message,
-        stack: apiError.stack,
-        url: `${METAAPI_BASE_URL}/api/User/create`
+        stack: apiError.stack
       });
       return res.status(500).json({
         success: false,
-        message: apiError.message || 'Failed to create account via MetaAPI. Please try again later.'
+        message: apiError.message || 'Failed to create account via MT5 API. Please try again later.'
       });
     }
 
-    // Extract account number from MetaAPI response
-    const apiAccountNumber = metaApiResponse.account || metaApiResponse.accountNumber || metaApiResponse.login || null;
+    // Extract account number from MT5 response
+    const apiAccountNumber = mt5Response.account || mt5Response.accountNumber || mt5Response.login || mt5Response.Login || null;
     // Use the investor password we generated (with Inv@900 suffix)
     const finalInvestorPassword = investorPassword;
 
@@ -286,7 +238,7 @@ router.post('/create', authenticate, async (req, res, next) => {
         user_id, account_number, platform, account_type, currency,
         is_swap_free, is_copy_account, leverage, reason_for_account,
         trading_server, mt5_group_id, mt5_group_name,
-        name, group_name_api, master_password, password_api, email_api, country_api, city_api, phone_api,
+        name, group, master_password, password, email, country, city, phone,
         comment, api_account_number, investor_password
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
       RETURNING id, account_number, platform, account_type, currency,
@@ -325,8 +277,8 @@ router.post('/create', authenticate, async (req, res, next) => {
       message: 'Account created successfully',
       data: {
         ...result.rows[0],
-        // Include non-sensitive account info from MetaAPI response
-        metaApiResponse: {
+        // Include non-sensitive account info from MT5 API response
+        mt5Response: {
           account: apiAccountNumber,
           // Don't expose passwords in response
         }

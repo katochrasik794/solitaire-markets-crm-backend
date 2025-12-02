@@ -5,6 +5,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import * as sumsubService from '../services/sumsub.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,7 +59,9 @@ const upload = multer({
 router.get('/status', authenticate, async (req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT id, status, document_type, submitted_at, reviewed_at, rejection_reason
+      `SELECT id, status, document_type, submitted_at, reviewed_at, rejection_reason,
+              sumsub_applicant_id, sumsub_verification_status, sumsub_review_result,
+              sumsub_review_comment, sumsub_level_name
        FROM kyc_verifications
        WHERE user_id = $1
        ORDER BY created_at DESC
@@ -166,6 +169,314 @@ router.post('/submit', authenticate, upload.fields([
     });
   } catch (error) {
     console.error('Submit KYC error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/kyc/sumsub/init
+ * Initialize Sumsub verification (create applicant + get access token)
+ * Called automatically when Verification page loads
+ */
+router.post('/sumsub/init', authenticate, async (req, res, next) => {
+  try {
+    // Get user data from database
+    const userResult = await pool.query(
+      'SELECT id, email, first_name, last_name, phone_code, phone_number, country, city FROM users WHERE id = $1',
+      [req.user.id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const userData = userResult.rows[0];
+
+    // Check if user already has a Sumsub applicant
+    const existingKyc = await pool.query(
+      'SELECT sumsub_applicant_id FROM kyc_verifications WHERE user_id = $1 AND sumsub_applicant_id IS NOT NULL ORDER BY created_at DESC LIMIT 1',
+      [req.user.id]
+    );
+
+    let applicantId;
+    let accessToken;
+
+    if (existingKyc.rows.length > 0 && existingKyc.rows[0].sumsub_applicant_id) {
+      // Use existing applicant
+      applicantId = existingKyc.rows[0].sumsub_applicant_id;
+      accessToken = await sumsubService.generateAccessToken(applicantId);
+    } else {
+      // Create new applicant
+      const applicant = await sumsubService.createApplicant(req.user.id, userData);
+      applicantId = applicant.id;
+
+      // Generate access token
+      accessToken = await sumsubService.generateAccessToken(applicantId);
+
+      // Create or update KYC record with Sumsub data
+      const kycCheck = await pool.query(
+        'SELECT id FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+        [req.user.id]
+      );
+
+      if (kycCheck.rows.length > 0) {
+        // Update existing record
+        await pool.query(
+          `UPDATE kyc_verifications 
+           SET sumsub_applicant_id = $1, sumsub_verification_status = 'init', sumsub_level_name = $2
+           WHERE id = $3`,
+          [applicantId, process.env.SUMSUB_LEVEL_NAME || 'basic-kyc-level', kycCheck.rows[0].id]
+        );
+      } else {
+        // Create new record
+        await pool.query(
+          `INSERT INTO kyc_verifications (user_id, sumsub_applicant_id, sumsub_verification_status, sumsub_level_name, status)
+           VALUES ($1, $2, 'init', $3, 'pending')`,
+          [req.user.id, applicantId, process.env.SUMSUB_LEVEL_NAME || 'basic-kyc-level']
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        applicantId,
+        accessToken,
+        levelName: process.env.SUMSUB_LEVEL_NAME || 'basic-kyc-level'
+      }
+    });
+  } catch (error) {
+    console.error('Sumsub init error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/kyc/sumsub/access-token/:applicantId
+ * Get access token for existing applicant
+ */
+router.get('/sumsub/access-token/:applicantId', authenticate, async (req, res, next) => {
+  try {
+    const { applicantId } = req.params;
+
+    // Verify applicant belongs to user
+    const kycCheck = await pool.query(
+      'SELECT id FROM kyc_verifications WHERE user_id = $1 AND sumsub_applicant_id = $2',
+      [req.user.id, applicantId]
+    );
+
+    if (kycCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Applicant not found for this user'
+      });
+    }
+
+    const accessToken = await sumsubService.generateAccessToken(applicantId);
+
+    res.json({
+      success: true,
+      data: {
+        applicantId,
+        accessToken
+      }
+    });
+  } catch (error) {
+    console.error('Get access token error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/kyc/sumsub/webhook
+ * Webhook endpoint for Sumsub callbacks
+ * No authentication required, but signature verification is performed
+ */
+router.post('/sumsub/webhook', express.raw({ type: 'application/json' }), async (req, res, next) => {
+  try {
+    const signature = req.headers['x-payload-digest'];
+    const payload = req.body.toString();
+
+    // Verify webhook signature
+    if (!sumsubService.verifyWebhookSignature(payload, signature)) {
+      console.error('Invalid webhook signature');
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid signature'
+      });
+    }
+
+    const eventData = JSON.parse(payload);
+    const processedEvent = sumsubService.handleWebhookEvent(eventData);
+
+    // Update KYC record based on webhook event
+    if (eventData.applicant && eventData.applicant.id) {
+      const applicantId = eventData.applicant.id;
+      const reviewResult = eventData.reviewResult || null;
+      const reviewStatus = eventData.reviewStatus || null;
+      const reviewComment = eventData.reviewComment || null;
+
+      // Find KYC record by applicant ID
+      const kycResult = await pool.query(
+        'SELECT id, user_id FROM kyc_verifications WHERE sumsub_applicant_id = $1',
+        [applicantId]
+      );
+
+      if (kycResult.rows.length > 0) {
+        const kycId = kycResult.rows[0].id;
+        const updateData = {
+          sumsub_verification_status: reviewStatus || eventData.type,
+          sumsub_webhook_received_at: new Date(),
+          sumsub_verification_result: eventData
+        };
+
+        if (reviewResult) {
+          updateData.sumsub_review_result = reviewResult;
+          // Update local status based on Sumsub result
+          if (reviewResult === 'GREEN') {
+            updateData.status = 'approved';
+            updateData.reviewed_at = new Date();
+          } else if (reviewResult === 'RED') {
+            updateData.status = 'rejected';
+            updateData.reviewed_at = new Date();
+          }
+        }
+
+        if (reviewComment) {
+          updateData.sumsub_review_comment = reviewComment;
+          if (reviewResult === 'RED') {
+            updateData.rejection_reason = reviewComment;
+          }
+        }
+
+        await pool.query(
+          `UPDATE kyc_verifications 
+           SET sumsub_verification_status = $1,
+               sumsub_webhook_received_at = $2,
+               sumsub_verification_result = $3,
+               sumsub_review_result = $4,
+               sumsub_review_comment = $5,
+               status = COALESCE($6, status),
+               reviewed_at = COALESCE($7, reviewed_at),
+               rejection_reason = COALESCE($8, rejection_reason)
+           WHERE id = $9`,
+          [
+            updateData.sumsub_verification_status,
+            updateData.sumsub_webhook_received_at,
+            JSON.stringify(updateData.sumsub_verification_result),
+            updateData.sumsub_review_result || null,
+            updateData.sumsub_review_comment || null,
+            updateData.status || null,
+            updateData.reviewed_at || null,
+            updateData.rejection_reason || null,
+            kycId
+          ]
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Webhook processed successfully'
+    });
+  } catch (error) {
+    console.error('Webhook processing error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/kyc/sumsub/status
+ * Get current Sumsub verification status for authenticated user
+ */
+router.get('/sumsub/status', authenticate, async (req, res, next) => {
+  try {
+    const kycResult = await pool.query(
+      `SELECT sumsub_applicant_id, sumsub_verification_status, sumsub_review_result,
+              sumsub_review_comment, sumsub_level_name, sumsub_verification_result
+       FROM kyc_verifications
+       WHERE user_id = $1 AND sumsub_applicant_id IS NOT NULL
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [req.user.id]
+    );
+
+    if (kycResult.rows.length === 0 || !kycResult.rows[0].sumsub_applicant_id) {
+      return res.json({
+        success: true,
+        data: null,
+        message: 'No Sumsub verification found'
+      });
+    }
+
+    const kycData = kycResult.rows[0];
+    let sumsubStatus = null;
+
+    // Optionally fetch fresh status from Sumsub API
+    if (req.query.refresh === 'true' && kycData.sumsub_applicant_id) {
+      try {
+        sumsubStatus = await sumsubService.getApplicantStatus(kycData.sumsub_applicant_id);
+      } catch (error) {
+        console.error('Error fetching status from Sumsub:', error);
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        applicantId: kycData.sumsub_applicant_id,
+        status: kycData.sumsub_verification_status,
+        reviewResult: kycData.sumsub_review_result,
+        reviewComment: kycData.sumsub_review_comment,
+        levelName: kycData.sumsub_level_name,
+        sumsubStatus: sumsubStatus || kycData.sumsub_verification_result
+      }
+    });
+  } catch (error) {
+    console.error('Get Sumsub status error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/kyc/sumsub/check-status
+ * Manually check status from Sumsub API
+ */
+router.post('/sumsub/check-status', authenticate, async (req, res, next) => {
+  try {
+    const kycResult = await pool.query(
+      'SELECT sumsub_applicant_id FROM kyc_verifications WHERE user_id = $1 AND sumsub_applicant_id IS NOT NULL ORDER BY created_at DESC LIMIT 1',
+      [req.user.id]
+    );
+
+    if (kycResult.rows.length === 0 || !kycResult.rows[0].sumsub_applicant_id) {
+      return res.status(404).json({
+        success: false,
+        message: 'No Sumsub applicant found for this user'
+      });
+    }
+
+    const applicantId = kycResult.rows[0].sumsub_applicant_id;
+    const status = await sumsubService.getApplicantStatus(applicantId);
+
+    // Update database with latest status
+    await pool.query(
+      `UPDATE kyc_verifications 
+       SET sumsub_verification_status = $1,
+           sumsub_verification_result = $2
+       WHERE sumsub_applicant_id = $3`,
+      [status.reviewStatus || status.status, JSON.stringify(status), applicantId]
+    );
+
+    res.json({
+      success: true,
+      data: status
+    });
+  } catch (error) {
+    console.error('Check Sumsub status error:', error);
     next(error);
   }
 });
