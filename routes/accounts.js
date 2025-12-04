@@ -51,12 +51,37 @@ router.get('/groups', authenticate, async (req, res, next) => {
  */
 router.get('/', authenticate, async (req, res, next) => {
   try {
+    // Be defensive about schema differences: api_account_number may not exist
+    const colsRes = await pool.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'trading_accounts'`
+    );
+    const existingCols = new Set(colsRes.rows.map((r) => r.column_name));
+
+    // Base columns we always expect
+    const baseCols = [
+      'id',
+      'account_number',
+      'platform',
+      'account_type',
+      'currency',
+      'is_swap_free',
+      'is_copy_account',
+      'leverage',
+      'reason_for_account',
+      'account_status',
+      'is_demo',
+      'trading_server',
+      'created_at'
+    ];
+
+    const optionalCols = [];
+    if (existingCols.has('api_account_number')) optionalCols.push('api_account_number');
+    if (existingCols.has('mt5_group_name')) optionalCols.push('mt5_group_name');
+
+    const selectCols = baseCols.concat(optionalCols);
+
     const result = await pool.query(
-      `SELECT 
-        id, account_number, platform, account_type, currency,
-        is_swap_free, is_copy_account, leverage, reason_for_account,
-        account_status, is_demo, trading_server, api_account_number, 
-        mt5_group_name, created_at
+      `SELECT ${selectCols.join(', ')}
        FROM trading_accounts
        WHERE user_id = $1
        ORDER BY created_at DESC`,
@@ -85,6 +110,67 @@ router.get('/', authenticate, async (req, res, next) => {
 });
 
 /**
+ * GET /api/accounts/activity
+ * Get account-related activity for the logged in user (account openings, etc.)
+ */
+router.get('/activity', authenticate, async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    // Total count of accounts for pagination
+    const countResult = await pool.query(
+      `SELECT COUNT(*) AS count
+       FROM trading_accounts
+       WHERE user_id = $1`,
+      [req.user.id]
+    );
+    const total = parseInt(countResult.rows[0]?.count || '0', 10);
+
+    // Fetch accounts as "activities" (account opening events)
+    const result = await pool.query(
+      `SELECT 
+         id,
+         account_number,
+         platform,
+         account_type,
+         currency,
+         created_at
+       FROM trading_accounts
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [req.user.id, limit, offset]
+    );
+
+    const items = result.rows.map((row) => ({
+      id: row.id,
+      time: row.created_at,
+      title: 'New account application',
+      status: 'Success',
+      accountNumber: row.account_number,
+      platform: row.platform,
+      accountType: row.account_type,
+      currency: row.currency
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        items,
+        total
+      }
+    });
+  } catch (error) {
+    console.error('Get account activity error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch account activity'
+    });
+  }
+});
+
+/**
  * POST /api/accounts/create
  * Create a new trading account via MetaAPI
  */
@@ -97,14 +183,15 @@ router.post('/create', authenticate, async (req, res, next) => {
       isSwapFree,
       isCopyAccount,
       reasonForAccount,
+      masterPassword,
       portalPassword
     } = req.body;
 
     // Validation
-    if (!platform || !mt5GroupId || !leverage || !portalPassword) {
+    if (!platform || !mt5GroupId || !leverage || !portalPassword || !masterPassword) {
       return res.status(400).json({
         success: false,
-        message: 'Platform, MT5 group, leverage, and portal password are required'
+        message: 'Platform, MT5 group, leverage, master password, and portal password are required'
       });
     }
 
@@ -154,7 +241,14 @@ router.post('/create', authenticate, async (req, res, next) => {
     }
 
     const mt5Group = groupResult.rows[0];
-    const groupName = mt5Group.group_name; // Use group_name for API
+    let groupName = mt5Group.group_name; // Original group name from DB
+
+    // Normalize backslashes for MT5 API:
+    // Collapse ANY run of backslashes into a single backslash so the final
+    // value is always like: real\Bbook\Pro\dynamic-2000x-10P
+    if (groupName) {
+      groupName = groupName.replace(/\\+/g, '\\');
+    }
     const currency = mt5Group.currency || 'USD';
 
     // Use leverage from form, but adjust if swap free
@@ -164,13 +258,13 @@ router.post('/create', authenticate, async (req, res, next) => {
     }
 
     // Generate passwords
-    // Master password: use portal password (custom format - user's portal password)
-    const masterPassword = portalPassword;
-    // Main password: generate random
+    // Master password: use value provided by user in form
+    const masterPasswordValue = masterPassword;
+    // Main password (internal only): generate random
     const mainPassword = generateRandomPassword(12);
-    // Investor password: generate random + "Inv@900" suffix
-    const investorPasswordBase = generateRandomPassword(12);
-    const investorPassword = `${investorPasswordBase}Inv@900`;
+    // Investor password: fixed prefix + random 3‑digit number, e.g. SolitaireINV@899
+    const investorDigits = Math.floor(100 + Math.random() * 900);
+    const investorPassword = `SolitaireINV@${investorDigits}`;
 
     // Prepare user data
     const accountName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'New Client Account';
@@ -211,17 +305,50 @@ router.post('/create', authenticate, async (req, res, next) => {
       });
     }
 
-    // Extract account number from MT5 response
-    const apiAccountNumber = mt5Response.account || mt5Response.accountNumber || mt5Response.login || mt5Response.Login || null;
+    // Extract account number (login) from MT5 response – be defensive and scan deeply
+    const findLogin = (obj) => {
+      if (!obj || typeof obj !== 'object') return null;
+      for (const [key, value] of Object.entries(obj)) {
+        const k = key.toLowerCase();
+        if (['login', 'account', 'accountid', 'loginid'].includes(k) && value) {
+          return value;
+        }
+        if (value && typeof value === 'object') {
+          const nested = findLogin(value);
+          if (nested) return nested;
+        }
+      }
+      return null;
+    };
+
+    let mt5Login =
+      mt5Response.account ||
+      mt5Response.accountNumber ||
+      mt5Response.login ||
+      mt5Response.Login ||
+      findLogin(mt5Response) ||
+      null;
     // Use the investor password we generated (with Inv@900 suffix)
     const finalInvestorPassword = investorPassword;
 
-    // Generate unique account number for our database
-    const accountNumberResult = await pool.query('SELECT generate_account_number() as account_number');
-    const accountNumber = accountNumberResult.rows[0].account_number;
+    let accountNumber;
+    if (mt5Login) {
+      // Use real MT5 login as our trading_accounts.account_number
+      accountNumber = String(mt5Login);
+    } else {
+      // Fallback: generate internal account number so DB insert still works
+      const accountNumberResult = await pool.query(
+        'SELECT generate_account_number() as account_number'
+      );
+      accountNumber = accountNumberResult.rows[0].account_number;
+      console.warn('MT5 API did not include a login; using internal account number', {
+        accountNumber,
+        rawResponse: mt5Response
+      });
+    }
 
     // Encrypt passwords before storing
-    const encryptedMasterPassword = encryptPassword(masterPassword);
+    const encryptedMasterPassword = encryptPassword(masterPasswordValue);
     const encryptedMainPassword = encryptPassword(mainPassword);
     const encryptedInvestorPassword = encryptPassword(finalInvestorPassword);
 
@@ -232,43 +359,75 @@ router.post('/create', authenticate, async (req, res, next) => {
     // For now, we'll use 'standard' as default, but you can map it based on group_name
     const accountType = groupName.includes('Pro') || groupName.includes('Premier') ? 'premier' : 'standard';
 
-    // Insert new account into database
-    const result = await pool.query(
-      `INSERT INTO trading_accounts (
-        user_id, account_number, platform, account_type, currency,
-        is_swap_free, is_copy_account, leverage, reason_for_account,
-        trading_server, mt5_group_id, mt5_group_name,
-        name, group, master_password, password, email, country, city, phone,
-        comment, api_account_number, investor_password
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
-      RETURNING id, account_number, platform, account_type, currency,
-        is_swap_free, is_copy_account, leverage, trading_server, 
-        api_account_number, mt5_group_name, created_at`,
-      [
-        req.user.id,
-        accountNumber,
-        platform,
-        accountType,
-        currency,
-        isSwapFree || false,
-        isCopyAccount || false,
-        finalLeverage,
-        reasonForAccount || null,
-        tradingServer,
-        mt5GroupId,
-        groupName,
-        accountName,
-        groupName,
-        encryptedMasterPassword,
-        encryptedMainPassword,
-        user.email,
-        country,
-        '', // Empty string - city not saved in database
-        phone,
-        reasonForAccount || '',
-        apiAccountNumber,
-        encryptedInvestorPassword
-      ]
+    // Discover existing columns on trading_accounts to be backward compatible
+    const colsRes = await pool.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'trading_accounts'`
+    );
+    const existingCols = new Set(colsRes.rows.map((r) => r.column_name));
+
+    const insertFields = [];
+    const insertValues = [];
+    const addField = (col, value) => {
+      if (existingCols.has(col)) {
+        insertFields.push(col);
+        insertValues.push(value);
+      }
+    };
+
+    addField('user_id', req.user.id);
+    addField('account_number', accountNumber);
+    addField('platform', platform);
+    addField('account_type', accountType);
+    addField('currency', currency);
+    addField('is_swap_free', isSwapFree || false);
+    addField('is_copy_account', isCopyAccount || false);
+    addField('leverage', finalLeverage);
+    addField('reason_for_account', reasonForAccount || null);
+    addField('trading_server', tradingServer);
+    addField('mt5_group_id', mt5GroupId);
+    addField('mt5_group_name', groupName);
+    addField('name', accountName);
+    addField('master_password', encryptedMasterPassword);
+    addField('password', encryptedMainPassword);
+    addField('email', user.email);
+    addField('country', country);
+    addField('city', ''); // city not stored yet
+    addField('phone', phone);
+    addField('comment', reasonForAccount || '');
+    addField('investor_password', encryptedInvestorPassword);
+
+    const placeholders = insertFields.map((_, idx) => `$${idx + 1}`).join(', ');
+
+    // First insert, returning only id
+    const insertResult = await pool.query(
+      `INSERT INTO trading_accounts (${insertFields.join(', ')})
+       VALUES (${placeholders})
+       RETURNING id`,
+      insertValues
+    );
+
+    const newId = insertResult.rows[0].id;
+
+    // Fetch a stable view of the new account for the response
+    const selectCols = [
+      'id',
+      'account_number',
+      'platform',
+      'account_type',
+      'currency',
+      'is_swap_free',
+      'is_copy_account',
+      'leverage',
+      'trading_server',
+      'created_at'
+    ];
+    if (existingCols.has('mt5_group_name')) {
+      selectCols.push('mt5_group_name');
+    }
+
+    const accountResult = await pool.query(
+      `SELECT ${selectCols.join(', ')} FROM trading_accounts WHERE id = $1`,
+      [newId]
     );
 
     // Return response with account details (don't include encrypted passwords)
@@ -276,12 +435,9 @@ router.post('/create', authenticate, async (req, res, next) => {
       success: true,
       message: 'Account created successfully',
       data: {
-        ...result.rows[0],
+        ...accountResult.rows[0],
         // Include non-sensitive account info from MT5 API response
-        mt5Response: {
-          account: apiAccountNumber,
-          // Don't expose passwords in response
-        }
+        mt5Response: mt5Login
       }
     });
   } catch (error) {

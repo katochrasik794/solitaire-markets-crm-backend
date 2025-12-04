@@ -1,5 +1,6 @@
 import express from 'express';
 import pool from '../config/database.js';
+import { createWalletForUser } from '../services/wallet.service.js';
 import { hashPassword, comparePassword, generateResetToken } from '../utils/helpers.js';
 import { validateRegister, validateLogin, validateForgotPassword, validateResetPassword } from '../middleware/validate.js';
 import { sendPasswordResetEmail } from '../services/email.js';
@@ -55,6 +56,14 @@ router.post('/register', validateRegister, async (req, res, next) => {
     );
 
     const user = result.rows[0];
+
+    // Automatically create wallet for this user
+    try {
+      await createWalletForUser(user.id);
+    } catch (walletError) {
+      console.error('Create wallet error (register):', walletError.message);
+      // Do not fail registration if wallet creation fails; user can retry later
+    }
 
     // Generate JWT token
     const token = jwt.sign(
