@@ -27,3 +27,4 @@ CREATE INDEX IF NOT EXISTS idx_kyc_sumsub_applicant_id ON kyc_verifications(sums
 CREATE INDEX IF NOT EXISTS idx_kyc_sumsub_status ON kyc_verifications(sumsub_verification_status);
 
 
+

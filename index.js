@@ -7,6 +7,7 @@ import authRoutes from './routes/auth.js';
 import countriesRoutes from './routes/countries.js';
 import kycRoutes from './routes/kyc.js';
 import accountsRoutes from './routes/accounts.js';
+import walletRoutes from './routes/wallet.js';
 import adminRoutes from './routes/admin.js';
 import pool from './config/database.js';
 
@@ -67,6 +68,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/countries', countriesRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/accounts', accountsRoutes);
+app.use('/api/wallet', walletRoutes);
 app.use('/api/admin', adminRoutes);
 
 // Debug: Log registered routes
@@ -75,6 +77,7 @@ console.log('  - /api/auth');
 console.log('  - /api/countries');
 console.log('  - /api/kyc');
 console.log('  - /api/accounts');
+console.log('  - /api/wallet');
 console.log('  - /api/admin');
 
 // Debug endpoint to list all registered routes

@@ -327,3 +327,39 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- ============================================
+-- Wallets & Wallet Transactions
+-- ============================================
+
+-- Wallets table: one wallet per user (USD)
+CREATE TABLE IF NOT EXISTS wallets (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    wallet_number VARCHAR(50) UNIQUE NOT NULL,
+    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+    balance DECIMAL(18, 8) NOT NULL DEFAULT 0,
+    status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);
+
+-- Wallet transactions history
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+    id SERIAL PRIMARY KEY,
+    wallet_id INTEGER NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
+    type VARCHAR(20) NOT NULL CHECK (type IN ('deposit','withdrawal','transfer_in','transfer_out')),
+    source VARCHAR(20) NOT NULL CHECK (source IN ('wallet','mt5')),
+    target VARCHAR(20) NOT NULL CHECK (target IN ('wallet','mt5')),
+    amount DECIMAL(18, 8) NOT NULL,
+    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+    mt5_account_number VARCHAR(50),
+    reference TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_tx_wallet_id ON wallet_transactions(wallet_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_tx_type ON wallet_transactions(type);
+CREATE INDEX IF NOT EXISTS idx_wallet_tx_created_at ON wallet_transactions(created_at);
+
