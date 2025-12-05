@@ -28,3 +28,4 @@ CREATE INDEX IF NOT EXISTS idx_kyc_sumsub_status ON kyc_verifications(sumsub_ver
 
 
 
+
