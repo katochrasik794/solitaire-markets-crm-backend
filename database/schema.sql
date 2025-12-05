@@ -363,3 +363,185 @@ CREATE INDEX IF NOT EXISTS idx_wallet_tx_wallet_id ON wallet_transactions(wallet
 CREATE INDEX IF NOT EXISTS idx_wallet_tx_type ON wallet_transactions(type);
 CREATE INDEX IF NOT EXISTS idx_wallet_tx_created_at ON wallet_transactions(created_at);
 
+-- Trigger to automatically update updated_at for wallets
+CREATE TRIGGER update_wallets_updated_at BEFORE UPDATE ON wallets
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- Manual Payment Gateways Table
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS manual_payment_gateways (
+    id SERIAL PRIMARY KEY,
+    
+    -- Gateway Type
+    type VARCHAR(50) NOT NULL CHECK (type IN (
+        'UPI',
+        'USDT_TRC20',
+        'USDT_ERC20',
+        'USDT_BEP20',
+        'Bank_Transfer',
+        'Bitcoin',
+        'Ethereum',
+        'Other_Crypto',
+        'Debit_Card',
+        'Other'
+    )),
+    
+    -- Gateway Name/Label
+    name VARCHAR(255) NOT NULL,
+    
+    -- Type-specific data (JSONB for flexibility)
+    -- UPI: {"vpa": "username@bank"}
+    -- USDT: {"address": "Txxxxxxxxxxxxx", "network": "TRC20"}
+    -- Bank: {"account_number": "xxx", "ifsc": "xxx", "bank_name": "xxx", "account_holder": "xxx"}
+    type_data JSONB DEFAULT '{}'::jsonb,
+    
+    -- Icon file path/URL
+    icon_path VARCHAR(500),
+    
+    -- QR Code file path/URL
+    qr_code_path VARCHAR(500),
+    
+    -- Status
+    is_active BOOLEAN DEFAULT TRUE,
+    
+    -- Recommended flag
+    is_recommended BOOLEAN DEFAULT FALSE,
+    
+    -- Display order
+    display_order INTEGER DEFAULT 0,
+    
+    -- Instructions for users
+    instructions TEXT,
+    
+    -- Timestamps
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Create indexes for manual_payment_gateways
+CREATE INDEX IF NOT EXISTS idx_manual_gateways_type ON manual_payment_gateways(type);
+CREATE INDEX IF NOT EXISTS idx_manual_gateways_active ON manual_payment_gateways(is_active);
+CREATE INDEX IF NOT EXISTS idx_manual_gateways_recommended ON manual_payment_gateways(is_recommended);
+CREATE INDEX IF NOT EXISTS idx_manual_gateways_display_order ON manual_payment_gateways(display_order);
+
+-- Unique constraint on name
+CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_gateways_name_unique ON manual_payment_gateways(LOWER(name));
+
+-- Trigger to automatically update updated_at for manual_payment_gateways
+CREATE TRIGGER update_manual_payment_gateways_updated_at BEFORE UPDATE ON manual_payment_gateways
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- Deposit Requests Table
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS deposit_requests (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    gateway_id INTEGER NOT NULL REFERENCES manual_payment_gateways(id) ON DELETE CASCADE,
+    amount DECIMAL(18, 8) NOT NULL,
+    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+    converted_amount DECIMAL(18, 8),
+    converted_currency VARCHAR(3),
+    transaction_hash VARCHAR(255),
+    proof_path VARCHAR(500),
+    deposit_to_type VARCHAR(20) NOT NULL DEFAULT 'wallet' CHECK (deposit_to_type IN ('wallet', 'mt5')),
+    mt5_account_id VARCHAR(50),
+    wallet_id INTEGER REFERENCES wallets(id) ON DELETE SET NULL,
+    wallet_number VARCHAR(50),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    admin_notes TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Create indexes for deposit_requests
+CREATE INDEX IF NOT EXISTS idx_deposit_requests_user_id ON deposit_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_deposit_requests_gateway_id ON deposit_requests(gateway_id);
+CREATE INDEX IF NOT EXISTS idx_deposit_requests_status ON deposit_requests(status);
+CREATE INDEX IF NOT EXISTS idx_deposit_requests_created_at ON deposit_requests(created_at);
+CREATE INDEX IF NOT EXISTS idx_deposit_requests_deposit_to_type ON deposit_requests(deposit_to_type);
+CREATE INDEX IF NOT EXISTS idx_deposit_requests_mt5_account_id ON deposit_requests(mt5_account_id);
+CREATE INDEX IF NOT EXISTS idx_deposit_requests_wallet_id ON deposit_requests(wallet_id);
+CREATE INDEX IF NOT EXISTS idx_deposit_requests_wallet_number ON deposit_requests(wallet_number);
+
+-- Trigger to automatically update updated_at for deposit_requests
+CREATE TRIGGER update_deposit_requests_updated_at 
+    BEFORE UPDATE ON deposit_requests
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- Internal Transfers Table
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS internal_transfers (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    from_type VARCHAR(20) NOT NULL CHECK (from_type IN ('wallet', 'mt5')),
+    from_account VARCHAR(50) NOT NULL, -- wallet_number or mt5 account_number
+    to_type VARCHAR(20) NOT NULL CHECK (to_type IN ('wallet', 'mt5')),
+    to_account VARCHAR(50) NOT NULL, -- wallet_number or mt5 account_number
+    amount DECIMAL(18, 8) NOT NULL,
+    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+    mt5_account_number VARCHAR(50), -- MT5 account involved (if any)
+    status VARCHAR(20) NOT NULL DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'failed')),
+    reference TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Create indexes for internal_transfers
+CREATE INDEX IF NOT EXISTS idx_internal_transfers_user_id ON internal_transfers(user_id);
+CREATE INDEX IF NOT EXISTS idx_internal_transfers_from_type ON internal_transfers(from_type);
+CREATE INDEX IF NOT EXISTS idx_internal_transfers_to_type ON internal_transfers(to_type);
+CREATE INDEX IF NOT EXISTS idx_internal_transfers_status ON internal_transfers(status);
+CREATE INDEX IF NOT EXISTS idx_internal_transfers_created_at ON internal_transfers(created_at);
+CREATE INDEX IF NOT EXISTS idx_internal_transfers_mt5_account_number ON internal_transfers(mt5_account_number);
+
+-- Trigger to automatically update updated_at for internal_transfers
+CREATE TRIGGER update_internal_transfers_updated_at 
+    BEFORE UPDATE ON internal_transfers
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- Trading Accounts Additional Fields
+-- ============================================
+
+-- Add balance, equity, credit, free_margin, margin columns to trading_accounts if they don't exist
+DO $$ 
+BEGIN
+    -- Add balance column
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'trading_accounts' AND column_name = 'balance') THEN
+        ALTER TABLE trading_accounts ADD COLUMN balance DECIMAL(18, 8) DEFAULT 0;
+    END IF;
+    
+    -- Add equity column
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'trading_accounts' AND column_name = 'equity') THEN
+        ALTER TABLE trading_accounts ADD COLUMN equity DECIMAL(18, 8) DEFAULT 0;
+    END IF;
+    
+    -- Add credit column
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'trading_accounts' AND column_name = 'credit') THEN
+        ALTER TABLE trading_accounts ADD COLUMN credit DECIMAL(18, 8) DEFAULT 0;
+    END IF;
+    
+    -- Add free_margin column
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'trading_accounts' AND column_name = 'free_margin') THEN
+        ALTER TABLE trading_accounts ADD COLUMN free_margin DECIMAL(18, 8) DEFAULT 0;
+    END IF;
+    
+    -- Add margin column
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'trading_accounts' AND column_name = 'margin') THEN
+        ALTER TABLE trading_accounts ADD COLUMN margin DECIMAL(18, 8) DEFAULT 0;
+    END IF;
+END $$;
+

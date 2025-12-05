@@ -7,6 +7,8 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+const MT5_API_URL = process.env.MT5_API_URL || 'http://13.43.216.232:5003/api';
+
 const router = express.Router();
 
 /**
@@ -46,12 +48,97 @@ router.get('/groups', authenticate, async (req, res, next) => {
 });
 
 /**
+ * GET /api/accounts/:accountNumber/balance
+ * Get real-time balance data from MT5 API for a specific account
+ * This route must come before the root '/' route to avoid route conflicts
+ */
+router.get('/:accountNumber/balance', authenticate, async (req, res) => {
+  try {
+    const { accountNumber } = req.params;
+    const userId = req.user.id;
+
+    // Verify the account belongs to this user
+    const accountCheck = await pool.query(
+      'SELECT id, account_number, user_id FROM trading_accounts WHERE account_number = $1 AND user_id = $2 AND platform = \'MT5\'',
+      [accountNumber, userId]
+    );
+
+    if (accountCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Account not found or does not belong to you'
+      });
+    }
+
+    // Fetch balance from MT5 API
+    try {
+      const login = parseInt(accountNumber, 10);
+      if (Number.isNaN(login)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid account number'
+        });
+      }
+
+      const profileResult = await mt5Service.getClientProfile(login);
+      
+      if (profileResult.success && profileResult.data && profileResult.data.Success && profileResult.data.Data) {
+        const mt5Data = profileResult.data.Data;
+        
+        // Update balance in database
+        await pool.query(
+          `UPDATE trading_accounts 
+           SET balance = $1, equity = $2, credit = $3, free_margin = $4, margin = $5, leverage = $6, updated_at = NOW()
+           WHERE account_number = $7 AND user_id = $8`,
+          [
+            parseFloat(mt5Data.Balance || 0),
+            parseFloat(mt5Data.Equity || 0),
+            parseFloat(mt5Data.Credit || 0),
+            parseFloat(mt5Data.MarginFree || 0),
+            parseFloat(mt5Data.Margin || 0),
+            parseInt(mt5Data.Leverage || 2000),
+            accountNumber,
+            userId
+          ]
+        );
+
+        res.json({
+          success: true,
+          data: {
+            leverage: mt5Data.Leverage || 2000,
+            equity: parseFloat(mt5Data.Equity || 0),
+            balance: parseFloat(mt5Data.Balance || 0),
+            margin: parseFloat(mt5Data.Margin || 0),
+            credit: parseFloat(mt5Data.Credit || 0),
+            marginFree: parseFloat(mt5Data.MarginFree || 0)
+          }
+        });
+      } else {
+        throw new Error(profileResult.data?.Message || 'Failed to fetch client profile');
+      }
+    } catch (mt5Error) {
+      console.error('MT5 API error:', mt5Error);
+      res.status(500).json({
+        success: false,
+        error: mt5Error.message || 'Failed to fetch balance from MT5'
+      });
+    }
+  } catch (error) {
+    console.error('Get account balance error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to fetch account balance'
+    });
+  }
+});
+
+/**
  * GET /api/accounts
  * Get all trading accounts for logged in user
  */
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    // Be defensive about schema differences: api_account_number may not exist
+    // Check for optional columns
     const colsRes = await pool.query(
       `SELECT column_name FROM information_schema.columns WHERE table_name = 'trading_accounts'`
     );
@@ -75,7 +162,6 @@ router.get('/', authenticate, async (req, res, next) => {
     ];
 
     const optionalCols = [];
-    if (existingCols.has('api_account_number')) optionalCols.push('api_account_number');
     if (existingCols.has('mt5_group_name')) optionalCols.push('mt5_group_name');
 
     const selectCols = baseCols.concat(optionalCols);

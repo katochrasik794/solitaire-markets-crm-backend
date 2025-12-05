@@ -170,7 +170,7 @@ router.post('/transfer-to-mt5', authenticate, async (req, res, next) => {
     const accRes = await pool.query(
       `SELECT id, account_number, platform 
        FROM trading_accounts 
-       WHERE user_id = $1 AND (account_number = $2 OR api_account_number = $2) AND platform = 'MT5'`,
+       WHERE user_id = $1 AND account_number = $2 AND platform = 'MT5'`,
       [req.user.id, String(mt5Account)]
     );
     if (accRes.rows.length === 0) {
@@ -188,10 +188,7 @@ router.post('/transfer-to-mt5', authenticate, async (req, res, next) => {
       });
     }
 
-    // 1) Call MT5 API to add balance
-    await addBalance(login, numericAmount, 'Internal transfer from wallet');
-
-    // 2) Adjust wallet balance
+    // Get wallet for internal transfer record
     const wallet = await getWalletByUserId(req.user.id);
     if (!wallet) {
       return res.status(400).json({
@@ -200,6 +197,10 @@ router.post('/transfer-to-mt5', authenticate, async (req, res, next) => {
       });
     }
 
+    // 1) Call MT5 API to add balance
+    await addBalance(login, numericAmount, 'Deposit');
+
+    // 2) Adjust wallet balance
     const result = await adjustWalletBalance(
       {
         walletId: wallet.id,
@@ -211,6 +212,26 @@ router.post('/transfer-to-mt5', authenticate, async (req, res, next) => {
         reference: 'Wallet → MT5 transfer'
       },
       pool
+    );
+
+    // 3) Save to internal_transfers table
+    await pool.query(
+      `INSERT INTO internal_transfers 
+       (user_id, from_type, from_account, to_type, to_account, amount, currency, mt5_account_number, status, reference)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        req.user.id,
+        'wallet',
+        wallet.wallet_number,
+        'mt5',
+        String(mt5Account),
+        numericAmount,
+        wallet.currency || 'USD',
+        String(mt5Account),
+        'completed',
+        'Internal transfer: Wallet → MT5'
+      ]
     );
 
     res.json({
@@ -241,7 +262,7 @@ router.post('/transfer-from-mt5', authenticate, async (req, res, next) => {
     const accRes = await pool.query(
       `SELECT id, account_number, platform 
        FROM trading_accounts 
-       WHERE user_id = $1 AND (account_number = $2 OR api_account_number = $2) AND platform = 'MT5'`,
+       WHERE user_id = $1 AND account_number = $2 AND platform = 'MT5'`,
       [req.user.id, String(mt5Account)]
     );
     if (accRes.rows.length === 0) {
@@ -259,10 +280,7 @@ router.post('/transfer-from-mt5', authenticate, async (req, res, next) => {
       });
     }
 
-    // 1) Call MT5 API to deduct balance
-    await deductBalance(login, numericAmount, 'Internal transfer to wallet');
-
-    // 2) Adjust wallet balance
+    // Get wallet for internal transfer record
     const wallet = await getWalletByUserId(req.user.id);
     if (!wallet) {
       return res.status(400).json({
@@ -271,6 +289,10 @@ router.post('/transfer-from-mt5', authenticate, async (req, res, next) => {
       });
     }
 
+    // 1) Call MT5 API to deduct balance
+    await deductBalance(login, numericAmount, 'Deposit');
+
+    // 2) Adjust wallet balance
     const result = await adjustWalletBalance(
       {
         walletId: wallet.id,
@@ -284,6 +306,26 @@ router.post('/transfer-from-mt5', authenticate, async (req, res, next) => {
       pool
     );
 
+    // 3) Save to internal_transfers table
+    await pool.query(
+      `INSERT INTO internal_transfers 
+       (user_id, from_type, from_account, to_type, to_account, amount, currency, mt5_account_number, status, reference)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        req.user.id,
+        'mt5',
+        String(mt5Account),
+        'wallet',
+        wallet.wallet_number,
+        numericAmount,
+        wallet.currency || 'USD',
+        String(mt5Account),
+        'completed',
+        'Internal transfer: MT5 → Wallet'
+      ]
+    );
+
     res.json({
       success: true,
       message: 'Transfer from MT5 successful',
@@ -291,6 +333,44 @@ router.post('/transfer-from-mt5', authenticate, async (req, res, next) => {
     });
   } catch (error) {
     console.error('Wallet transfer-from-mt5 error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/wallet/internal-transfers
+ * Get internal transfer history for the logged-in user
+ */
+router.get('/internal-transfers', authenticate, async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    const countRes = await pool.query(
+      'SELECT COUNT(*) AS count FROM internal_transfers WHERE user_id = $1',
+      [req.user.id]
+    );
+    const total = parseInt(countRes.rows[0]?.count || '0', 10);
+
+    const transfersRes = await pool.query(
+      `SELECT id, from_type, from_account, to_type, to_account, amount, currency, 
+              mt5_account_number, status, reference, created_at
+       FROM internal_transfers
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [req.user.id, limit, offset]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        items: transfersRes.rows,
+        total
+      }
+    });
+  } catch (error) {
+    console.error('Get internal transfers error:', error);
     next(error);
   }
 });
