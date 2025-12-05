@@ -6,6 +6,60 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import * as mt5Service from '../services/mt5.service.js';
 import { createWalletForUser } from '../services/wallet.service.js';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Helper function to get base URL
+const getBaseUrl = () => {
+  if (process.env.BACKEND_API_URL) {
+    return process.env.BACKEND_API_URL.replace('/api', '');
+  }
+  if (process.env.API_URL) {
+    return process.env.API_URL.replace('/api', '');
+  }
+  return 'http://localhost:5000';
+};
+
+// Create uploads directory for payment gateways
+const gatewaysUploadsDir = path.join(__dirname, '../uploads/gateways');
+if (!fs.existsSync(gatewaysUploadsDir)) {
+  fs.mkdirSync(gatewaysUploadsDir, { recursive: true });
+}
+
+// Configure multer for payment gateway file uploads
+const gatewayStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, gatewaysUploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, `gateway-${uniqueSuffix}${path.extname(file.originalname)}`);
+  }
+});
+
+const gatewayUpload = multer({
+  storage: gatewayStorage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|webp|svg/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only image files (JPEG, PNG, GIF, WEBP, SVG) are allowed'));
+    }
+  }
+});
 
 const router = express.Router();
 
@@ -624,7 +678,7 @@ router.get('/users/with-balance', authenticateAdmin, async (req, res, next) => {
     // Get all trading accounts for these users
     const userIds = usersWithAccountsResult.rows.map(u => u.id);
     const accountsResult = await pool.query(
-      `SELECT user_id, account_number, api_account_number
+      `SELECT user_id, account_number
        FROM trading_accounts
        WHERE user_id = ANY($1::int[]) AND platform = 'MT5'
        ORDER BY user_id, created_at DESC`,
@@ -637,8 +691,7 @@ router.get('/users/with-balance', authenticateAdmin, async (req, res, next) => {
       if (!accountsByUser[acc.user_id]) {
         accountsByUser[acc.user_id] = [];
       }
-      // Use api_account_number if available, otherwise account_number
-      const accountId = acc.api_account_number || acc.account_number;
+      const accountId = acc.account_number;
       accountsByUser[acc.user_id].push({
         accountId: accountId,
         accountNumber: acc.account_number
@@ -1128,29 +1181,22 @@ router.get('/mt5/users', authenticateAdmin, async (req, res, next) => {
     const { limit = 500, country } = req.query;
 
     // Check which optional columns exist
-    let hasApiAccountNumber = false;
     let hasMt5GroupName = false;
     try {
       const colCheck = await pool.query(`
         SELECT column_name 
         FROM information_schema.columns 
         WHERE table_name = 'trading_accounts' 
-        AND column_name IN ('api_account_number', 'mt5_group_name')
+        AND column_name = 'mt5_group_name'
       `);
-      const existingCols = colCheck.rows.map(r => r.column_name);
-      hasApiAccountNumber = existingCols.includes('api_account_number');
-      hasMt5GroupName = existingCols.includes('mt5_group_name');
+      hasMt5GroupName = colCheck.rows.length > 0;
     } catch (e) {
-      // If check fails, assume columns don't exist
-      hasApiAccountNumber = false;
+      // If check fails, assume column doesn't exist
       hasMt5GroupName = false;
     }
 
     // Get all trading accounts with user info
-    // Use account_number if api_account_number doesn't exist
-    const apiAccountField = hasApiAccountNumber 
-      ? 'COALESCE(ta.api_account_number, ta.account_number) as api_account_number'
-      : 'ta.account_number as api_account_number';
+    const apiAccountField = 'ta.account_number as account_number';
     
     const mt5GroupField = hasMt5GroupName
       ? 'ta.mt5_group_name'
@@ -1222,7 +1268,7 @@ router.get('/mt5/users', authenticateAdmin, async (req, res, next) => {
       }
 
       // Add account to user's MT5Account array
-      const accountId = row.api_account_number || row.account_number;
+      const accountId = row.account_number;
       usersMap[userId].MT5Account.push({
         accountId: accountId,
         accountNumber: row.account_number,
@@ -1611,7 +1657,7 @@ router.get('/mt5/account/:accountId', authenticateAdmin, async (req, res, next) 
         u.country as user_country
       FROM trading_accounts ta
       INNER JOIN users u ON ta.user_id = u.id
-      WHERE ta.api_account_number = $1 OR ta.account_number = $1`,
+      WHERE ta.account_number = $1`,
       [accountId]
     );
 
@@ -1925,7 +1971,7 @@ router.post('/mt5/assign', authenticateAdmin, async (req, res, next) => {
 
     // Check if account exists and is not already assigned
     const accountResult = await pool.query(
-      'SELECT id, user_id FROM trading_accounts WHERE api_account_number = $1 OR account_number = $1',
+      'SELECT id, user_id FROM trading_accounts WHERE account_number = $1',
       [accountId.toString()]
     );
 
@@ -1934,7 +1980,7 @@ router.post('/mt5/assign', authenticateAdmin, async (req, res, next) => {
       const insertResult = await pool.query(
         `INSERT INTO trading_accounts (
           user_id, account_number, platform, account_type, currency,
-          api_account_number, account_status, trading_server
+          account_number, account_status, trading_server
         ) VALUES ($1, $2, 'MT5', 'standard', 'USD', $3, 'active', 'Solitaire Markets-Live')
         RETURNING *`,
         [userId, accountId.toString(), accountId.toString()]
@@ -2055,7 +2101,7 @@ router.get('/activity-logs', authenticateAdmin, async (req, res, next) => {
         `SELECT 
           ta.id,
           ta.account_number,
-          COALESCE(ta.api_account_number, ta.account_number) as api_account_number,
+          ta.account_number as account_number,
           ta.platform,
           ta.account_type,
           ta.account_status,
@@ -2084,7 +2130,7 @@ router.get('/activity-logs', authenticateAdmin, async (req, res, next) => {
           time: row.created_at,
           user: name,
           email: row.email,
-          accountId: row.api_account_number || row.account_number,
+          accountId: row.account_number,
           amount: null,
           status: row.account_status === 'active' ? 'Opened' : row.account_status,
           details: `${row.platform} ${row.account_type} account`
@@ -2141,6 +2187,928 @@ router.get('/activity-logs', authenticateAdmin, async (req, res, next) => {
     res.status(500).json({
       ok: false,
       error: error.message || 'Failed to fetch activity logs'
+    });
+  }
+});
+
+/**
+ * GET /api/admin/manual-gateways
+ * Get all manual payment gateways
+ */
+router.get('/manual-gateways', authenticateAdmin, async (req, res, next) => {
+  try {
+    // Check if table exists first
+    const tableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'manual_payment_gateways'
+      )`
+    );
+
+    if (!tableCheck.rows[0].exists) {
+      return res.json({
+        success: true,
+        gateways: [],
+        message: 'Table not found. Please run the migration SQL file.'
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT 
+        id,
+        type,
+        name,
+        type_data,
+        icon_path,
+        qr_code_path,
+        is_active,
+        COALESCE(is_recommended, false) as is_recommended,
+        display_order,
+        instructions,
+        created_at,
+        updated_at,
+        -- Extract type-specific fields from type_data JSONB
+        CASE 
+          WHEN type = 'UPI' THEN type_data->>'vpa'
+          WHEN type IN ('USDT_TRC20', 'USDT_ERC20', 'USDT_BEP20', 'Bitcoin', 'Ethereum', 'Other_Crypto') THEN type_data->>'address'
+          ELSE NULL
+        END as vpa_address,
+        CASE 
+          WHEN type IN ('USDT_TRC20', 'USDT_ERC20', 'USDT_BEP20', 'Bitcoin', 'Ethereum', 'Other_Crypto') THEN type_data->>'address'
+          ELSE NULL
+        END as crypto_address,
+        CASE 
+          WHEN type = 'Bank_Transfer' THEN type_data->>'bank_name'
+          ELSE NULL
+        END as bank_name,
+        CASE 
+          WHEN type = 'Bank_Transfer' THEN type_data->>'account_name'
+          ELSE NULL
+        END as account_name,
+        CASE 
+          WHEN type = 'Bank_Transfer' THEN type_data->>'account_number'
+          ELSE NULL
+        END as account_number,
+        CASE 
+          WHEN type = 'Bank_Transfer' THEN COALESCE(type_data->>'ifsc', type_data->>'swift')
+          ELSE NULL
+        END as ifsc_code,
+        CASE 
+          WHEN type = 'Bank_Transfer' THEN type_data->>'swift'
+          ELSE NULL
+        END as swift_code,
+        CASE 
+          WHEN type = 'Bank_Transfer' THEN type_data->>'account_type'
+          ELSE NULL
+        END as account_type,
+        CASE 
+          WHEN type = 'Bank_Transfer' THEN type_data->>'country_code'
+          ELSE NULL
+        END as country_code,
+        CASE 
+          WHEN type = 'Other' THEN type_data->>'details'
+          ELSE NULL
+        END as details,
+        -- Construct file URLs
+        CASE 
+          WHEN icon_path IS NOT NULL THEN icon_path
+          ELSE NULL
+        END as icon_url,
+        CASE 
+          WHEN qr_code_path IS NOT NULL THEN qr_code_path
+          ELSE NULL
+        END as qr_code_url
+      FROM manual_payment_gateways
+      ORDER BY display_order ASC, created_at DESC`
+    );
+
+    // Map backend types to frontend types
+    const typeMapping = {
+      'UPI': 'upi',
+      'Bank_Transfer': 'wire',
+      'USDT_TRC20': 'crypto',
+      'USDT_ERC20': 'crypto',
+      'USDT_BEP20': 'crypto',
+      'Bitcoin': 'crypto',
+      'Ethereum': 'crypto',
+      'Other_Crypto': 'crypto',
+      'Other': 'local'
+    };
+
+    const mappedGateways = result.rows.map(row => ({
+      ...row,
+      type: typeMapping[row.type] || row.type.toLowerCase(),
+      is_recommended: row.is_recommended || false
+    }));
+
+    res.json({
+      success: true,
+      gateways: mappedGateways || []
+    });
+  } catch (error) {
+    console.error('Get manual gateways error:', error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      detail: error.detail
+    });
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to fetch manual gateways',
+      gateways: []
+    });
+  }
+});
+
+/**
+ * POST /api/admin/manual-gateways
+ * Create a new manual payment gateway
+ */
+router.post('/manual-gateways', authenticateAdmin, gatewayUpload.fields([
+  { name: 'icon', maxCount: 1 },
+  { name: 'qr_code', maxCount: 1 }
+]), async (req, res, next) => {
+  try {
+    // Extract form data from req.body (multer puts text fields here)
+    const type = req.body.type;
+    const name = req.body.name;
+    const is_active = req.body.is_active === 'true' || req.body.is_active === true;
+    const is_recommended = req.body.is_recommended === 'true' || req.body.is_recommended === true;
+    const display_order = parseInt(req.body.display_order) || 0;
+    const instructions = req.body.instructions || null;
+    
+    if (!type || !name) {
+      return res.status(400).json({
+        success: false,
+        error: 'Type and name are required'
+      });
+    }
+    
+    // Build type_data JSONB based on type
+    let typeData = {};
+    
+    if (type === 'UPI' || type === 'upi') {
+      typeData = { vpa: req.body.vpa_address || '' };
+    } else if (['USDT_TRC20', 'USDT_ERC20', 'USDT_BEP20', 'Bitcoin', 'Ethereum', 'Other_Crypto', 'crypto'].includes(type)) {
+      const network = type === 'crypto' ? 'TRC20' : type.replace('USDT_', '').replace('Bitcoin', 'BTC').replace('Ethereum', 'ETH');
+      typeData = { 
+        address: req.body.crypto_address || '',
+        network: network
+      };
+    } else if (type === 'Bank_Transfer' || type === 'wire') {
+      typeData = {
+        bank_name: req.body.bank_name || '',
+        account_name: req.body.account_name || '',
+        account_number: req.body.account_number || '',
+        ifsc: req.body.ifsc_code || '',
+        swift: req.body.swift_code || '',
+        account_type: req.body.account_type || '',
+        country_code: req.body.country_code || ''
+      };
+    } else if (type === 'Other' || type === 'local') {
+      typeData = { details: req.body.details || '' };
+    }
+
+    // Normalize type
+    const normalizedType = type === 'upi' ? 'UPI' 
+      : type === 'crypto' ? 'USDT_TRC20'
+      : type === 'wire' ? 'Bank_Transfer'
+      : type === 'local' ? 'Other'
+      : type.toUpperCase();
+
+    // Handle file uploads
+    let iconPath = null;
+    let qrCodePath = null;
+    
+    if (req.files && req.files.icon && req.files.icon[0]) {
+      iconPath = `/uploads/gateways/${req.files.icon[0].filename}`;
+    }
+    
+    if (req.files && req.files.qr_code && req.files.qr_code[0]) {
+      qrCodePath = `/uploads/gateways/${req.files.qr_code[0].filename}`;
+    }
+
+    const result = await pool.query(
+      `INSERT INTO manual_payment_gateways 
+        (type, name, type_data, icon_path, qr_code_path, is_active, is_recommended, display_order, instructions)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *`,
+      [
+        normalizedType,
+        name,
+        JSON.stringify(typeData),
+        iconPath,
+        qrCodePath,
+        is_active,
+        is_recommended,
+        display_order,
+        instructions
+      ]
+    );
+
+    const gateway = result.rows[0];
+    
+    // Parse type_data for response
+    const parsedTypeData = typeof gateway.type_data === 'string' 
+      ? JSON.parse(gateway.type_data) 
+      : gateway.type_data;
+    
+    // Map backend type to frontend type
+    const typeMapping = {
+      'UPI': 'upi',
+      'Bank_Transfer': 'wire',
+      'USDT_TRC20': 'crypto',
+      'USDT_ERC20': 'crypto',
+      'USDT_BEP20': 'crypto',
+      'Bitcoin': 'crypto',
+      'Ethereum': 'crypto',
+      'Other_Crypto': 'crypto',
+      'Other': 'local'
+    };
+
+    // Format response to match frontend expectations
+    const formattedGateway = {
+      id: gateway.id,
+      type: typeMapping[gateway.type] || gateway.type.toLowerCase(),
+      name: gateway.name,
+      is_active: gateway.is_active,
+      is_recommended: gateway.is_recommended || false,
+      icon_url: gateway.icon_path,
+      qr_code_url: gateway.qr_code_path,
+      vpa_address: parsedTypeData.vpa || null,
+      crypto_address: parsedTypeData.address || null,
+      bank_name: parsedTypeData.bank_name || null,
+      account_name: parsedTypeData.account_name || null,
+      account_number: parsedTypeData.account_number || null,
+      ifsc_code: parsedTypeData.ifsc || null,
+      swift_code: parsedTypeData.swift || null,
+      account_type: parsedTypeData.account_type || null,
+      country_code: parsedTypeData.country_code || null,
+      details: parsedTypeData.details || null
+    };
+
+    res.json({
+      success: true,
+      gateway: formattedGateway
+    });
+  } catch (error) {
+    console.error('Create manual gateway error:', error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      stack: error.stack
+    });
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to create manual gateway'
+    });
+  }
+});
+
+/**
+ * PATCH /api/admin/manual-gateways/:id/toggle-status
+ * Toggle gateway active/inactive status
+ */
+router.patch('/manual-gateways/:id/toggle-status', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!id || isNaN(parseInt(id))) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid gateway ID'
+      });
+    }
+    
+    // Get current status
+    const currentResult = await pool.query(
+      'SELECT is_active FROM manual_payment_gateways WHERE id = $1',
+      [id]
+    );
+    
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Gateway not found'
+      });
+    }
+    
+    const newStatus = !currentResult.rows[0].is_active;
+    
+    // Update status
+    const result = await pool.query(
+      'UPDATE manual_payment_gateways SET is_active = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+      [newStatus, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update gateway status'
+      });
+    }
+    
+    const gateway = result.rows[0];
+    
+    // Safely parse type_data
+    let parsedTypeData = {};
+    try {
+      if (gateway.type_data) {
+        parsedTypeData = typeof gateway.type_data === 'string' 
+          ? JSON.parse(gateway.type_data) 
+          : gateway.type_data;
+      }
+    } catch (parseError) {
+      console.warn('Error parsing type_data for gateway', id, parseError);
+      parsedTypeData = {};
+    }
+    
+    // Map backend type to frontend type
+    const typeMapping = {
+      'UPI': 'upi',
+      'Bank_Transfer': 'wire',
+      'USDT_TRC20': 'crypto',
+      'USDT_ERC20': 'crypto',
+      'USDT_BEP20': 'crypto',
+      'Bitcoin': 'crypto',
+      'Ethereum': 'crypto',
+      'Other_Crypto': 'crypto',
+      'Other': 'local'
+    };
+    
+    const formattedGateway = {
+      id: gateway.id,
+      type: typeMapping[gateway.type] || (gateway.type ? gateway.type.toLowerCase() : 'other'),
+      name: gateway.name,
+      is_active: gateway.is_active,
+      is_recommended: gateway.is_recommended || false,
+      icon_url: gateway.icon_path || null,
+      qr_code_url: gateway.qr_code_path || null,
+      vpa_address: parsedTypeData.vpa || null,
+      crypto_address: parsedTypeData.address || null,
+      bank_name: parsedTypeData.bank_name || null,
+      account_name: parsedTypeData.account_name || null,
+      account_number: parsedTypeData.account_number || null,
+      ifsc_code: parsedTypeData.ifsc || null,
+      swift_code: parsedTypeData.swift || null,
+      account_type: parsedTypeData.account_type || null,
+      country_code: parsedTypeData.country_code || null,
+      details: parsedTypeData.details || null
+    };
+
+    res.json({
+      success: true,
+      gateway: formattedGateway
+    });
+  } catch (error) {
+    console.error('Error toggling gateway status:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to toggle gateway status'
+    });
+  }
+});
+
+/**
+ * PUT /api/admin/manual-gateways/:id
+ * Update a manual payment gateway
+ */
+router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
+  { name: 'icon', maxCount: 1 },
+  { name: 'qr_code', maxCount: 1 }
+]), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const type = req.body.type;
+    const name = req.body.name;
+    const is_active = req.body.is_active === 'true' || req.body.is_active === true;
+    const display_order = parseInt(req.body.display_order) || 0;
+    const instructions = req.body.instructions || null;
+
+    if (!type || !name) {
+      return res.status(400).json({
+        success: false,
+        error: 'Type and name are required'
+      });
+    }
+
+    // Build type_data JSONB
+    let typeData = {};
+    
+    if (type === 'UPI' || type === 'upi') {
+      typeData = { vpa: req.body.vpa_address || '' };
+    } else if (['USDT_TRC20', 'USDT_ERC20', 'USDT_BEP20', 'Bitcoin', 'Ethereum', 'Other_Crypto', 'crypto'].includes(type)) {
+      const network = type === 'crypto' ? 'TRC20' : type.replace('USDT_', '').replace('Bitcoin', 'BTC').replace('Ethereum', 'ETH');
+      typeData = { 
+        address: req.body.crypto_address || '',
+        network: network
+      };
+    } else if (type === 'Bank_Transfer' || type === 'wire') {
+      typeData = {
+        bank_name: req.body.bank_name || '',
+        account_name: req.body.account_name || '',
+        account_number: req.body.account_number || '',
+        ifsc: req.body.ifsc_code || '',
+        swift: req.body.swift_code || '',
+        account_type: req.body.account_type || '',
+        country_code: req.body.country_code || ''
+      };
+    } else if (type === 'Other' || type === 'local') {
+      typeData = { details: req.body.details || '' };
+    }
+
+    const normalizedType = type === 'upi' ? 'UPI' 
+      : type === 'crypto' ? 'USDT_TRC20'
+      : type === 'wire' ? 'Bank_Transfer'
+      : type === 'local' ? 'Other'
+      : type.toUpperCase();
+
+    // Get existing gateway to preserve file paths if new files aren't uploaded
+    const existingResult = await pool.query(
+      'SELECT icon_path, qr_code_path FROM manual_payment_gateways WHERE id = $1',
+      [id]
+    );
+
+    if (existingResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Gateway not found'
+      });
+    }
+
+    let iconPath = existingResult.rows[0].icon_path;
+    let qrCodePath = existingResult.rows[0].qr_code_path;
+
+    // Update file paths if new files are uploaded
+    if (req.files && req.files.icon && req.files.icon[0]) {
+      iconPath = `/uploads/gateways/${req.files.icon[0].filename}`;
+    }
+    
+    if (req.files && req.files.qr_code && req.files.qr_code[0]) {
+      qrCodePath = `/uploads/gateways/${req.files.qr_code[0].filename}`;
+    }
+
+    const result = await pool.query(
+      `UPDATE manual_payment_gateways 
+      SET 
+        type = $1,
+        name = $2,
+        type_data = $3,
+        icon_path = $4,
+        qr_code_path = $5,
+        is_active = $6,
+        is_recommended = $7,
+        display_order = $8,
+        instructions = $9,
+        updated_at = NOW()
+      WHERE id = $10
+      RETURNING *`,
+      [
+        normalizedType,
+        name,
+        JSON.stringify(typeData),
+        iconPath,
+        qrCodePath,
+        is_active,
+        is_recommended,
+        display_order,
+        instructions,
+        id
+      ]
+    );
+
+    const gateway = result.rows[0];
+    const parsedTypeData = typeof gateway.type_data === 'string' 
+      ? JSON.parse(gateway.type_data) 
+      : gateway.type_data;
+    
+    // Map backend type to frontend type
+    const typeMapping = {
+      'UPI': 'upi',
+      'Bank_Transfer': 'wire',
+      'USDT_TRC20': 'crypto',
+      'USDT_ERC20': 'crypto',
+      'USDT_BEP20': 'crypto',
+      'Bitcoin': 'crypto',
+      'Ethereum': 'crypto',
+      'Other_Crypto': 'crypto',
+      'Other': 'local'
+    };
+    
+    const formattedGateway = {
+      id: gateway.id,
+      type: typeMapping[gateway.type] || gateway.type.toLowerCase(),
+      name: gateway.name,
+      is_active: gateway.is_active,
+      is_recommended: gateway.is_recommended || false,
+      icon_url: gateway.icon_path,
+      qr_code_url: gateway.qr_code_path,
+      vpa_address: parsedTypeData.vpa || null,
+      crypto_address: parsedTypeData.address || null,
+      bank_name: parsedTypeData.bank_name || null,
+      account_name: parsedTypeData.account_name || null,
+      account_number: parsedTypeData.account_number || null,
+      ifsc_code: parsedTypeData.ifsc || null,
+      swift_code: parsedTypeData.swift || null,
+      account_type: parsedTypeData.account_type || null,
+      country_code: parsedTypeData.country_code || null,
+      details: parsedTypeData.details || null
+    };
+
+    res.json({
+      success: true,
+      gateway: formattedGateway
+    });
+  } catch (error) {
+    console.error('Update manual gateway error:', error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      detail: error.detail
+    });
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update manual gateway'
+    });
+  }
+});
+
+/**
+ * PATCH /api/admin/manual-gateways/:id/toggle-recommended
+ * Toggle gateway recommended status
+ */
+router.patch('/manual-gateways/:id/toggle-recommended', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!id || isNaN(parseInt(id))) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid gateway ID'
+      });
+    }
+    
+    // Get current status
+    const currentResult = await pool.query(
+      'SELECT COALESCE(is_recommended, false) as is_recommended FROM manual_payment_gateways WHERE id = $1',
+      [id]
+    );
+    
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Gateway not found'
+      });
+    }
+    
+    const newStatus = !currentResult.rows[0].is_recommended;
+    
+    // Update status
+    const result = await pool.query(
+      'UPDATE manual_payment_gateways SET is_recommended = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+      [newStatus, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update gateway recommended status'
+      });
+    }
+    
+    const gateway = result.rows[0];
+    
+    // Safely parse type_data
+    let parsedTypeData = {};
+    try {
+      if (gateway.type_data) {
+        parsedTypeData = typeof gateway.type_data === 'string' 
+          ? JSON.parse(gateway.type_data) 
+          : gateway.type_data;
+      }
+    } catch (parseError) {
+      console.warn('Error parsing type_data for gateway', id, parseError);
+      parsedTypeData = {};
+    }
+    
+    // Map backend type to frontend type
+    const typeMapping = {
+      'UPI': 'upi',
+      'Bank_Transfer': 'wire',
+      'USDT_TRC20': 'crypto',
+      'USDT_ERC20': 'crypto',
+      'USDT_BEP20': 'crypto',
+      'Bitcoin': 'crypto',
+      'Ethereum': 'crypto',
+      'Other_Crypto': 'crypto',
+      'Other': 'local'
+    };
+    
+    const formattedGateway = {
+      id: gateway.id,
+      type: typeMapping[gateway.type] || (gateway.type ? gateway.type.toLowerCase() : 'other'),
+      name: gateway.name,
+      is_active: gateway.is_active,
+      is_recommended: gateway.is_recommended || false,
+      icon_url: gateway.icon_path || null,
+      qr_code_url: gateway.qr_code_path || null,
+      vpa_address: parsedTypeData.vpa || null,
+      crypto_address: parsedTypeData.address || null,
+      bank_name: parsedTypeData.bank_name || null,
+      account_name: parsedTypeData.account_name || null,
+      account_number: parsedTypeData.account_number || null,
+      ifsc_code: parsedTypeData.ifsc || null,
+      swift_code: parsedTypeData.swift || null,
+      account_type: parsedTypeData.account_type || null,
+      country_code: parsedTypeData.country_code || null,
+      details: parsedTypeData.details || null
+    };
+
+    res.json({
+      success: true,
+      gateway: formattedGateway
+    });
+  } catch (error) {
+    console.error('Error toggling gateway recommended status:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to toggle gateway recommended status'
+    });
+  }
+});
+
+/**
+ * DELETE /api/admin/manual-gateways/:id
+ * Delete a manual payment gateway
+ */
+router.delete('/manual-gateways/:id', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      'DELETE FROM manual_payment_gateways WHERE id = $1 RETURNING id',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Gateway not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Gateway deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete manual gateway error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/admin/deposits
+ * Get all deposit requests with filtering
+ */
+router.get('/deposits', authenticateAdmin, async (req, res) => {
+  try {
+    const { status, limit = 500, offset = 0 } = req.query;
+    
+    let query = `
+      SELECT 
+        dr.id,
+        dr.user_id as "userId",
+        dr.gateway_id,
+        dr.amount,
+        dr.currency,
+        dr.converted_amount,
+        dr.converted_currency,
+        dr.transaction_hash,
+        dr.proof_path,
+        dr.deposit_to_type,
+        dr.mt5_account_id,
+        dr.wallet_id,
+        dr.wallet_number,
+        dr.status,
+        dr.admin_notes,
+        dr.created_at as "createdAt",
+        dr.updated_at as "updatedAt",
+        u.email,
+        u.first_name,
+        u.last_name,
+        mg.name as gateway_name,
+        mg.type as gateway_type
+      FROM deposit_requests dr
+      LEFT JOIN users u ON dr.user_id = u.id
+      LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
+    `;
+    
+    const params = [];
+    const conditions = [];
+    
+    if (status && status !== 'all') {
+      conditions.push(`dr.status = $${params.length + 1}`);
+      params.push(status);
+    }
+    
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(' AND ')}`;
+    }
+    
+    query += ` ORDER BY dr.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(parseInt(limit), parseInt(offset));
+    
+    const result = await pool.query(query, params);
+    
+    // Get total count and sum for pagination
+    let countQuery = `SELECT COUNT(*), COALESCE(SUM(amount), 0) as total_sum FROM deposit_requests dr`;
+    if (conditions.length > 0) {
+      countQuery += ` WHERE ${conditions.join(' AND ')}`;
+    }
+    const countParams = status && status !== 'all' ? [status] : [];
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].count);
+    const totalSum = parseFloat(countResult.rows[0].total_sum || 0);
+    
+    const items = result.rows.map(row => {
+      // Ensure wallet_id is properly converted to integer or null
+      const walletId = row.wallet_id ? parseInt(row.wallet_id) : null;
+      
+      console.log('Deposit row:', {
+        id: row.id,
+        deposit_to_type: row.deposit_to_type,
+        wallet_id: row.wallet_id,
+        walletId: walletId,
+        wallet_number: row.wallet_number,
+        mt5_account_id: row.mt5_account_id
+      });
+      
+      return {
+        id: row.id,
+        userId: row.userId,
+        User: {
+          email: row.email || '-',
+          name: `${row.first_name || ''} ${row.last_name || ''}`.trim() || '-'
+        },
+        MT5Account: {
+          accountId: row.mt5_account_id || null
+        },
+        amount: parseFloat(row.amount),
+        currency: row.currency || 'USD',
+        method: row.gateway_type || 'manual',
+        paymentMethod: row.gateway_name || 'Manual Gateway',
+        bankDetails: null, // Can be populated from gateway type_data if needed
+        cryptoAddress: row.transaction_hash || null,
+        depositAddress: row.transaction_hash || null,
+      depositTo: row.deposit_to_type || 'wallet',
+      mt5AccountId: row.mt5_account_id || null,
+      walletId: walletId,
+      walletNumber: row.wallet_number || null, // Now comes directly from deposit_requests table
+        status: row.status,
+        rejectionReason: row.status === 'rejected' ? row.admin_notes : null,
+        approvedAt: row.status === 'approved' ? row.updated_at : null,
+        rejectedAt: row.status === 'rejected' ? row.updated_at : null,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt
+      };
+    });
+    
+    res.json({
+      ok: true,
+      items,
+      total,
+      totalSum,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (error) {
+    console.error('Get deposits error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch deposits'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/deposits/:id/approve
+ * Approve a deposit request
+ */
+router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      `UPDATE deposit_requests 
+       SET status = 'approved', updated_at = NOW()
+       WHERE id = $1 AND status = 'pending'
+       RETURNING *`,
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Deposit request not found or already processed'
+      });
+    }
+    
+    const deposit = result.rows[0];
+    
+    // Add balance based on deposit destination
+    // Only handle MT5 deposits for now - wallet deposits will be handled later
+    try {
+      if (deposit.deposit_to_type === 'mt5' && deposit.mt5_account_id) {
+        // Add to MT5 account using /Users/{login}/AddClientBalance API
+        const mt5Service = await import('../services/mt5.service.js');
+        const login = parseInt(deposit.mt5_account_id, 10);
+        
+        if (Number.isNaN(login)) {
+          throw new Error(`Invalid MT5 account ID: ${deposit.mt5_account_id}`);
+        }
+        
+        console.log(`Adding balance to MT5 account ${login}: ${deposit.amount} ${deposit.currency || 'USD'}`);
+        
+        await mt5Service.addBalance(
+          login,
+          parseFloat(deposit.amount),
+          `Deposit #${deposit.id} approved`
+        );
+        
+        console.log(`Successfully added balance to MT5 account ${login}`);
+      } else if (deposit.deposit_to_type === 'wallet') {
+        // Wallet deposits - skip for now, will be handled later
+        console.log(`Wallet deposit #${deposit.id} approved but balance not added yet (will be handled later)`);
+      }
+    } catch (balanceError) {
+      console.error('Error adding balance:', balanceError);
+      // Rollback the approval if balance update fails for MT5
+      if (deposit.deposit_to_type === 'mt5') {
+        await pool.query(
+          `UPDATE deposit_requests 
+           SET status = 'pending', updated_at = NOW()
+           WHERE id = $1`,
+          [id]
+        );
+        return res.status(500).json({
+          ok: false,
+          error: `Failed to add balance to MT5 account: ${balanceError.message}`
+        });
+      }
+      // For wallet deposits, just log the error but don't rollback
+    }
+    
+    res.json({
+      ok: true,
+      message: 'Deposit approved successfully'
+    });
+  } catch (error) {
+    console.error('Approve deposit error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to approve deposit'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/deposits/:id/reject
+ * Reject a deposit request
+ */
+router.post('/deposits/:id/reject', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE deposit_requests 
+       SET status = 'rejected', admin_notes = $1, updated_at = NOW()
+       WHERE id = $2 AND status = 'pending'
+       RETURNING *`,
+      [reason || null, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Deposit request not found or already processed'
+      });
+    }
+    
+    res.json({
+      ok: true,
+      message: 'Deposit rejected successfully'
+    });
+  } catch (error) {
+    console.error('Reject deposit error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to reject deposit'
     });
   }
 });
