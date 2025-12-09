@@ -8,10 +8,11 @@ dotenv.config();
  * API Documentation: https://t-fumzndoo.cregis.io
  */
 
-const CREGIS_PROJECT_ID = process.env.CREGIS_PROJECT_ID || '1445920661479424';
-const CREGIS_API_KEY = process.env.CREGIS_API_KEY || '0794b200b7d34acca7c06a72ee2cf58c';
-const CREGIS_GATEWAY_URL = process.env.CREGIS_GATEWAY_URL || 'https://t-fumzndoo.cregis.io';
-const CREGIS_WEBHOOK_SECRET = process.env.CREGIS_WEBHOOK_SECRET || '';
+// Default values (fallback if not provided via config)
+const DEFAULT_CREGIS_PROJECT_ID = process.env.CREGIS_PROJECT_ID || '1445920661479424';
+const DEFAULT_CREGIS_API_KEY = process.env.CREGIS_API_KEY || '0794b200b7d34acca7c06a72ee2cf58c';
+const DEFAULT_CREGIS_GATEWAY_URL = process.env.CREGIS_GATEWAY_URL || 'https://t-fumzndoo.cregis.io';
+const DEFAULT_CREGIS_WEBHOOK_SECRET = process.env.CREGIS_WEBHOOK_SECRET || '';
 
 /**
  * Generate a 6-character random nonce
@@ -48,9 +49,12 @@ const generateTimestamp = () => {
  * 4. Prepend API Key to the string
  * 5. Calculate MD5 hash (lowercase)
  * @param {Object} params - Request parameters (sign field will be excluded)
+ * @param {string} apiKey - API key to use for signing (from gateway config or env)
  * @returns {string} Signature (MD5 hash in lowercase)
  */
-const generateSignature = (params) => {
+const generateSignature = (params, apiKey = null) => {
+  // Use provided API key or fallback to default
+  const signingKey = apiKey || DEFAULT_CREGIS_API_KEY;
   // Step 1: Remove sign and filter out null/empty values
   const { sign, ...paramsToSign } = params;
   
@@ -84,13 +88,13 @@ const generateSignature = (params) => {
   });
   
   // Step 4: Prepend API Key to the string
-  const stringToHash = CREGIS_API_KEY + concatenatedString;
+  const stringToHash = signingKey + concatenatedString;
   
   console.log('=== CREGIS SIGNATURE GENERATION ===');
   console.log('Filtered parameters:', sortedKeys);
   console.log('Concatenated string (first 200 chars):', concatenatedString.substring(0, 200));
   console.log('String to hash (first 250 chars):', stringToHash.substring(0, 250));
-  console.log('API Key length:', CREGIS_API_KEY?.length);
+  console.log('API Key length:', signingKey?.length);
   
   // Step 5: Calculate MD5 hash (lowercase)
   const signature = crypto
@@ -139,9 +143,21 @@ export const createPayment = async ({
   successUrl,
   cancelUrl,
   validTime = 60, // 60 minutes default
-  tokens = ['USDT-TRC20'] // Default to USDT TRC20
+  tokens = ['USDT-TRC20'], // Default to USDT TRC20
+  gatewayConfig = null // Gateway config from database
 }) => {
   try {
+    // Use gateway config from database if provided, otherwise use env variables
+    const CREGIS_PROJECT_ID = gatewayConfig?.project_id || DEFAULT_CREGIS_PROJECT_ID;
+    const CREGIS_API_KEY = gatewayConfig?.api_key || DEFAULT_CREGIS_API_KEY;
+    const CREGIS_GATEWAY_URL = gatewayConfig?.gateway_url || DEFAULT_CREGIS_GATEWAY_URL;
+    const CREGIS_WEBHOOK_SECRET = gatewayConfig?.webhook_secret || DEFAULT_CREGIS_WEBHOOK_SECRET;
+
+    // Validate that gateway URL is set
+    if (!CREGIS_GATEWAY_URL) {
+      throw new Error('CREGIS_GATEWAY_URL is not defined. Please configure gateway_url in the database.');
+    }
+
     const nonce = generateNonce();
     const timestamp = generateTimestamp();
     const pid = parseInt(CREGIS_PROJECT_ID, 10);
@@ -172,8 +188,8 @@ export const createPayment = async ({
       payload.payer_email = payerEmail;
     }
 
-    // Generate signature
-    payload.sign = generateSignature(payload);
+    // Generate signature using API key from gateway config
+    payload.sign = generateSignature(payload, CREGIS_API_KEY);
 
     console.log('Cregis createPayment request:', {
       url: `${CREGIS_GATEWAY_URL}/api/v2/checkout`,
@@ -287,10 +303,21 @@ export const createPayment = async ({
  * Check payment status from Cregis
  * POST /api/v2/order/info
  * @param {string} cregisId - Cregis unique ID (cregis_id)
+ * @param {Object} gatewayConfig - Gateway configuration from database (optional)
  * @returns {Promise<Object>} Payment status data
  */
-export const checkPaymentStatus = async (cregisId) => {
+export const checkPaymentStatus = async (cregisId, gatewayConfig = null) => {
   try {
+    // Use gateway config from database if provided, otherwise use env variables
+    const CREGIS_PROJECT_ID = gatewayConfig?.project_id || DEFAULT_CREGIS_PROJECT_ID;
+    const CREGIS_API_KEY = gatewayConfig?.api_key || DEFAULT_CREGIS_API_KEY;
+    const CREGIS_GATEWAY_URL = gatewayConfig?.gateway_url || DEFAULT_CREGIS_GATEWAY_URL;
+
+    // Validate that gateway URL is set
+    if (!CREGIS_GATEWAY_URL) {
+      throw new Error('CREGIS_GATEWAY_URL is not defined. Please configure gateway_url in the database.');
+    }
+
     const nonce = generateNonce();
     const timestamp = generateTimestamp();
     const pid = parseInt(CREGIS_PROJECT_ID, 10);
@@ -302,8 +329,8 @@ export const checkPaymentStatus = async (cregisId) => {
       cregis_id: cregisId
     };
 
-    // Generate signature
-    payload.sign = generateSignature(payload);
+    // Generate signature using API key from gateway config
+    payload.sign = generateSignature(payload, CREGIS_API_KEY);
 
     console.log('Cregis checkPaymentStatus request:', {
       url: `${CREGIS_GATEWAY_URL}/api/v2/order/info`,
@@ -313,7 +340,9 @@ export const checkPaymentStatus = async (cregisId) => {
     const response = await fetch(`${CREGIS_GATEWAY_URL}/api/v2/order/info`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'X-Project-Id': String(pid),
+        'X-Api-Key': CREGIS_API_KEY
       },
       body: JSON.stringify(payload)
     });

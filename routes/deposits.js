@@ -438,6 +438,25 @@ router.post('/cregis/create', authenticate, async (req, res) => {
     );
     const user = userResult.rows[0];
 
+    // Fetch Cregis gateway configuration from database
+    const gatewayResult = await pool.query(
+      `SELECT project_id, api_key, gateway_url, webhook_secret, secret_key
+       FROM auto_gateway
+       WHERE gateway_type = 'Cryptocurrency' 
+         AND is_active = TRUE
+         AND project_id IS NOT NULL
+         AND api_key IS NOT NULL
+         AND gateway_url IS NOT NULL
+       ORDER BY display_order ASC, created_at DESC
+       LIMIT 1`
+    );
+
+    const gatewayConfig = gatewayResult.rows.length > 0 ? gatewayResult.rows[0] : null;
+
+    if (!gatewayConfig) {
+      console.warn('No active Cregis gateway found in database, using environment variables as fallback');
+    }
+
     const cregisResult = await cregisService.createPayment({
       orderId,
       amount: parseFloat(amount),
@@ -448,7 +467,8 @@ router.post('/cregis/create', authenticate, async (req, res) => {
       callbackUrl: `${getBaseUrl()}/api/deposits/cregis/webhook`,
       successUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/user/deposits/cregis-usdt-trc20`,
       cancelUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/user/deposits`,
-      validTime: 60 // 60 minutes
+      validTime: 60, // 60 minutes
+      gatewayConfig // Pass gateway config from database
     });
 
     console.log('Cregis payment result:', cregisResult);
@@ -567,8 +587,23 @@ router.get('/cregis/status/:depositId', authenticate, async (req, res) => {
 
     const cregisId = cregisTransaction.rows[0].cregis_order_id; // This is actually cregis_id
 
+    // Fetch Cregis gateway configuration from database
+    const gatewayResult = await pool.query(
+      `SELECT project_id, api_key, gateway_url, webhook_secret, secret_key
+       FROM auto_gateway
+       WHERE gateway_type = 'Cryptocurrency' 
+         AND is_active = TRUE
+         AND project_id IS NOT NULL
+         AND api_key IS NOT NULL
+         AND gateway_url IS NOT NULL
+       ORDER BY display_order ASC, created_at DESC
+       LIMIT 1`
+    );
+
+    const gatewayConfig = gatewayResult.rows.length > 0 ? gatewayResult.rows[0] : null;
+
     // Check status from Cregis API using cregis_id
-    const statusResult = await cregisService.checkPaymentStatus(cregisId);
+    const statusResult = await cregisService.checkPaymentStatus(cregisId, gatewayConfig);
 
     if (!statusResult.success) {
       return res.status(500).json({
