@@ -7,6 +7,47 @@ import ExcelJS from 'exceljs';
 const router = express.Router();
 
 /**
+ * Helper function to format gateway name for display
+ * Converts gateway types/names to user-friendly format
+ * Examples: "USDT_TRC20" -> "TRC20", "Bank_Transfer" -> "Bank", "USDT TRC20" -> "TRC20"
+ */
+const formatGatewayName = (gatewayName, gatewayType) => {
+  if (!gatewayName && !gatewayType) return 'Gateway';
+  
+  const name = (gatewayName || '').toUpperCase();
+  const type = (gatewayType || '').toUpperCase();
+  
+  // Handle gateway types first (more specific)
+  if (type) {
+    // Convert types like "USDT_TRC20" to "TRC20", "USDT_ERC20" to "ERC20", etc.
+    if (type.includes('_')) {
+      const parts = type.split('_');
+      if (parts.length > 1) {
+        // Return the last part (e.g., "TRC20", "ERC20", "BEP20")
+        return parts[parts.length - 1];
+      }
+    }
+    // Handle specific types
+    if (type === 'BANK_TRANSFER' || type === 'BANK') return 'Bank';
+    if (type === 'DEBIT_CARD' || type === 'CARD') return 'Debit Card';
+    if (type === 'OTHER_CRYPTO') return 'Crypto';
+    if (type === 'UPI') return 'UPI';
+  }
+  
+  // Handle gateway names directly
+  if (name.includes('TRC20') || name.includes('TRC-20')) return 'TRC20';
+  if (name.includes('ERC20') || name.includes('ERC-20')) return 'ERC20';
+  if (name.includes('BEP20') || name.includes('BEP-20')) return 'BEP20';
+  if (name.includes('UPI')) return 'UPI';
+  if (name.includes('BANK')) return 'Bank';
+  if (name.includes('BITCOIN') || name.includes('BTC')) return 'Bitcoin';
+  if (name.includes('ETHEREUM') || name.includes('ETH')) return 'Ethereum';
+  
+  // Return a cleaned version of the name or type
+  return (gatewayName || gatewayType || 'Gateway').replace(/[_-]/g, ' ').trim();
+};
+
+/**
  * GET /api/reports/transaction-history
  * Get transaction history from deposit_requests and trading_accounts
  */
@@ -15,7 +56,7 @@ router.get('/transaction-history', authenticate, async (req, res) => {
     const userId = req.user.id;
     const { limit = 50, offset = 0 } = req.query;
 
-    // Fetch deposit requests for this user
+    // Fetch deposit requests for this user (including both manual and auto gateways)
     const depositQuery = `
       SELECT 
         dr.id,
@@ -26,11 +67,19 @@ router.get('/transaction-history', authenticate, async (req, res) => {
         dr.mt5_account_id,
         dr.wallet_number,
         dr.created_at,
-        mg.name as gateway_name,
-        mg.type as gateway_type,
+        COALESCE(mg.name, ag.wallet_name) as gateway_name,
+        COALESCE(mg.type, ag.gateway_type) as gateway_type,
+        CASE 
+          WHEN dr.gateway_id IS NOT NULL THEN 'manual'
+          WHEN dr.cregis_order_id IS NOT NULL THEN 'auto'
+          ELSE 'unknown'
+        END as gateway_source,
         'deposit' as transaction_type
       FROM deposit_requests dr
       LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
+      LEFT JOIN auto_gateway ag ON dr.cregis_order_id IS NOT NULL 
+        AND ag.gateway_type = 'Cryptocurrency' 
+        AND ag.is_active = TRUE
       WHERE dr.user_id = $1
       ORDER BY dr.created_at DESC
       LIMIT $2 OFFSET $3
@@ -60,20 +109,23 @@ router.get('/transaction-history', authenticate, async (req, res) => {
 
     // Combine and format the results
     const transactions = [
-      ...depositResult.rows.map(row => ({
-        id: `deposit_${row.id}`,
-        type: 'deposit',
-        amount: parseFloat(row.amount),
-        currency: row.currency || 'USD',
-        status: row.status,
-        depositTo: row.deposit_to_type,
-        mt5AccountId: row.mt5_account_id,
-        walletNumber: row.wallet_number,
-        gatewayName: row.gateway_name,
-        gatewayType: row.gateway_type,
-        createdAt: row.created_at,
-        description: `Deposit via ${row.gateway_name || 'Manual Gateway'}`
-      })),
+      ...depositResult.rows.map(row => {
+        const formattedGateway = formatGatewayName(row.gateway_name, row.gateway_type);
+        return {
+          id: `deposit_${row.id}`,
+          type: 'deposit',
+          amount: parseFloat(row.amount),
+          currency: row.currency || 'USD',
+          status: row.status,
+          depositTo: row.deposit_to_type,
+          mt5AccountId: row.mt5_account_id,
+          walletNumber: row.wallet_number,
+          gatewayName: row.gateway_name,
+          gatewayType: row.gateway_type,
+          createdAt: row.created_at,
+          description: `Deposit via ${formattedGateway}`
+        };
+      }),
       ...tradingAccountsResult.rows.map(row => ({
         id: `account_${row.id}`,
         type: 'account_creation',
@@ -202,7 +254,7 @@ router.get('/mt5-account-statement', authenticate, async (req, res) => {
         gatewayName: row.gateway_name,
         gatewayType: row.gateway_type,
         createdAt: row.created_at,
-        description: `Deposit via ${row.gateway_name || 'Manual Gateway'}`,
+        description: `Deposit via ${formatGatewayName(row.gateway_name, row.gateway_type)}`,
         reference: `DEP-${row.id}`
       })),
       ...transferResult.rows.map(row => ({
@@ -276,10 +328,14 @@ router.get('/mt5-account-statement/download/pdf', authenticate, async (req, res)
         dr.status,
         dr.mt5_account_id,
         dr.created_at,
-        mg.name as gateway_name,
+        COALESCE(mg.name, ag.wallet_name) as gateway_name,
+        COALESCE(mg.type, ag.gateway_type) as gateway_type,
         'deposit' as transaction_type
       FROM deposit_requests dr
       LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
+      LEFT JOIN auto_gateway ag ON dr.cregis_order_id IS NOT NULL 
+        AND ag.gateway_type = 'Cryptocurrency' 
+        AND ag.is_active = TRUE
       WHERE dr.user_id = $1 
         AND dr.deposit_to_type = 'mt5'
         ${accountNumber ? 'AND dr.mt5_account_id = $2' : ''}
@@ -312,7 +368,7 @@ router.get('/mt5-account-statement/download/pdf', authenticate, async (req, res)
       ...depositResult.rows.map(row => ({
         date: new Date(row.created_at).toLocaleDateString(),
         type: 'Deposit',
-        description: `Deposit via ${row.gateway_name || 'Manual Gateway'}`,
+        description: `Deposit via ${formatGatewayName(row.gateway_name, row.gateway_type)}`,
         amount: parseFloat(row.amount),
         currency: row.currency || 'USD',
         status: row.status,
@@ -445,7 +501,7 @@ router.get('/mt5-account-statement/download/excel', authenticate, async (req, re
       ...depositResult.rows.map(row => ({
         date: new Date(row.created_at).toLocaleString(),
         type: 'Deposit',
-        description: `Deposit via ${row.gateway_name || 'Manual Gateway'}`,
+        description: `Deposit via ${formatGatewayName(row.gateway_name, row.gateway_type)}`,
         amount: parseFloat(row.amount),
         currency: row.currency || 'USD',
         status: row.status,

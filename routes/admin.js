@@ -3113,5 +3113,248 @@ router.post('/deposits/:id/reject', authenticateAdmin, async (req, res) => {
   }
 });
 
+/**
+ * ============================================
+ * AUTOMATIC PAYMENT GATEWAYS (auto_gateway)
+ * ============================================
+ */
+
+/**
+ * GET /api/admin/payment-gateways
+ * Get all automatic payment gateways
+ */
+router.get('/payment-gateways', authenticateAdmin, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT 
+        id,
+        wallet_name,
+        gateway_type,
+        deposit_wallet_address,
+        api_key,
+        secret_key,
+        project_id,
+        gateway_url,
+        webhook_secret,
+        description,
+        is_active,
+        display_order,
+        created_at,
+        updated_at
+      FROM auto_gateway
+      ORDER BY display_order ASC, created_at DESC`
+    );
+
+    res.json({
+      success: true,
+      gateways: result.rows
+    });
+  } catch (error) {
+    console.error('Get automatic payment gateways error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/admin/payment-gateways
+ * Create a new automatic payment gateway
+ */
+router.post('/payment-gateways', authenticateAdmin, async (req, res, next) => {
+  try {
+    const {
+      wallet_name,
+      gateway_type,
+      deposit_wallet_address,
+      api_key,
+      secret_key,
+      project_id,
+      gateway_url,
+      webhook_secret,
+      description,
+      is_active = true,
+      display_order = 0
+    } = req.body;
+
+    // Validate required fields
+    if (!wallet_name || !gateway_type || !api_key || !secret_key) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: wallet_name, gateway_type, api_key, secret_key'
+      });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO auto_gateway 
+        (wallet_name, gateway_type, deposit_wallet_address, api_key, secret_key, 
+         project_id, gateway_url, webhook_secret, description, is_active, display_order)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      RETURNING *`,
+      [
+        wallet_name,
+        gateway_type,
+        deposit_wallet_address || null,
+        api_key,
+        secret_key,
+        project_id || null,
+        gateway_url || null,
+        webhook_secret || null,
+        description || null,
+        is_active,
+        display_order
+      ]
+    );
+
+    res.json({
+      success: true,
+      gateway: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Create automatic payment gateway error:', error);
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/admin/payment-gateways/:id
+ * Update an automatic payment gateway
+ */
+router.put('/payment-gateways/:id', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const {
+      wallet_name,
+      gateway_type,
+      deposit_wallet_address,
+      api_key,
+      secret_key,
+      project_id,
+      gateway_url,
+      webhook_secret,
+      description,
+      is_active,
+      display_order
+    } = req.body;
+
+    // Check if gateway exists
+    const checkResult = await pool.query(
+      'SELECT id FROM auto_gateway WHERE id = $1',
+      [id]
+    );
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Payment gateway not found'
+      });
+    }
+
+    // Build update query dynamically
+    const updateFields = [];
+    const updateValues = [];
+    let paramIndex = 1;
+
+    if (wallet_name !== undefined) {
+      updateFields.push(`wallet_name = $${paramIndex++}`);
+      updateValues.push(wallet_name);
+    }
+    if (gateway_type !== undefined) {
+      updateFields.push(`gateway_type = $${paramIndex++}`);
+      updateValues.push(gateway_type);
+    }
+    if (deposit_wallet_address !== undefined) {
+      updateFields.push(`deposit_wallet_address = $${paramIndex++}`);
+      updateValues.push(deposit_wallet_address);
+    }
+    if (api_key !== undefined) {
+      updateFields.push(`api_key = $${paramIndex++}`);
+      updateValues.push(api_key);
+    }
+    if (secret_key !== undefined) {
+      updateFields.push(`secret_key = $${paramIndex++}`);
+      updateValues.push(secret_key);
+    }
+    if (project_id !== undefined) {
+      updateFields.push(`project_id = $${paramIndex++}`);
+      updateValues.push(project_id);
+    }
+    if (gateway_url !== undefined) {
+      updateFields.push(`gateway_url = $${paramIndex++}`);
+      updateValues.push(gateway_url);
+    }
+    if (webhook_secret !== undefined) {
+      updateFields.push(`webhook_secret = $${paramIndex++}`);
+      updateValues.push(webhook_secret);
+    }
+    if (description !== undefined) {
+      updateFields.push(`description = $${paramIndex++}`);
+      updateValues.push(description);
+    }
+    if (is_active !== undefined) {
+      updateFields.push(`is_active = $${paramIndex++}`);
+      updateValues.push(is_active);
+    }
+    if (display_order !== undefined) {
+      updateFields.push(`display_order = $${paramIndex++}`);
+      updateValues.push(display_order);
+    }
+
+    if (updateFields.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No fields to update'
+      });
+    }
+
+    updateFields.push(`updated_at = NOW()`);
+    updateValues.push(id);
+
+    const result = await pool.query(
+      `UPDATE auto_gateway 
+       SET ${updateFields.join(', ')}
+       WHERE id = $${paramIndex}
+       RETURNING *`,
+      updateValues
+    );
+
+    res.json({
+      success: true,
+      gateway: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Update automatic payment gateway error:', error);
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/admin/payment-gateways/:id
+ * Delete an automatic payment gateway
+ */
+router.delete('/payment-gateways/:id', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      'DELETE FROM auto_gateway WHERE id = $1 RETURNING id',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Payment gateway not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Payment gateway deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete automatic payment gateway error:', error);
+    next(error);
+  }
+});
+
 export default router;
 
