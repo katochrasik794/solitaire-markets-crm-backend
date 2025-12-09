@@ -730,5 +730,80 @@ router.post('/cregis/webhook', express.json(), async (req, res) => {
   }
 });
 
+/**
+ * PUT /api/deposits/:depositId/cancel
+ * Cancel a deposit request (user-initiated or expired)
+ */
+router.put('/:depositId/cancel', authenticate, async (req, res) => {
+  try {
+    const { depositId } = req.params;
+    const userId = req.user.id;
+
+    // Check if deposit exists and belongs to user
+    const depositCheck = await pool.query(
+      `SELECT id, status, cregis_order_id, cregis_status
+       FROM deposit_requests 
+       WHERE id = $1 AND user_id = $2`,
+      [depositId, userId]
+    );
+
+    if (depositCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Deposit request not found'
+      });
+    }
+
+    const deposit = depositCheck.rows[0];
+
+    // Only allow cancellation if status is pending
+    if (deposit.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot cancel deposit with status: ${deposit.status}`
+      });
+    }
+
+    // Update deposit status to cancelled
+    await pool.query(
+      `UPDATE deposit_requests 
+       SET status = 'cancelled', updated_at = NOW()
+       WHERE id = $1`,
+      [depositId]
+    );
+
+    // Update cregis_status if it exists
+    if (deposit.cregis_order_id) {
+      await pool.query(
+        `UPDATE deposit_requests 
+         SET cregis_status = 'expired', updated_at = NOW()
+         WHERE id = $1`,
+        [depositId]
+      );
+
+      // Update cregis_transactions if exists
+      await pool.query(
+        `UPDATE cregis_transactions 
+         SET cregis_status = 'expired', updated_at = NOW()
+         WHERE deposit_request_id = $1`,
+        [depositId]
+      );
+    }
+
+    console.log(`Deposit #${depositId} cancelled by user ${userId}`);
+
+    res.json({
+      success: true,
+      message: 'Deposit request cancelled successfully'
+    });
+  } catch (error) {
+    console.error('Cancel deposit error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to cancel deposit request'
+    });
+  }
+});
+
 export default router;
 
