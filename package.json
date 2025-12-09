@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "setup-admin": "node database/setup_admin_tables.js"
+    "setup-admin": "node database/setup_admin_tables.js",
+    "migrate": "node scripts/run-migrations.js"
   },
   "keywords": [],
   "author": "",

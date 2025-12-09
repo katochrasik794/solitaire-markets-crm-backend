@@ -440,9 +440,9 @@ CREATE TRIGGER update_manual_payment_gateways_updated_at BEFORE UPDATE ON manual
 CREATE TABLE IF NOT EXISTS deposit_requests (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    gateway_id INTEGER NOT NULL REFERENCES manual_payment_gateways(id) ON DELETE CASCADE,
+    gateway_id INTEGER REFERENCES manual_payment_gateways(id) ON DELETE CASCADE,
     amount DECIMAL(18, 8) NOT NULL,
-    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+    currency VARCHAR(10) NOT NULL DEFAULT 'USD',
     converted_amount DECIMAL(18, 8),
     converted_currency VARCHAR(3),
     transaction_hash VARCHAR(255),
@@ -453,6 +453,8 @@ CREATE TABLE IF NOT EXISTS deposit_requests (
     wallet_number VARCHAR(50),
     status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
     admin_notes TEXT,
+    cregis_order_id VARCHAR(255),
+    cregis_status VARCHAR(50),
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -466,10 +468,42 @@ CREATE INDEX IF NOT EXISTS idx_deposit_requests_deposit_to_type ON deposit_reque
 CREATE INDEX IF NOT EXISTS idx_deposit_requests_mt5_account_id ON deposit_requests(mt5_account_id);
 CREATE INDEX IF NOT EXISTS idx_deposit_requests_wallet_id ON deposit_requests(wallet_id);
 CREATE INDEX IF NOT EXISTS idx_deposit_requests_wallet_number ON deposit_requests(wallet_number);
+CREATE INDEX IF NOT EXISTS idx_deposit_requests_cregis_order_id ON deposit_requests(cregis_order_id);
 
 -- Trigger to automatically update updated_at for deposit_requests
 CREATE TRIGGER update_deposit_requests_updated_at 
     BEFORE UPDATE ON deposit_requests
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- Cregis Transactions Table
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS cregis_transactions (
+    id SERIAL PRIMARY KEY,
+    deposit_request_id INTEGER NOT NULL REFERENCES deposit_requests(id) ON DELETE CASCADE,
+    cregis_order_id VARCHAR(255) NOT NULL UNIQUE,
+    cregis_status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    amount DECIMAL(18, 8) NOT NULL,
+    currency VARCHAR(10) NOT NULL DEFAULT 'USDT',
+    payment_url TEXT,
+    qr_code_url TEXT,
+    expires_at TIMESTAMP,
+    webhook_data JSONB,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Create indexes for cregis_transactions
+CREATE INDEX IF NOT EXISTS idx_cregis_transactions_deposit_request_id ON cregis_transactions(deposit_request_id);
+CREATE INDEX IF NOT EXISTS idx_cregis_transactions_cregis_order_id ON cregis_transactions(cregis_order_id);
+CREATE INDEX IF NOT EXISTS idx_cregis_transactions_cregis_status ON cregis_transactions(cregis_status);
+CREATE INDEX IF NOT EXISTS idx_cregis_transactions_created_at ON cregis_transactions(created_at);
+
+-- Trigger to automatically update updated_at for cregis_transactions
+CREATE TRIGGER update_cregis_transactions_updated_at 
+    BEFORE UPDATE ON cregis_transactions
     FOR EACH ROW 
     EXECUTE FUNCTION update_updated_at_column();
 
