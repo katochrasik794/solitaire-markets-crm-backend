@@ -39,95 +39,70 @@ const generateTimestamp = () => {
  * @param {Object} params - Request parameters (sign field will be excluded)
  * @returns {string} Signature
  */
+/**
+ * Generate signature for Cregis API requests
+ * According to Cregis documentation:
+ * 1. Exclude 'sign' and all null/empty parameters
+ * 2. Sort parameters lexicographically (alphabetically)
+ * 3. Concatenate as "key1value1key2value2..." (NO = or &)
+ * 4. Prepend API Key to the string
+ * 5. Calculate MD5 hash (lowercase)
+ * @param {Object} params - Request parameters (sign field will be excluded)
+ * @returns {string} Signature (MD5 hash in lowercase)
+ */
 const generateSignature = (params) => {
-  // Remove sign from params if present
+  // Step 1: Remove sign and filter out null/empty values
   const { sign, ...paramsToSign } = params;
   
-  // DON'T filter null/undefined - include ALL parameters that are in payload
-  // Sort parameters by key alphabetically
-  const sortedKeys = Object.keys(paramsToSign).sort();
-  
-  // Method 1: Query string format (most common for payment gateways)
-  const queryString = sortedKeys
-    .map(key => {
-      let value = paramsToSign[key];
-      
-      // Convert to string - keep as-is if already string (like tokens JSON)
-      if (value === null || value === undefined) {
-        value = '';
-      } else if (typeof value === 'string') {
-        value = value; // Keep as-is (tokens is already JSON string)
-      } else if (typeof value === 'object') {
-        value = JSON.stringify(value);
-      } else {
-        value = String(value);
-      }
-      
-      return `${key}=${value}`;
-    })
-    .join('&');
-  
-  console.log('=== SIGNATURE DEBUG ===');
-  console.log('Full query string:', queryString);
-  console.log('Query string length:', queryString.length);
-  console.log('Parameters:', sortedKeys);
-  console.log('API Key (first 15):', CREGIS_API_KEY?.substring(0, 15) + '...');
-  
-  // Method 1: HMAC-SHA256 with query string (standard for most payment gateways)
-  const signature1 = crypto
-    .createHmac('sha256', CREGIS_API_KEY)
-    .update(queryString)
-    .digest('hex');
-  
-  // Method 2: HMAC-SHA256 with query string + API key appended (some APIs use this)
-  const signature2 = crypto
-    .createHmac('sha256', CREGIS_API_KEY)
-    .update(queryString + CREGIS_API_KEY)
-    .digest('hex');
-  
-  // Method 3: Sign the sorted JSON object (some APIs use this)
-  const sortedObj = {};
-  sortedKeys.forEach(key => {
-    sortedObj[key] = paramsToSign[key];
+  const filteredParams = {};
+  Object.keys(paramsToSign).forEach(key => {
+    const value = paramsToSign[key];
+    // Exclude null, undefined, and empty string values
+    if (value !== null && value !== undefined && value !== '') {
+      filteredParams[key] = value;
+    }
   });
-  const jsonString = JSON.stringify(sortedObj);
-  const signature3 = crypto
-    .createHmac('sha256', CREGIS_API_KEY)
-    .update(jsonString)
-    .digest('hex');
   
-  // Method 4: MD5 hash (older APIs)
-  const signature4 = crypto
+  // Step 2: Sort parameters lexicographically (alphabetically)
+  const sortedKeys = Object.keys(filteredParams).sort();
+  
+  // Step 3: Concatenate as "key1value1key2value2..." (NO equals signs, NO ampersands)
+  let concatenatedString = '';
+  sortedKeys.forEach(key => {
+    let value = filteredParams[key];
+    
+    // Convert to string
+    if (typeof value === 'object' && value !== null) {
+      // For objects/arrays, stringify them (like tokens JSON string)
+      value = JSON.stringify(value);
+    } else {
+      value = String(value);
+    }
+    
+    // Concatenate as key1value1key2value2...
+    concatenatedString += key + value;
+  });
+  
+  // Step 4: Prepend API Key to the string
+  const stringToHash = CREGIS_API_KEY + concatenatedString;
+  
+  console.log('=== CREGIS SIGNATURE GENERATION ===');
+  console.log('Filtered parameters:', sortedKeys);
+  console.log('Concatenated string (first 200 chars):', concatenatedString.substring(0, 200));
+  console.log('String to hash (first 250 chars):', stringToHash.substring(0, 250));
+  console.log('API Key length:', CREGIS_API_KEY?.length);
+  
+  // Step 5: Calculate MD5 hash (lowercase)
+  const signature = crypto
     .createHash('md5')
-    .update(queryString + CREGIS_API_KEY)
-    .digest('hex');
+    .update(stringToHash)
+    .digest('hex')
+    .toLowerCase(); // Ensure lowercase
   
-  // Method 5: Query string with "key" parameter added
-  const queryStringWithKey = queryString + '&key=' + CREGIS_API_KEY;
-  const signature5 = crypto
-    .createHmac('sha256', CREGIS_API_KEY)
-    .update(queryStringWithKey)
-    .digest('hex');
-  
-  // Method 6: Simple MD5 of query string only
-  const signature6 = crypto
-    .createHash('md5')
-    .update(queryString)
-    .digest('hex');
-  
-  console.log('=== ALL SIGNATURE METHODS ===');
-  console.log('Method 1 (SHA256 query):', signature1);
-  console.log('Method 2 (SHA256 query+key):', signature2);
-  console.log('Method 3 (SHA256 JSON):', signature3);
-  console.log('Method 4 (MD5 query+key):', signature4);
-  console.log('Method 5 (SHA256 query+key param):', signature5);
-  console.log('Method 6 (MD5 query only):', signature6);
+  console.log('Generated signature (MD5):', signature);
   console.log('=== END SIGNATURE DEBUG ===');
   
-  // Try Method 1 first (most standard)
-  // If it fails, check server logs and change return to try other methods
-  console.log('Using Signature Method 1 (SHA256 query string)');
-  return signature1;
+  return signature;
 };
 
 /**
