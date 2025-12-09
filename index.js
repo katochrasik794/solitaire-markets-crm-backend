@@ -21,30 +21,37 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Test database connection on startup
-pool.query('SELECT NOW()', (err, res) => {
-  if (err) {
-    console.error('❌ Database connection error:', err.message);
-    console.error('Error code:', err.code);
-    console.error('Error details:', {
-      hasDatabaseUrl: !!process.env.DATABASE_URL,
-      host: process.env.DB_HOST || 'not set',
-      database: process.env.DB_NAME || 'not set',
-      user: process.env.DB_USER || 'not set',
-      port: process.env.DB_PORT || 'not set',
-      nodeEnv: process.env.NODE_ENV,
-      sslRequired: process.env.NODE_ENV === 'production'
-    });
-    console.error('Please check your environment variables:');
-    console.error('1. DATABASE_URL (recommended) or DB_HOST, DB_USER, DB_PASSWORD, DB_NAME are set correctly');
-    console.error('2. PostgreSQL is running');
-    console.error('3. Database exists');
-    console.error('4. SSL is configured if required (Render.com requires SSL)');
-    process.exit(1);
-  } else {
-    console.log('✅ Connected to PostgreSQL database');
+// Test database connection on startup with retry logic
+const testDatabaseConnection = async (retries = 3, delay = 2000) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const result = await pool.query('SELECT NOW()');
+      console.log('✅ Connected to PostgreSQL database');
+      return;
+    } catch (err) {
+      console.error(`❌ Database connection attempt ${i + 1}/${retries} failed:`, err.message);
+      if (i < retries - 1) {
+        console.log(`Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        console.error('Error code:', err.code);
+        console.error('Error details:', {
+          hasDatabaseUrl: !!process.env.DATABASE_URL,
+          databaseUrl: process.env.DATABASE_URL ? (process.env.DATABASE_URL.substring(0, 30) + '...') : 'not set',
+          nodeEnv: process.env.NODE_ENV,
+          sslConfigured: true
+        });
+        console.error('Please check:');
+        console.error('1. DATABASE_URL is set correctly');
+        console.error('2. Database server is accessible');
+        console.error('3. Network connection is stable');
+        process.exit(1);
+      }
+    }
   }
-});
+};
+
+testDatabaseConnection();
 
 // Middleware
 // CORS: fully open for all origins (including https://portal.solitairemarkets.com)

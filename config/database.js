@@ -16,7 +16,9 @@ if (process.env.DATABASE_URL) {
     ssl: { rejectUnauthorized: false }, // Required for Render.com PostgreSQL
     max: 20,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: 30000, // Increased to 30 seconds for production database
+    query_timeout: 30000,
+    statement_timeout: 30000,
   };
 } else {
   // Build connection config from individual environment variables
@@ -32,7 +34,9 @@ if (process.env.DATABASE_URL) {
     user: process.env.DB_USER || 'postgres',
     max: 20,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: 30000,
+    query_timeout: 30000,
+    statement_timeout: 30000,
   };
 
   // Only add password if it's not empty

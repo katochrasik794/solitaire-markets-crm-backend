@@ -6,6 +6,8 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import * as cregisService from '../services/cregis.service.js';
+import * as mt5Service from '../services/mt5.service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -312,6 +314,418 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to create deposit request'
+    });
+  }
+});
+
+/**
+ * POST /api/deposits/cregis/create
+ * Create a Cregis payment order for deposit
+ */
+router.post('/cregis/create', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const {
+      amount,
+      currency = 'USDT',
+      deposit_to = 'mt5',
+      mt5_account_id,
+      wallet_id,
+      wallet_number
+    } = req.body;
+
+    if (!amount || parseFloat(amount) <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valid amount is required'
+      });
+    }
+
+    if (deposit_to === 'mt5' && !mt5_account_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'MT5 account ID is required for MT5 deposits'
+      });
+    }
+
+    // Create deposit request first
+    const depositToType = deposit_to === 'mt5' ? 'mt5' : 'wallet';
+    let mt5AccountId = null;
+    let walletId = null;
+    let walletNumber = null;
+
+    if (deposit_to === 'mt5' && mt5_account_id) {
+      mt5AccountId = String(mt5_account_id).trim();
+      
+      // Verify MT5 account belongs to user
+      const accountCheck = await pool.query(
+        'SELECT id, account_number FROM trading_accounts WHERE account_number = $1 AND user_id = $2 AND platform = \'MT5\'',
+        [mt5AccountId, userId]
+      );
+
+      if (accountCheck.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'MT5 account not found or does not belong to you'
+        });
+      }
+    }
+
+    if (deposit_to === 'wallet') {
+      if (wallet_number) {
+        walletNumber = String(wallet_number).trim();
+        const walletResult = await pool.query(
+          'SELECT id FROM wallets WHERE wallet_number = $1 AND user_id = $2 LIMIT 1',
+          [walletNumber, userId]
+        );
+        if (walletResult.rows.length > 0) {
+          walletId = walletResult.rows[0].id;
+        }
+      } else if (wallet_id) {
+        walletId = parseInt(wallet_id);
+        const walletResult = await pool.query(
+          'SELECT wallet_number FROM wallets WHERE id = $1 AND user_id = $2 LIMIT 1',
+          [walletId, userId]
+        );
+        if (walletResult.rows.length > 0) {
+          walletNumber = walletResult.rows[0].wallet_number;
+        }
+      } else {
+        const walletResult = await pool.query(
+          'SELECT id, wallet_number FROM wallets WHERE user_id = $1 LIMIT 1',
+          [userId]
+        );
+        if (walletResult.rows.length > 0) {
+          walletId = walletResult.rows[0].id;
+          walletNumber = walletResult.rows[0].wallet_number;
+        }
+      }
+    }
+
+    // Insert deposit request
+    const depositResult = await pool.query(
+      `INSERT INTO deposit_requests 
+        (user_id, gateway_id, amount, currency, deposit_to_type, mt5_account_id, wallet_id, wallet_number, status)
+      VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, 'pending')
+      RETURNING *`,
+      [
+        userId,
+        parseFloat(amount),
+        currency,
+        depositToType,
+        mt5AccountId || null,
+        walletId || null,
+        walletNumber || null
+      ]
+    );
+
+    const depositRequest = depositResult.rows[0];
+
+    // Generate order ID and create Cregis payment
+    const orderId = cregisService.generateOrderId(depositRequest.id);
+    
+    console.log('Creating Cregis payment for deposit:', {
+      depositId: depositRequest.id,
+      orderId,
+      amount: parseFloat(amount),
+      currency
+    });
+
+    // Get user info for payer details
+    const userResult = await pool.query(
+      'SELECT id, email, first_name, last_name FROM users WHERE id = $1',
+      [userId]
+    );
+    const user = userResult.rows[0];
+
+    const cregisResult = await cregisService.createPayment({
+      orderId,
+      amount: parseFloat(amount),
+      currency,
+      payerId: String(userId),
+      payerName: user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : null,
+      payerEmail: user?.email || null,
+      callbackUrl: `${getBaseUrl()}/api/deposits/cregis/webhook`,
+      successUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/user/deposits/cregis-usdt-trc20`,
+      cancelUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/user/deposits`,
+      validTime: 60 // 60 minutes
+    });
+
+    console.log('Cregis payment result:', cregisResult);
+
+    if (!cregisResult.success) {
+      // Update deposit request status to rejected
+      await pool.query(
+        'UPDATE deposit_requests SET status = $1 WHERE id = $2',
+        ['rejected', depositRequest.id]
+      );
+
+      console.error('Cregis payment creation failed:', cregisResult.error);
+      return res.status(500).json({
+        success: false,
+        error: cregisResult.error || 'Failed to create payment order'
+      });
+    }
+
+    const cregisData = cregisResult.data;
+
+    // Update deposit request with Cregis order ID and cregis_id
+    await pool.query(
+      `UPDATE deposit_requests 
+       SET cregis_order_id = $1, cregis_status = $2 
+       WHERE id = $3`,
+      [orderId, cregisData.status, depositRequest.id]
+    );
+
+    // Store Cregis transaction (use cregisId as cregis_order_id for queries)
+    await pool.query(
+      `INSERT INTO cregis_transactions 
+        (deposit_request_id, cregis_order_id, cregis_status, amount, currency, payment_url, qr_code_url, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT (cregis_order_id) DO UPDATE SET
+        cregis_status = $3,
+        payment_url = $6,
+        qr_code_url = $7,
+        expires_at = $8,
+        updated_at = NOW()`,
+      [
+        depositRequest.id,
+        cregisData.cregisId, // Store cregis_id for status queries
+        cregisData.status,
+        cregisData.amount,
+        cregisData.currency,
+        cregisData.paymentUrl || cregisData.checkoutUrl,
+        cregisData.qrCodeUrl,
+        cregisData.expiresAt
+      ]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        depositId: depositRequest.id,
+        cregisId: cregisData.cregisId,
+        orderId,
+        checkoutUrl: cregisData.checkoutUrl,
+        paymentUrl: cregisData.checkoutUrl, // Alias for compatibility
+        qrCodeUrl: cregisData.qrCodeUrl,
+        paymentAddress: cregisData.paymentAddress,
+        amount: cregisData.amount,
+        currency: cregisData.currency,
+        expiresAt: cregisData.expiresAt,
+        status: cregisData.status,
+        paymentInfo: cregisData.paymentInfo
+      }
+    });
+  } catch (error) {
+    console.error('Create Cregis payment error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to create payment order'
+    });
+  }
+});
+
+/**
+ * GET /api/deposits/cregis/status/:depositId
+ * Check payment status for a Cregis deposit
+ */
+router.get('/cregis/status/:depositId', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { depositId } = req.params;
+
+    // Verify deposit belongs to user
+    const depositCheck = await pool.query(
+      `SELECT id, cregis_order_id, cregis_status, status, deposit_to_type, mt5_account_id, amount, currency
+       FROM deposit_requests 
+       WHERE id = $1 AND user_id = $2`,
+      [depositId, userId]
+    );
+
+    if (depositCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Deposit not found or does not belong to you'
+      });
+    }
+
+    const deposit = depositCheck.rows[0];
+
+    // Get cregis_id from cregis_transactions table
+    const cregisTransaction = await pool.query(
+      'SELECT cregis_order_id FROM cregis_transactions WHERE deposit_request_id = $1 LIMIT 1',
+      [deposit.id]
+    );
+
+    if (cregisTransaction.rows.length === 0 || !cregisTransaction.rows[0].cregis_order_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'No Cregis transaction found for this deposit'
+      });
+    }
+
+    const cregisId = cregisTransaction.rows[0].cregis_order_id; // This is actually cregis_id
+
+    // Check status from Cregis API using cregis_id
+    const statusResult = await cregisService.checkPaymentStatus(cregisId);
+
+    if (!statusResult.success) {
+      return res.status(500).json({
+        success: false,
+        error: statusResult.error || 'Failed to check payment status'
+      });
+    }
+
+    const cregisStatus = statusResult.data.status;
+    const depositStatus = cregisService.mapCregisStatusToDepositStatus(cregisStatus);
+
+    // Update deposit request if status changed
+    if (cregisStatus !== deposit.cregis_status) {
+      await pool.query(
+        `UPDATE deposit_requests 
+         SET cregis_status = $1, status = $2, updated_at = NOW()
+         WHERE id = $3`,
+        [cregisStatus, depositStatus, deposit.id]
+      );
+
+      // Update cregis_transactions
+      await pool.query(
+        `UPDATE cregis_transactions 
+         SET cregis_status = $1, updated_at = NOW()
+         WHERE cregis_order_id = $2`,
+        [cregisStatus, cregisId]
+      );
+
+      // If payment is paid/paid_over and deposit is for MT5, add balance
+      if ((cregisStatus === 'paid' || cregisStatus === 'paid_over') 
+          && deposit.deposit_to_type === 'mt5' 
+          && deposit.mt5_account_id 
+          && deposit.status !== 'approved') {
+        try {
+          const login = parseInt(deposit.mt5_account_id, 10);
+          if (!Number.isNaN(login)) {
+            await mt5Service.addBalance(
+              login,
+              parseFloat(deposit.amount),
+              `Cregis deposit #${deposit.id}`
+            );
+            console.log(`Added balance to MT5 account ${login} for Cregis deposit #${deposit.id}`);
+          }
+        } catch (mt5Error) {
+          console.error('Error adding MT5 balance:', mt5Error);
+          // Don't fail the request, just log the error
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        depositId: deposit.id,
+        cregisStatus,
+        depositStatus,
+        amount: statusResult.data.amount || deposit.amount,
+        currency: statusResult.data.currency || deposit.currency,
+        transactionHash: statusResult.data.transactionHash,
+        paidAt: statusResult.data.paidAt
+      }
+    });
+  } catch (error) {
+    console.error('Check Cregis payment status error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to check payment status'
+    });
+  }
+});
+
+/**
+ * POST /api/deposits/cregis/webhook
+ * Handle Cregis webhook callbacks (public endpoint, no auth)
+ */
+router.post('/cregis/webhook', express.json(), async (req, res) => {
+  try {
+    const payload = req.body;
+    const signature = req.headers['x-cregis-signature'] || req.headers['x-signature'] || null;
+
+    console.log('Cregis webhook received:', JSON.stringify(payload, null, 2));
+
+    const webhookResult = await cregisService.handleWebhook(payload, signature);
+
+    if (!webhookResult.success) {
+      console.error('Webhook processing failed:', webhookResult.error);
+      return res.status(400).json({
+        success: false,
+        error: webhookResult.error
+      });
+    }
+
+    const { cregisId, orderId, status, transactionHash } = webhookResult.data;
+
+    // Find deposit request by order_id (merchant order ID)
+    const depositCheck = await pool.query(
+      `SELECT id, user_id, deposit_to_type, mt5_account_id, amount, currency, status
+       FROM deposit_requests 
+       WHERE cregis_order_id = $1`,
+      [orderId]
+    );
+
+    if (depositCheck.rows.length === 0) {
+      console.error('Deposit not found for Cregis order ID:', orderId);
+      return res.status(404).json({
+        success: false,
+        error: 'Deposit not found'
+      });
+    }
+
+    const deposit = depositCheck.rows[0];
+    const depositStatus = cregisService.mapCregisStatusToDepositStatus(status);
+
+    // Update deposit request
+    await pool.query(
+      `UPDATE deposit_requests 
+       SET cregis_status = $1, status = $2, updated_at = NOW()
+       WHERE id = $3`,
+      [status, depositStatus, deposit.id]
+    );
+
+    // Update cregis_transactions using cregis_id
+    await pool.query(
+      `UPDATE cregis_transactions 
+       SET cregis_status = $1, webhook_data = $2, updated_at = NOW()
+       WHERE cregis_order_id = $3`,
+      [status, JSON.stringify(payload), cregisId]
+    );
+
+    // If payment is paid/paid_over and deposit is for MT5, add balance
+    if ((status === 'paid' || status === 'paid_over') 
+        && deposit.deposit_to_type === 'mt5' 
+        && deposit.mt5_account_id 
+        && deposit.status !== 'approved') {
+      try {
+        const login = parseInt(deposit.mt5_account_id, 10);
+        if (!Number.isNaN(login)) {
+          await mt5Service.addBalance(
+            login,
+            parseFloat(deposit.amount),
+            `Cregis deposit #${deposit.id}`
+          );
+          console.log(`Added balance to MT5 account ${login} for Cregis deposit #${deposit.id} via webhook`);
+        }
+      } catch (mt5Error) {
+        console.error('Error adding MT5 balance from webhook:', mt5Error);
+        // Don't fail the webhook, just log the error
+      }
+    }
+
+    // Return "success" string as required by Cregis
+    res.status(200).send('success');
+  } catch (error) {
+    console.error('Cregis webhook error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to process webhook'
     });
   }
 });
