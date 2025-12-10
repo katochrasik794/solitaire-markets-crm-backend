@@ -977,6 +977,161 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
 });
 
 /**
+ * GET /api/admin/kyc
+ * Get all KYC verifications with user information
+ */
+router.get('/kyc', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { limit = 500 } = req.query;
+    const limitNum = parseInt(limit, 10) || 500;
+
+    const query = `
+      SELECT 
+        k.id,
+        k.user_id as "userId",
+        k.status as "verificationStatus",
+        k.document_front_path as "documentReference",
+        k.document_back_path as "addressReference",
+        k.submitted_at as "documentSubmittedAt",
+        k.submitted_at as "addressSubmittedAt",
+        k.created_at as "createdAt",
+        k.reviewed_at as "reviewedAt",
+        u.id as "user_id",
+        CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, '')) as name,
+        u.email,
+        u.country
+      FROM kyc_verifications k
+      LEFT JOIN users u ON k.user_id = u.id
+      ORDER BY k.created_at DESC
+      LIMIT $1
+    `;
+
+    const result = await pool.query(query, [limitNum]);
+
+    const items = result.rows.map(row => ({
+      id: row.id,
+      userId: row.userId,
+      User: {
+        name: row.name?.trim() || '-',
+        email: row.email || '-',
+        country: row.country || '-'
+      },
+      isDocumentVerified: row.verificationStatus === 'approved',
+      isAddressVerified: row.verificationStatus === 'approved',
+      verificationStatus: row.verificationStatus || 'Pending',
+      documentReference: row.documentReference || null,
+      addressReference: row.addressReference || null,
+      documentSubmittedAt: row.documentSubmittedAt || null,
+      addressSubmittedAt: row.addressSubmittedAt || null,
+      createdAt: row.createdAt || null
+    }));
+
+    res.json({
+      ok: true,
+      items
+    });
+  } catch (error) {
+    console.error('Get KYC list error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch KYC verifications'
+    });
+  }
+});
+
+/**
+ * PATCH /api/admin/kyc/:id
+ * Update a KYC verification record
+ */
+router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
+  try {
+    const kycId = parseInt(req.params.id);
+    if (Number.isNaN(kycId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid KYC id' });
+    }
+
+    const { 
+      verificationStatus, 
+      documentReference, 
+      addressReference 
+    } = req.body;
+
+    // Check if KYC record exists
+    const kycCheck = await pool.query('SELECT id FROM kyc_verifications WHERE id = $1', [kycId]);
+    if (kycCheck.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'KYC record not found' });
+    }
+
+    // Build update query dynamically
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+
+    if (verificationStatus !== undefined) {
+      // Normalize status to lowercase
+      const normalizedStatus = String(verificationStatus).toLowerCase();
+      if (!['pending', 'approved', 'rejected'].includes(normalizedStatus)) {
+        return res.status(400).json({ 
+          ok: false, 
+          error: 'verificationStatus must be one of: pending, approved, rejected (case insensitive)' 
+        });
+      }
+      updates.push(`status = $${paramIndex++}`);
+      values.push(normalizedStatus);
+      
+      // Set reviewed_at if status is approved or rejected
+      if (normalizedStatus === 'approved' || normalizedStatus === 'rejected') {
+        updates.push(`reviewed_at = NOW()`);
+      } else {
+        updates.push(`reviewed_at = NULL`);
+      }
+    }
+
+    if (documentReference !== undefined) {
+      updates.push(`document_front_path = $${paramIndex++}`);
+      values.push(documentReference);
+    }
+
+    if (addressReference !== undefined) {
+      updates.push(`document_back_path = $${paramIndex++}`);
+      values.push(addressReference);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ ok: false, error: 'No fields to update' });
+    }
+
+    values.push(kycId);
+    const updateQuery = `
+      UPDATE kyc_verifications 
+      SET ${updates.join(', ')}, updated_at = NOW()
+      WHERE id = $${paramIndex}
+      RETURNING id, status, document_front_path, document_back_path, reviewed_at
+    `;
+
+    const result = await pool.query(updateQuery, values);
+
+    res.json({
+      ok: true,
+      message: 'KYC record updated successfully',
+      data: {
+        id: result.rows[0].id,
+        verificationStatus: result.rows[0].status,
+        documentReference: result.rows[0].document_front_path,
+        addressReference: result.rows[0].document_back_path,
+        reviewedAt: result.rows[0].reviewed_at
+      }
+    });
+  } catch (error) {
+    console.error('Update KYC error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to update KYC record'
+    });
+  }
+});
+
+/**
  * DELETE /api/admin/users/:id
  * Delete a user and all related data (cascade deletes)
  */

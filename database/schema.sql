@@ -482,7 +482,7 @@ CREATE TABLE IF NOT EXISTS deposit_requests (
     mt5_account_id VARCHAR(50),
     wallet_id INTEGER REFERENCES wallets(id) ON DELETE SET NULL,
     wallet_number VARCHAR(50),
-    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled')),
     admin_notes TEXT,
     cregis_order_id VARCHAR(255),
     cregis_status VARCHAR(50),

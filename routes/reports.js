@@ -10,41 +10,65 @@ const router = express.Router();
  * Helper function to format gateway name for display
  * Converts gateway types/names to user-friendly format
  * Examples: "USDT_TRC20" -> "TRC20", "Bank_Transfer" -> "Bank", "USDT TRC20" -> "TRC20"
+ * NEVER returns "Manual Gateway" - always shows the actual gateway name
  */
 const formatGatewayName = (gatewayName, gatewayType) => {
+  // If both are null/empty, return a generic name
   if (!gatewayName && !gatewayType) return 'Gateway';
   
-  const name = (gatewayName || '').toUpperCase();
-  const type = (gatewayType || '').toUpperCase();
+  const name = (gatewayName || '').toUpperCase().trim();
+  const type = (gatewayType || '').toUpperCase().trim();
+  
+  // Remove "MANUAL" from any string first
+  const cleanName = name.replace(/MANUAL/gi, '').trim();
+  const cleanType = type.replace(/MANUAL/gi, '').trim();
   
   // Handle gateway types first (more specific)
-  if (type) {
+  if (cleanType) {
     // Convert types like "USDT_TRC20" to "TRC20", "USDT_ERC20" to "ERC20", etc.
-    if (type.includes('_')) {
-      const parts = type.split('_');
+    if (cleanType.includes('_')) {
+      const parts = cleanType.split('_').filter(p => p && p !== 'MANUAL');
       if (parts.length > 1) {
         // Return the last part (e.g., "TRC20", "ERC20", "BEP20")
         return parts[parts.length - 1];
+      } else if (parts.length === 1) {
+        return parts[0];
       }
     }
     // Handle specific types
-    if (type === 'BANK_TRANSFER' || type === 'BANK') return 'Bank';
-    if (type === 'DEBIT_CARD' || type === 'CARD') return 'Debit Card';
-    if (type === 'OTHER_CRYPTO') return 'Crypto';
-    if (type === 'UPI') return 'UPI';
+    if (cleanType === 'BANK_TRANSFER' || cleanType === 'BANK') return 'Bank';
+    if (cleanType === 'DEBIT_CARD' || cleanType === 'CARD') return 'Debit Card';
+    if (cleanType === 'OTHER_CRYPTO') return 'Crypto';
+    if (cleanType === 'UPI') return 'UPI';
+    if (cleanType === 'CRYPTOCURRENCY') return 'Crypto';
   }
   
   // Handle gateway names directly
-  if (name.includes('TRC20') || name.includes('TRC-20')) return 'TRC20';
-  if (name.includes('ERC20') || name.includes('ERC-20')) return 'ERC20';
-  if (name.includes('BEP20') || name.includes('BEP-20')) return 'BEP20';
-  if (name.includes('UPI')) return 'UPI';
-  if (name.includes('BANK')) return 'Bank';
-  if (name.includes('BITCOIN') || name.includes('BTC')) return 'Bitcoin';
-  if (name.includes('ETHEREUM') || name.includes('ETH')) return 'Ethereum';
+  if (cleanName.includes('TRC20') || cleanName.includes('TRC-20')) return 'TRC20';
+  if (cleanName.includes('ERC20') || cleanName.includes('ERC-20')) return 'ERC20';
+  if (cleanName.includes('BEP20') || cleanName.includes('BEP-20')) return 'BEP20';
+  if (cleanName.includes('UPI')) return 'UPI';
+  if (cleanName.includes('BANK')) return 'Bank';
+  if (cleanName.includes('BITCOIN') || cleanName.includes('BTC')) return 'Bitcoin';
+  if (cleanName.includes('ETHEREUM') || cleanName.includes('ETH')) return 'Ethereum';
+  if (cleanName.includes('USDT')) {
+    // Try to extract network from name
+    if (cleanName.includes('TRC')) return 'TRC20';
+    if (cleanName.includes('ERC')) return 'ERC20';
+    if (cleanName.includes('BEP')) return 'BEP20';
+    return 'USDT';
+  }
   
-  // Return a cleaned version of the name or type
-  return (gatewayName || gatewayType || 'Gateway').replace(/[_-]/g, ' ').trim();
+  // Return a cleaned version - remove "Manual" and clean up
+  const finalName = cleanName || cleanType || gatewayName || gatewayType || 'Gateway';
+  const cleaned = finalName.replace(/[_-]/g, ' ').replace(/MANUAL/gi, '').trim();
+  
+  // If empty after cleaning, return generic
+  if (!cleaned || cleaned.toLowerCase() === 'gateway' || cleaned.toLowerCase().includes('manual')) {
+    return 'Gateway';
+  }
+  
+  return cleaned;
 };
 
 /**
@@ -77,9 +101,14 @@ router.get('/transaction-history', authenticate, async (req, res) => {
         'deposit' as transaction_type
       FROM deposit_requests dr
       LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
-      LEFT JOIN auto_gateway ag ON dr.cregis_order_id IS NOT NULL 
-        AND ag.gateway_type = 'Cryptocurrency' 
-        AND ag.is_active = TRUE
+      LEFT JOIN LATERAL (
+        SELECT wallet_name, gateway_type
+        FROM auto_gateway
+        WHERE gateway_type = 'Cryptocurrency' 
+          AND is_active = TRUE
+        ORDER BY display_order ASC, created_at DESC
+        LIMIT 1
+      ) ag ON dr.cregis_order_id IS NOT NULL
       WHERE dr.user_id = $1
       ORDER BY dr.created_at DESC
       LIMIT $2 OFFSET $3
@@ -189,22 +218,26 @@ router.get('/mt5-account-statement', authenticate, async (req, res) => {
         dr.status,
         dr.mt5_account_id,
         dr.created_at,
-        mg.name as gateway_name,
-        mg.type as gateway_type,
+        COALESCE(mg.name, ag.wallet_name) as gateway_name,
+        COALESCE(mg.type, ag.gateway_type) as gateway_type,
         'deposit' as transaction_type,
         'credit' as operation_type
       FROM deposit_requests dr
       LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
+      LEFT JOIN LATERAL (
+        SELECT wallet_name, gateway_type
+        FROM auto_gateway
+        WHERE gateway_type = 'Cryptocurrency' 
+          AND is_active = TRUE
+        ORDER BY display_order ASC, created_at DESC
+        LIMIT 1
+      ) ag ON dr.cregis_order_id IS NOT NULL
       WHERE dr.user_id = $1 
         AND dr.deposit_to_type = 'mt5'
         ${accountNumber ? 'AND dr.mt5_account_id = $4' : ''}
       ORDER BY dr.created_at DESC
       LIMIT $2 OFFSET $3
     `;
-
-    const depositParams = accountNumber 
-      ? [userId, parseInt(limit), parseInt(offset), accountNumber]
-      : [userId, parseInt(limit), parseInt(offset)];
 
     const depositResult = await pool.query(depositQuery, depositParams);
 
@@ -319,6 +352,14 @@ router.get('/mt5-account-statement/download/pdf', authenticate, async (req, res)
     const userId = req.user.id;
     const accountNumber = req.query.accountNumber || null;
 
+    // Get the first active auto gateway for Cregis deposits
+    const autoGatewayResult = await pool.query(
+      `SELECT wallet_name, gateway_type FROM auto_gateway 
+       WHERE gateway_type = 'Cryptocurrency' AND is_active = TRUE 
+       ORDER BY display_order ASC, created_at DESC LIMIT 1`
+    );
+    const autoGateway = autoGatewayResult.rows[0] || null;
+
     // Fetch all MT5 transactions (no limit for PDF)
     const depositQuery = `
       SELECT 
@@ -328,21 +369,28 @@ router.get('/mt5-account-statement/download/pdf', authenticate, async (req, res)
         dr.status,
         dr.mt5_account_id,
         dr.created_at,
-        COALESCE(mg.name, ag.wallet_name) as gateway_name,
-        COALESCE(mg.type, ag.gateway_type) as gateway_type,
+        CASE 
+          WHEN dr.gateway_id IS NOT NULL THEN mg.name
+          WHEN dr.cregis_order_id IS NOT NULL THEN $${accountNumber ? '3' : '2'}
+          ELSE NULL
+        END as gateway_name,
+        CASE 
+          WHEN dr.gateway_id IS NOT NULL THEN mg.type
+          WHEN dr.cregis_order_id IS NOT NULL THEN $${accountNumber ? '4' : '3'}
+          ELSE NULL
+        END as gateway_type,
         'deposit' as transaction_type
       FROM deposit_requests dr
       LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
-      LEFT JOIN auto_gateway ag ON dr.cregis_order_id IS NOT NULL 
-        AND ag.gateway_type = 'Cryptocurrency' 
-        AND ag.is_active = TRUE
       WHERE dr.user_id = $1 
         AND dr.deposit_to_type = 'mt5'
-        ${accountNumber ? 'AND dr.mt5_account_id = $2' : ''}
+        ${accountNumber ? 'AND dr.mt5_account_id = $5' : ''}
       ORDER BY dr.created_at DESC
     `;
 
-    const depositParams = accountNumber ? [userId, accountNumber] : [userId];
+    const depositParams = accountNumber 
+      ? [userId, accountNumber, autoGateway?.wallet_name || null, autoGateway?.gateway_type || null, accountNumber]
+      : [userId, autoGateway?.wallet_name || null, autoGateway?.gateway_type || null];
     const depositResult = await pool.query(depositQuery, depositParams);
 
     const transferQuery = `
@@ -456,6 +504,14 @@ router.get('/mt5-account-statement/download/excel', authenticate, async (req, re
     const userId = req.user.id;
     const accountNumber = req.query.accountNumber || null;
 
+    // Get the first active auto gateway for Cregis deposits
+    const autoGatewayResult = await pool.query(
+      `SELECT wallet_name, gateway_type FROM auto_gateway 
+       WHERE gateway_type = 'Cryptocurrency' AND is_active = TRUE 
+       ORDER BY display_order ASC, created_at DESC LIMIT 1`
+    );
+    const autoGateway = autoGatewayResult.rows[0] || null;
+
     // Fetch all MT5 transactions
     const depositQuery = `
       SELECT 
@@ -465,17 +521,28 @@ router.get('/mt5-account-statement/download/excel', authenticate, async (req, re
         dr.status,
         dr.mt5_account_id,
         dr.created_at,
-        mg.name as gateway_name,
+        CASE 
+          WHEN dr.gateway_id IS NOT NULL THEN mg.name
+          WHEN dr.cregis_order_id IS NOT NULL THEN $${accountNumber ? '3' : '2'}
+          ELSE NULL
+        END as gateway_name,
+        CASE 
+          WHEN dr.gateway_id IS NOT NULL THEN mg.type
+          WHEN dr.cregis_order_id IS NOT NULL THEN $${accountNumber ? '4' : '3'}
+          ELSE NULL
+        END as gateway_type,
         'deposit' as transaction_type
       FROM deposit_requests dr
       LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
       WHERE dr.user_id = $1 
         AND dr.deposit_to_type = 'mt5'
-        ${accountNumber ? 'AND dr.mt5_account_id = $2' : ''}
+        ${accountNumber ? 'AND dr.mt5_account_id = $5' : ''}
       ORDER BY dr.created_at DESC
     `;
 
-    const depositParams = accountNumber ? [userId, accountNumber] : [userId];
+    const depositParams = accountNumber 
+      ? [userId, accountNumber, autoGateway?.wallet_name || null, autoGateway?.gateway_type || null, accountNumber]
+      : [userId, autoGateway?.wallet_name || null, autoGateway?.gateway_type || null];
     const depositResult = await pool.query(depositQuery, depositParams);
 
     const transferQuery = `
@@ -551,7 +618,7 @@ router.get('/mt5-account-statement/download/excel', authenticate, async (req, re
       worksheet.addRow({
         date: tx.date,
         type: tx.type,
-        description: tx.description,
+        description: tx.description.replace(/Manual Gateway/gi, 'Gateway'),
         amount: tx.amount,
         currency: tx.currency,
         status: tx.status,

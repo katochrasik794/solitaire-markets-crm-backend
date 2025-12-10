@@ -53,6 +53,44 @@ const testDatabaseConnection = async (retries = 3, delay = 2000) => {
 
 testDatabaseConnection();
 
+// Scheduled job to cancel expired deposits (runs every 5 minutes)
+const cancelExpiredDeposits = async () => {
+  try {
+    // Find pending deposits with cregis_order_id that are older than 60 minutes
+    const result = await pool.query(
+      `UPDATE deposit_requests 
+       SET status = 'cancelled', 
+           cregis_status = 'expired',
+           updated_at = NOW()
+       WHERE status = 'pending' 
+         AND cregis_order_id IS NOT NULL
+         AND created_at < NOW() - INTERVAL '60 minutes'
+       RETURNING id, cregis_order_id`
+    );
+
+    if (result.rows.length > 0) {
+      console.log(`✅ Cancelled ${result.rows.length} expired deposit(s):`, 
+        result.rows.map(r => `#${r.id} (${r.cregis_order_id})`).join(', '));
+      
+      // Also update cregis_transactions if they exist
+      for (const row of result.rows) {
+        await pool.query(
+          `UPDATE cregis_transactions 
+           SET cregis_status = 'expired', updated_at = NOW()
+           WHERE deposit_request_id = $1`,
+          [row.id]
+        );
+      }
+    }
+  } catch (error) {
+    console.error('❌ Error cancelling expired deposits:', error);
+  }
+};
+
+// Run immediately on startup, then every 5 minutes
+cancelExpiredDeposits();
+setInterval(cancelExpiredDeposits, 5 * 60 * 1000); // Every 5 minutes
+
 // Middleware
 // CORS: fully open for all origins (including https://portal.solitairemarkets.com)
 // The request Origin will be reflected back in Access-Control-Allow-Origin.
