@@ -88,8 +88,84 @@ router.get('/status', authenticate, async (req, res, next) => {
 });
 
 /**
+ * POST /api/kyc/profile
+ * Submit profile information (Step 1) - before Sumsub verification
+ */
+router.post('/profile', authenticate, async (req, res, next) => {
+  try {
+    const {
+      hasTradingExperience,
+      employmentStatus,
+      annualIncome,
+      totalNetWorth,
+      sourceOfWealth
+    } = req.body;
+
+    // Validation
+    if (!hasTradingExperience || !employmentStatus || !annualIncome || 
+        !totalNetWorth || !sourceOfWealth) {
+      return res.status(400).json({
+        success: false,
+        message: 'All fields are required'
+      });
+    }
+
+    // Check if user already has a KYC record
+    const existingCheck = await pool.query(
+      'SELECT id FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [req.user.id]
+    );
+
+    if (existingCheck.rows.length > 0) {
+      // Update existing record
+      await pool.query(
+        `UPDATE kyc_verifications 
+         SET has_trading_experience = $1, employment_status = $2, annual_income = $3,
+             total_net_worth = $4, source_of_wealth = $5, updated_at = NOW()
+         WHERE id = $6`,
+        [
+          hasTradingExperience === 'yes' || hasTradingExperience === true,
+          employmentStatus,
+          annualIncome,
+          totalNetWorth,
+          sourceOfWealth,
+          existingCheck.rows[0].id
+        ]
+      );
+    } else {
+      // Create new KYC record with profile data only
+      await pool.query(
+        `INSERT INTO kyc_verifications (
+          user_id, has_trading_experience, employment_status, annual_income,
+          total_net_worth, source_of_wealth, status
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+        RETURNING id`,
+        [
+          req.user.id,
+          hasTradingExperience === 'yes' || hasTradingExperience === true,
+          employmentStatus,
+          annualIncome,
+          totalNetWorth,
+          sourceOfWealth
+        ]
+      );
+    }
+
+    // Profile saved successfully - don't initialize Sumsub here
+    // Sumsub will be initialized when user moves to step 2
+    res.json({
+      success: true,
+      message: 'Profile submitted successfully'
+    });
+  } catch (error) {
+    console.error('Submit profile error:', error);
+    next(error);
+  }
+});
+
+/**
  * POST /api/kyc/submit
- * Submit KYC verification with documents
+ * Submit KYC verification with documents (OLD - kept for backward compatibility)
  */
 router.post('/submit', authenticate, upload.fields([
   { name: 'frontDocument', maxCount: 1 },
@@ -174,15 +250,52 @@ router.post('/submit', authenticate, upload.fields([
 });
 
 /**
+ * POST /api/kyc/update-status
+ * Update KYC status (called after Sumsub verification completes)
+ */
+router.post('/update-status', authenticate, async (req, res, next) => {
+  try {
+    const { status } = req.body;
+
+    if (!status || !['pending', 'approved', 'rejected'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid status. Must be one of: pending, approved, rejected'
+      });
+    }
+
+    // Update KYC status
+    await pool.query(
+      `UPDATE kyc_verifications 
+       SET status = $1, reviewed_at = NOW(), updated_at = NOW()
+       WHERE user_id = $2 AND id = (SELECT id FROM kyc_verifications WHERE user_id = $2 ORDER BY created_at DESC LIMIT 1)`,
+      [status, req.user.id]
+    );
+
+    res.json({
+      success: true,
+      message: 'KYC status updated successfully'
+    });
+  } catch (error) {
+    console.error('Update KYC status error:', error);
+    next(error);
+  }
+});
+
+/**
  * POST /api/kyc/sumsub/init
  * Initialize Sumsub verification (create applicant + get access token)
  * Called automatically when Verification page loads
  */
 router.post('/sumsub/init', authenticate, async (req, res, next) => {
   try {
-    // Get user data from database
+    // Get user data from database with country code
     const userResult = await pool.query(
-      'SELECT id, email, first_name, last_name, phone_code, phone_number, country, city FROM users WHERE id = $1',
+      `SELECT u.id, u.email, u.first_name, u.last_name, u.phone_code, u.phone_number, u.country,
+              c.country_code
+       FROM users u
+       LEFT JOIN countries c ON LOWER(TRIM(u.country)) = LOWER(TRIM(c.name))
+       WHERE u.id = $1`,
       [req.user.id]
     );
 
@@ -194,6 +307,31 @@ router.post('/sumsub/init', authenticate, async (req, res, next) => {
     }
 
     const userData = userResult.rows[0];
+    
+    // Convert 2-letter country code to 3-letter ISO code if needed
+    // Sumsub typically uses ISO 3166-1 alpha-3 (3-letter codes)
+    let countryCode = null;
+    if (userData.country_code) {
+      // We have 2-letter code, need to convert to 3-letter
+      // For now, use the 2-letter code - Sumsub may accept it
+      // If not, we'll need a mapping table
+      countryCode = userData.country_code;
+    } else if (userData.country) {
+      // Try to find country code from countries table
+      const countryResult = await pool.query(
+        'SELECT country_code FROM countries WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) LIMIT 1',
+        [userData.country]
+      );
+      if (countryResult.rows.length > 0) {
+        countryCode = countryResult.rows[0].country_code;
+      }
+    }
+    
+    // Create a mapping object with country code
+    const userDataForSumsub = {
+      ...userData,
+      country_code: countryCode
+    };
 
     // Check if user already has a Sumsub applicant
     const existingKyc = await pool.query(
@@ -204,17 +342,19 @@ router.post('/sumsub/init', authenticate, async (req, res, next) => {
     let applicantId;
     let accessToken;
 
+    const levelName = process.env.SUMSUB_LEVEL_NAME || 'id-only';
+
     if (existingKyc.rows.length > 0 && existingKyc.rows[0].sumsub_applicant_id) {
       // Use existing applicant
       applicantId = existingKyc.rows[0].sumsub_applicant_id;
-      accessToken = await sumsubService.generateAccessToken(applicantId);
+      accessToken = await sumsubService.generateAccessToken(applicantId, levelName);
     } else {
-      // Create new applicant
-      const applicant = await sumsubService.createApplicant(req.user.id, userData);
+      // Create new applicant with configured level
+      const applicant = await sumsubService.createApplicant(req.user.id, userDataForSumsub, levelName);
       applicantId = applicant.id;
 
       // Generate access token
-      accessToken = await sumsubService.generateAccessToken(applicantId);
+      accessToken = await sumsubService.generateAccessToken(applicantId, levelName);
 
       // Create or update KYC record with Sumsub data
       const kycCheck = await pool.query(
@@ -228,14 +368,14 @@ router.post('/sumsub/init', authenticate, async (req, res, next) => {
           `UPDATE kyc_verifications 
            SET sumsub_applicant_id = $1, sumsub_verification_status = 'init', sumsub_level_name = $2
            WHERE id = $3`,
-          [applicantId, process.env.SUMSUB_LEVEL_NAME || 'basic-kyc-level', kycCheck.rows[0].id]
+          [applicantId, levelName, kycCheck.rows[0].id]
         );
       } else {
         // Create new record
         await pool.query(
           `INSERT INTO kyc_verifications (user_id, sumsub_applicant_id, sumsub_verification_status, sumsub_level_name, status)
            VALUES ($1, $2, 'init', $3, 'pending')`,
-          [req.user.id, applicantId, process.env.SUMSUB_LEVEL_NAME || 'basic-kyc-level']
+          [req.user.id, applicantId, levelName]
         );
       }
     }
@@ -245,7 +385,7 @@ router.post('/sumsub/init', authenticate, async (req, res, next) => {
       data: {
         applicantId,
         accessToken,
-        levelName: process.env.SUMSUB_LEVEL_NAME || 'basic-kyc-level'
+        levelName: levelName
       }
     });
   } catch (error) {

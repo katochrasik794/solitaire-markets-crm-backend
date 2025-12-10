@@ -28,6 +28,10 @@ const migrations = [
   {
     name: 'Make Gateway ID Nullable',
     file: join(__dirname, '../database/migration_make_gateway_id_nullable.sql')
+  },
+  {
+    name: 'Add Cancelled Status',
+    file: join(__dirname, '../database/migration_add_cancelled_status.sql')
   }
 ];
 
