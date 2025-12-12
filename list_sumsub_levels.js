@@ -44,7 +44,12 @@ const listLevels = async () => {
 
         const data = await response.json();
         console.log('Response Status:', response.status);
-        console.log('Response Body:', JSON.stringify(data, null, 2));
+        if (data.items) {
+            console.log('Level Names:', data.items.map(item => item.name).join(', '));
+            console.log('Level IDs:', data.items.map(item => item.id).join(', ')); // Some logic uses id?
+        } else {
+            console.log('No items found in response or error:', JSON.stringify(data));
+        }
 
     } catch (err) {
         console.error('Error:', err);
