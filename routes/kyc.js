@@ -82,7 +82,7 @@ router.post('/sumsub/init', authenticate, async (req, res) => {
 router.get('/sumsub/access-token/:applicantId', authenticate, async (req, res) => {
   try {
     const { applicantId } = req.params;
-    const levelName = process.env.SUMSUB_LEVEL_NAME || 'basic-kyc-level';
+    const levelName = process.env.SUMSUB_LEVEL_NAME || 'id-and-liveness';
     const tokenData = await createAccessToken(req.user.id.toString(), levelName);
 
     res.json({

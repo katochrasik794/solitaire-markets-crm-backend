@@ -1,13 +1,12 @@
 import crypto from 'crypto';
 
-const SUMSUB_APP_TOKEN = process.env.SUMSUB_APP_TOKEN;
-const SUMSUB_SECRET_KEY = process.env.SUMSUB_SECRET_KEY;
-const SUMSUB_BASE_URL = process.env.SUMSUB_API_URL || 'https://api.sumsub.com';
-
 // Helper to calculate signature
 const createSignature = (config) => {
     const ts = Math.floor(Date.now() / 1000);
-    const signature = crypto.createHmac('sha256', SUMSUB_SECRET_KEY);
+    const secretKey = process.env.SUMSUB_SECRET_KEY;
+    if (!secretKey) throw new Error('SUMSUB_SECRET_KEY is missing');
+
+    const signature = crypto.createHmac('sha256', secretKey);
     signature.update(ts + config.method.toUpperCase() + config.url);
     if (config.data) {
         signature.update(config.data);
@@ -28,18 +27,37 @@ export const createAccessToken = async (userId, levelName = 'basic-kyc-level') =
         data: null
     });
 
-    const response = await fetch(`${SUMSUB_BASE_URL}${path}`, {
+    const baseUrl = process.env.SUMSUB_API_URL || 'https://api.sumsub.com';
+    const appToken = process.env.SUMSUB_APP_TOKEN;
+    const fullUrl = `${baseUrl}${path}`;
+    console.log('Sumsub Fetch URL:', fullUrl);
+
+    if (!appToken) throw new Error('SUMSUB_APP_TOKEN is missing');
+
+    const response = await fetch(fullUrl, {
         method,
         headers: {
             'Content-Type': 'application/json',
-            'X-App-Token': SUMSUB_APP_TOKEN,
+            'X-App-Token': appToken,
             'X-App-Access-Ts': ts,
             'X-App-Access-Sig': signature
         }
     });
 
-    const data = await response.json();
+    const text = await response.text();
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch (e) {
+        console.error('Failed to parse Sumsub response:', text);
+        console.error('Response Status:', response.status, response.statusText);
+        console.error('Response Headers:', JSON.stringify([...response.headers.entries()]));
+        throw new Error('Invalid JSON from Sumsub: ' + text.substring(0, 100));
+    }
+
     if (!response.ok) {
+        console.error('Sumsub Error Response:', data);
+        console.error('Response Status:', response.status);
         throw new Error(data.description || 'Failed to create access token');
     }
     return data;
