@@ -81,10 +81,10 @@ router.get('/:accountNumber/balance', authenticate, async (req, res) => {
       }
 
       const profileResult = await mt5Service.getClientProfile(login);
-      
+
       if (profileResult.success && profileResult.data && profileResult.data.Success && profileResult.data.Data) {
         const mt5Data = profileResult.data.Data;
-        
+
         // Update balance in database
         await pool.query(
           `UPDATE trading_accounts 
@@ -270,7 +270,8 @@ router.post('/create', authenticate, async (req, res, next) => {
       isCopyAccount,
       reasonForAccount,
       masterPassword,
-      portalPassword
+      portalPassword,
+      isDemo
     } = req.body;
 
     // Validation
@@ -354,8 +355,8 @@ router.post('/create', authenticate, async (req, res, next) => {
 
     // Prepare user data
     const accountName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'New Client Account';
-    const phone = user.phone_code && user.phone_number 
-      ? `${user.phone_code}-${user.phone_number}` 
+    const phone = user.phone_code && user.phone_number
+      ? `${user.phone_code}-${user.phone_number}`
       : user.phone_number || '';
     const country = user.country || '';
 
@@ -439,7 +440,7 @@ router.post('/create', authenticate, async (req, res, next) => {
     const encryptedInvestorPassword = encryptPassword(finalInvestorPassword);
 
     // Determine trading server
-    const tradingServer = 'Solitaire Markets-Live';
+    const tradingServer = isDemo ? 'Solitaire Markets-Demo' : 'Solitaire Markets-Live';
 
     // Determine account type based on group (you can customize this logic)
     // For now, we'll use 'standard' as default, but you can map it based on group_name
@@ -481,6 +482,8 @@ router.post('/create', authenticate, async (req, res, next) => {
     addField('phone', phone);
     addField('comment', reasonForAccount || '');
     addField('investor_password', encryptedInvestorPassword);
+    // Add is_demo flag
+    addField('is_demo', !!isDemo);
 
     const placeholders = insertFields.map((_, idx) => `$${idx + 1}`).join(', ');
 
@@ -491,6 +494,22 @@ router.post('/create', authenticate, async (req, res, next) => {
        RETURNING id`,
       insertValues
     );
+
+    // If Demo account, auto-deposit 10,000
+    if (isDemo && mt5Login) {
+      try {
+        const depositAmount = 10000;
+        await mt5Service.addBalance(mt5Login, depositAmount, 'Demo Account Opening Bonus');
+        // Update local DB balance
+        await pool.query(
+          'UPDATE trading_accounts SET balance = $1, equity = $1 WHERE account_number = $2',
+          [depositAmount, accountNumber]
+        );
+      } catch (depError) {
+        console.error('Failed to add demo deposit:', depError);
+        // Non-blocking error
+      }
+    }
 
     const newId = insertResult.rows[0].id;
 

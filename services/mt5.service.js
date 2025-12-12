@@ -89,9 +89,9 @@ export const createAccount = async (accountData) => {
   if (!res.ok || data.Error || data.Status === 'error') {
     throw new Error(
       data.Message ||
-        data.Error ||
-        data.error ||
-        JSON.stringify(data)
+      data.Error ||
+      data.error ||
+      JSON.stringify(data)
     );
   }
 
@@ -149,7 +149,7 @@ export const addBalance = async (
   login,
   balance,
   comment = 'Deposit via API'
-  ) => {
+) => {
   const payload = {
     Balance: balance,
     Comment: comment
@@ -167,8 +167,8 @@ export const addBalance = async (
   if (!res.ok) {
     throw new Error(
       data.Message ||
-        data.error ||
-        `Failed to add balance: ${res.status}`
+      data.error ||
+      `Failed to add balance: ${res.status}`
     );
   }
   return { success: true, data };
@@ -199,8 +199,8 @@ export const deductBalance = async (
   if (!res.ok) {
     throw new Error(
       data.Message ||
-        data.error ||
-        `Failed to deduct balance: ${res.status}`
+      data.error ||
+      `Failed to deduct balance: ${res.status}`
     );
   }
   return { success: true, data };
@@ -231,8 +231,8 @@ export const addBonus = async (
   if (!res.ok) {
     throw new Error(
       data.Message ||
-        data.error ||
-        `Failed to add bonus: ${res.status}`
+      data.error ||
+      `Failed to add bonus: ${res.status}`
     );
   }
   return { success: true, data };
@@ -263,8 +263,8 @@ export const deductBonus = async (
   if (!res.ok) {
     throw new Error(
       data.Message ||
-        data.error ||
-        `Failed to deduct bonus: ${res.status}`
+      data.error ||
+      `Failed to deduct bonus: ${res.status}`
     );
   }
   return { success: true, data };
@@ -285,8 +285,8 @@ export const getClientBalance = async (login) => {
   if (!res.ok) {
     throw new Error(
       data.Message ||
-        data.error ||
-        `Failed to get client balance: ${res.status}`
+      data.error ||
+      `Failed to get client balance: ${res.status}`
     );
   }
   return { success: true, data };
@@ -316,10 +316,59 @@ export const updateUser = async (login, updateData = {}) => {
   if (!res.ok) {
     throw new Error(
       data.Message ||
-        data.error ||
-        `Failed to update user: ${res.status}`
+      data.error ||
+      `Failed to update user: ${res.status}`
     );
   }
   return { success: true, data };
 };
 
+/**
+ * POST /Users/{login}/ChangePassword
+ * Change MT5 user password
+ * @param {number} login - MT5 account login
+ * @param {string} newPassword - New password to set
+ * @param {string} passwordType - 'master' or 'investor' (default: 'master')
+ */
+export const changePassword = async (login, newPassword, passwordType = 'master') => {
+  // Map 'master' to 'main' if needed. Zuperior uses 'main'.
+  const type = passwordType === 'master' ? 'main' : passwordType;
+
+  // Endpoint: /Security/users/{login}/password/change
+  // Method: PUT
+  // Body: "newPassword" (JSON string)
+  const endpoint = `Security/users/${login}/password/change`;
+  const params = `?passwordType=${type}`;
+
+  // Body should be just the password string, e.g., '"NewPassword123"'
+  const body = JSON.stringify(newPassword);
+
+  const res = await fetch(
+    `${MT5_BASE_URL}/${endpoint}${params}`,
+    {
+      method: 'PUT',
+      headers: getMT5Headers(),
+      body: body
+    }
+  );
+
+  const text = await res.text();
+  let data = {};
+  try {
+    if (text && text.trim()) {
+      data = JSON.parse(text);
+    }
+  } catch (e) {
+    console.warn('MT5 Response was not JSON:', text);
+  }
+
+  if (!res.ok) {
+    throw new Error(
+      data.Message ||
+      data.error ||
+      data.message ||
+      `Failed to change password: ${res.status}`
+    );
+  }
+  return { success: true, data };
+};
