@@ -52,7 +52,7 @@ const gatewayUpload = multer({
     const allowedTypes = /jpeg|jpg|png|gif|webp|svg/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
-    
+
     if (mimetype && extname) {
       return cb(null, true);
     } else {
@@ -87,7 +87,7 @@ const authenticateAdmin = (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET || 'your-secret-key');
-    
+
     // Check if it's an admin token
     if (!decoded.adminId) {
       return res.status(403).json({
@@ -170,7 +170,7 @@ router.post('/login', validateLogin, async (req, res, next) => {
       // Increment login attempts
       const newAttempts = (admin.login_attempts || 0) + 1;
       const lockUntil = newAttempts >= 5 ? new Date(Date.now() + 30 * 60 * 1000) : null; // Lock for 30 minutes after 5 failed attempts
-      
+
       await pool.query(
         'UPDATE admin SET login_attempts = $1, locked_until = $2 WHERE id = $3',
         [newAttempts, lockUntil, admin.id]
@@ -217,13 +217,13 @@ router.post('/login', validateLogin, async (req, res, next) => {
         'SELECT * FROM country_admins WHERE email = $1',
         [admin.email]
       );
-      
+
       if (countryAdminResult.rows.length > 0) {
         const countryAdmin = countryAdminResult.rows[0];
-        const features = countryAdmin.features 
+        const features = countryAdmin.features
           ? countryAdmin.features.split(',').map(f => f.trim()).filter(f => f && f.length > 0)
           : [];
-        
+
         countryAdminData = {
           isCountryAdmin: true,
           features: features,
@@ -558,10 +558,10 @@ router.get('/users/all', authenticateAdmin, async (req, res, next) => {
 
       const KYC = row.kyc_status
         ? {
-            verificationStatus: row.kyc_status,
-            isDocumentVerified: row.kyc_status === 'approved',
-            isAddressVerified: row.kyc_status === 'approved'
-          }
+          verificationStatus: row.kyc_status,
+          isDocumentVerified: row.kyc_status === 'approved',
+          isAddressVerified: row.kyc_status === 'approved'
+        }
         : null;
 
       return {
@@ -705,7 +705,7 @@ router.get('/users/with-balance', authenticateAdmin, async (req, res, next) => {
     for (const userRow of usersWithAccountsResult.rows) {
       const userId = userRow.id;
       const accounts = accountsByUser[userId] || [];
-      
+
       if (accounts.length === 0) continue;
 
       let totalBalance = 0;
@@ -1050,10 +1050,10 @@ router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'Invalid KYC id' });
     }
 
-    const { 
-      verificationStatus, 
-      documentReference, 
-      addressReference 
+    const {
+      verificationStatus,
+      documentReference,
+      addressReference
     } = req.body;
 
     // Check if KYC record exists
@@ -1071,14 +1071,14 @@ router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
       // Normalize status to lowercase
       const normalizedStatus = String(verificationStatus).toLowerCase();
       if (!['pending', 'approved', 'rejected'].includes(normalizedStatus)) {
-        return res.status(400).json({ 
-          ok: false, 
-          error: 'verificationStatus must be one of: pending, approved, rejected (case insensitive)' 
+        return res.status(400).json({
+          ok: false,
+          error: 'verificationStatus must be one of: pending, approved, rejected (case insensitive)'
         });
       }
       updates.push(`status = $${paramIndex++}`);
       values.push(normalizedStatus);
-      
+
       // Set reviewed_at if status is approved or rejected
       if (normalizedStatus === 'approved' || normalizedStatus === 'rejected') {
         updates.push(`reviewed_at = NOW()`);
@@ -1204,10 +1204,10 @@ router.get('/users/:id', authenticateAdmin, async (req, res, next) => {
       const kycRow = kycResult.rows[0];
       KYC = kycRow
         ? {
-            verificationStatus: kycRow.status,
-            isDocumentVerified: kycRow.status === 'approved',
-            isAddressVerified: kycRow.status === 'approved'
-          }
+          verificationStatus: kycRow.status,
+          isDocumentVerified: kycRow.status === 'approved',
+          isAddressVerified: kycRow.status === 'approved'
+        }
         : null;
     } catch (kycError) {
       console.error('KYC lookup failed for admin users/:id:', kycError.message);
@@ -1352,11 +1352,11 @@ router.get('/mt5/users', authenticateAdmin, async (req, res, next) => {
 
     // Get all trading accounts with user info
     const apiAccountField = 'ta.account_number as account_number';
-    
+
     const mt5GroupField = hasMt5GroupName
       ? 'ta.mt5_group_name'
       : 'NULL as mt5_group_name';
-    
+
     let query = `
       SELECT 
         ta.id,
@@ -1550,8 +1550,8 @@ router.post(
       const list = Array.isArray(raw?.Data)
         ? raw.Data
         : Array.isArray(raw)
-        ? raw
-        : [];
+          ? raw
+          : [];
 
       let created = 0;
       let updated = 0;
@@ -1796,40 +1796,148 @@ router.put(
 );
 
 /**
+ * GET /api/admin/mt5/groups
+ * Get all MT5 groups from MT5 API
+ */
+router.get('/mt5/groups', authenticateAdmin, async (req, res) => {
+  try {
+    // Fetch groups from MT5 API
+    const result = await mt5Service.getGroups();
+
+    if (!result.success || !result.data) {
+      return res.status(500).json({
+        ok: false,
+        error: 'Failed to fetch groups from MT5'
+      });
+    }
+
+    // Transform MT5 groups data to match expected format
+    const groups = Array.isArray(result.data) ? result.data.map(group => ({
+      id: group.Group || group.name,
+      name: group.Group || group.name,
+      status: 'active' // All groups from MT5 are considered active
+    })) : [];
+
+    res.json({
+      ok: true,
+      groups: groups
+    });
+  } catch (error) {
+    console.error('Get MT5 groups error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch MT5 groups'
+    });
+  }
+});
+
+/**
  * GET /api/admin/mt5/account/:accountId
- * Get MT5 account details
+ * Get MT5 account details from MT5 API
  */
 router.get('/mt5/account/:accountId', authenticateAdmin, async (req, res, next) => {
   try {
     const { accountId } = req.params;
+    const login = parseInt(accountId);
 
-    const result = await pool.query(
-      `SELECT 
-        ta.*,
-        u.email as user_email,
-        u.first_name,
-        u.last_name,
-        u.country as user_country
-      FROM trading_accounts ta
-      INNER JOIN users u ON ta.user_id = u.id
-      WHERE ta.account_number = $1`,
-      [accountId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Account not found'
+    if (isNaN(login)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid account ID'
       });
     }
 
+    // Fetch account info from MT5 API
+    const result = await mt5Service.getClientProfile(login);
+
+    if (!result.success || !result.data) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Account not found in MT5'
+      });
+    }
+
+    // Return MT5 account data
     res.json({
-      success: true,
-      data: result.rows[0]
+      ok: true,
+      account: result.data
     });
   } catch (error) {
     console.error('Get MT5 account error:', error);
-    next(error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch account info from MT5'
+    });
+  }
+});
+
+/**
+ * PUT /api/admin/mt5/account/:accountId
+ * Update MT5 account (leverage, group, etc.)
+ */
+router.put('/mt5/account/:accountId', authenticateAdmin, async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const { leverage, group } = req.body;
+    const login = parseInt(accountId);
+
+    if (isNaN(login)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid account ID'
+      });
+    }
+
+    // Prepare update data
+    const updateData = {};
+    if (leverage !== undefined) {
+      updateData.leverage = parseInt(leverage);
+    }
+    if (group !== undefined) {
+      updateData.group = group;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No update data provided'
+      });
+    }
+
+    // Update MT5 account via MT5 service
+    const result = await mt5Service.updateUser(login, updateData);
+
+    if (!result.success) {
+      return res.status(500).json({
+        ok: false,
+        error: 'Failed to update MT5 account'
+      });
+    }
+
+    // Log activity
+    await pool.query(
+      `INSERT INTO activity_logs (admin_id, action, details, created_at)
+       VALUES ($1, 'MT5_UPDATE', $2, NOW())`,
+      [
+        req.admin.id,
+        JSON.stringify({
+          accountId: login,
+          updates: updateData
+        })
+      ]
+    ).catch(err => console.error('Failed to log activity:', err));
+
+    res.json({
+      ok: true,
+      message: 'MT5 account updated successfully',
+      data: result.data
+    });
+  } catch (error) {
+    console.error('Update MT5 account error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to update MT5 account'
+    });
   }
 });
 
@@ -2100,68 +2208,132 @@ router.get('/mt5/balance-history', authenticateAdmin, async (req, res, next) => 
  */
 router.post('/mt5/assign', authenticateAdmin, async (req, res, next) => {
   try {
-    const { accountId, email } = req.body;
+    const { userId, accountId, password, name, leverage, package: packageName } = req.body;
 
-    if (!accountId || !email) {
+    if (!userId || !accountId || !password) {
       return res.status(400).json({
-        success: false,
-        message: 'Account ID and email are required'
+        ok: false,
+        error: 'User ID, Account ID, and password are required'
       });
     }
 
-    // Find user by email
+    // Verify user exists
     const userResult = await pool.query(
-      'SELECT id FROM users WHERE email = $1',
-      [email]
+      'SELECT id, email FROM users WHERE id = $1',
+      [userId]
     );
 
     if (userResult.rows.length === 0) {
       return res.status(404).json({
-        success: false,
-        message: 'User not found'
+        ok: false,
+        error: 'User not found'
       });
     }
 
-    const userId = userResult.rows[0].id;
+    const user = userResult.rows[0];
 
-    // Check if account exists and is not already assigned
-    const accountResult = await pool.query(
+    // Check if this MT5 account is already assigned to another user
+    const existingAssignment = await pool.query(
       'SELECT id, user_id FROM trading_accounts WHERE account_number = $1',
       [accountId.toString()]
     );
 
-    if (accountResult.rows.length === 0) {
-      // Account doesn't exist in our DB, create it
-      const insertResult = await pool.query(
-        `INSERT INTO trading_accounts (
-          user_id, account_number, platform, account_type, currency,
-          account_number, account_status, trading_server
-        ) VALUES ($1, $2, 'MT5', 'standard', 'USD', $3, 'active', 'Solitaire Markets-Live')
-        RETURNING *`,
-        [userId, accountId.toString(), accountId.toString()]
-      );
-
-      return res.json({
-        success: true,
-        message: 'Account assigned successfully',
-        data: insertResult.rows[0]
+    if (existingAssignment.rows.length > 0 && existingAssignment.rows[0].user_id !== userId) {
+      return res.status(409).json({
+        ok: false,
+        error: 'This MT5 account is already assigned to another user'
       });
     }
 
-    // Update existing account
-    const updateResult = await pool.query(
-      'UPDATE trading_accounts SET user_id = $1 WHERE id = $2 RETURNING *',
-      [userId, accountResult.rows[0].id]
-    );
+    // Update MT5 account password using MT5 service
+    try {
+      await mt5Service.changePassword(parseInt(accountId), password);
+    } catch (error) {
+      console.error('Failed to update MT5 password detailing:', error);
+      // We log but continue, or you could choose to fail hard if password update is critical
+      // For now, fail hard as requested "new password should also be set"
+      return res.status(500).json({
+        ok: false,
+        error: 'Failed to update MT5 account password: ' + (error.message || 'Unknown error')
+      });
+    }
+
+    // Insert or update trading account in database
+    let tradingAccount;
+    try {
+      if (existingAssignment.rows.length === 0) {
+        // Create new trading account record
+        // Schema check revealed: No 'package' column. 'account_type' can store group/package.
+        // Added 'master_password' and 'name' as they exist in schema.
+        const insertResult = await pool.query(
+          `INSERT INTO trading_accounts (
+            user_id, account_number, platform, account_type, currency,
+            leverage, account_status, trading_server, master_password, name, created_at
+          ) VALUES ($1, $2, 'MT5', $3, 'USD', $4, 'active', 'Solitaire Markets-Live', $5, $6, NOW())
+          RETURNING *`,
+          [
+            userId,
+            accountId.toString(),
+            packageName || 'standard', // Store group/package in account_type
+            leverage || 100,
+            password,
+            name || ''
+          ]
+        );
+        tradingAccount = insertResult.rows[0];
+      } else {
+        // Update existing trading account
+        const updateResult = await pool.query(
+          `UPDATE trading_accounts 
+           SET user_id = $1, leverage = $2, account_type = $3, master_password = $4, name = $5, updated_at = NOW()
+           WHERE account_number = $6
+           RETURNING *`,
+          [
+            userId,
+            leverage || 100,
+            packageName || 'standard',
+            password,
+            name || '',
+            accountId.toString()
+          ]
+        );
+        tradingAccount = updateResult.rows[0];
+      }
+    } catch (dbError) {
+      console.error('Database error during assignment:', dbError);
+      return res.status(500).json({
+        ok: false,
+        error: 'Database error: ' + dbError.message
+      });
+    }
+
+    // Log the assignment (Non-blocking)
+    pool.query(
+      `INSERT INTO activity_logs (admin_id, action, details, created_at)
+       VALUES ($1, 'MT5_ASSIGN', $2, NOW())`,
+      [
+        req.admin.id,
+        JSON.stringify({
+          accountId,
+          userId,
+          userEmail: user.email,
+          leverage,
+          package: packageName
+        })
+      ]
+    ).catch(err => console.error('Failed to log activity (non-fatal):', err));
 
     res.json({
-      success: true,
-      message: 'Account assigned successfully',
-      data: updateResult.rows[0]
+      ok: true,
+      message: 'MT5 account assigned successfully',
+      account: tradingAccount
     });
   } catch (error) {
     console.error('Assign MT5 account error:', error);
-    next(error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to assign MT5 account'
+    });
   }
 });
 
@@ -2492,22 +2664,22 @@ router.post('/manual-gateways', authenticateAdmin, gatewayUpload.fields([
     const is_recommended = req.body.is_recommended === 'true' || req.body.is_recommended === true;
     const display_order = parseInt(req.body.display_order) || 0;
     const instructions = req.body.instructions || null;
-    
+
     if (!type || !name) {
       return res.status(400).json({
         success: false,
         error: 'Type and name are required'
       });
     }
-    
+
     // Build type_data JSONB based on type
     let typeData = {};
-    
+
     if (type === 'UPI' || type === 'upi') {
       typeData = { vpa: req.body.vpa_address || '' };
     } else if (['USDT_TRC20', 'USDT_ERC20', 'USDT_BEP20', 'Bitcoin', 'Ethereum', 'Other_Crypto', 'crypto'].includes(type)) {
       const network = type === 'crypto' ? 'TRC20' : type.replace('USDT_', '').replace('Bitcoin', 'BTC').replace('Ethereum', 'ETH');
-      typeData = { 
+      typeData = {
         address: req.body.crypto_address || '',
         network: network
       };
@@ -2526,20 +2698,20 @@ router.post('/manual-gateways', authenticateAdmin, gatewayUpload.fields([
     }
 
     // Normalize type
-    const normalizedType = type === 'upi' ? 'UPI' 
+    const normalizedType = type === 'upi' ? 'UPI'
       : type === 'crypto' ? 'USDT_TRC20'
-      : type === 'wire' ? 'Bank_Transfer'
-      : type === 'local' ? 'Other'
-      : type.toUpperCase();
+        : type === 'wire' ? 'Bank_Transfer'
+          : type === 'local' ? 'Other'
+            : type.toUpperCase();
 
     // Handle file uploads
     let iconPath = null;
     let qrCodePath = null;
-    
+
     if (req.files && req.files.icon && req.files.icon[0]) {
       iconPath = `/uploads/gateways/${req.files.icon[0].filename}`;
     }
-    
+
     if (req.files && req.files.qr_code && req.files.qr_code[0]) {
       qrCodePath = `/uploads/gateways/${req.files.qr_code[0].filename}`;
     }
@@ -2563,12 +2735,12 @@ router.post('/manual-gateways', authenticateAdmin, gatewayUpload.fields([
     );
 
     const gateway = result.rows[0];
-    
+
     // Parse type_data for response
-    const parsedTypeData = typeof gateway.type_data === 'string' 
-      ? JSON.parse(gateway.type_data) 
+    const parsedTypeData = typeof gateway.type_data === 'string'
+      ? JSON.parse(gateway.type_data)
       : gateway.type_data;
-    
+
     // Map backend type to frontend type
     const typeMapping = {
       'UPI': 'upi',
@@ -2629,57 +2801,57 @@ router.post('/manual-gateways', authenticateAdmin, gatewayUpload.fields([
 router.patch('/manual-gateways/:id/toggle-status', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     if (!id || isNaN(parseInt(id))) {
       return res.status(400).json({
         success: false,
         error: 'Invalid gateway ID'
       });
     }
-    
+
     // Get current status
     const currentResult = await pool.query(
       'SELECT is_active FROM manual_payment_gateways WHERE id = $1',
       [id]
     );
-    
+
     if (currentResult.rows.length === 0) {
       return res.status(404).json({
         success: false,
         error: 'Gateway not found'
       });
     }
-    
+
     const newStatus = !currentResult.rows[0].is_active;
-    
+
     // Update status
     const result = await pool.query(
       'UPDATE manual_payment_gateways SET is_active = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
       [newStatus, id]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(500).json({
         success: false,
         error: 'Failed to update gateway status'
       });
     }
-    
+
     const gateway = result.rows[0];
-    
+
     // Safely parse type_data
     let parsedTypeData = {};
     try {
       if (gateway.type_data) {
-        parsedTypeData = typeof gateway.type_data === 'string' 
-          ? JSON.parse(gateway.type_data) 
+        parsedTypeData = typeof gateway.type_data === 'string'
+          ? JSON.parse(gateway.type_data)
           : gateway.type_data;
       }
     } catch (parseError) {
       console.warn('Error parsing type_data for gateway', id, parseError);
       parsedTypeData = {};
     }
-    
+
     // Map backend type to frontend type
     const typeMapping = {
       'UPI': 'upi',
@@ -2692,7 +2864,7 @@ router.patch('/manual-gateways/:id/toggle-status', authenticateAdmin, async (req
       'Other_Crypto': 'crypto',
       'Other': 'local'
     };
-    
+
     const formattedGateway = {
       id: gateway.id,
       type: typeMapping[gateway.type] || (gateway.type ? gateway.type.toLowerCase() : 'other'),
@@ -2752,12 +2924,12 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
 
     // Build type_data JSONB
     let typeData = {};
-    
+
     if (type === 'UPI' || type === 'upi') {
       typeData = { vpa: req.body.vpa_address || '' };
     } else if (['USDT_TRC20', 'USDT_ERC20', 'USDT_BEP20', 'Bitcoin', 'Ethereum', 'Other_Crypto', 'crypto'].includes(type)) {
       const network = type === 'crypto' ? 'TRC20' : type.replace('USDT_', '').replace('Bitcoin', 'BTC').replace('Ethereum', 'ETH');
-      typeData = { 
+      typeData = {
         address: req.body.crypto_address || '',
         network: network
       };
@@ -2775,11 +2947,11 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
       typeData = { details: req.body.details || '' };
     }
 
-    const normalizedType = type === 'upi' ? 'UPI' 
+    const normalizedType = type === 'upi' ? 'UPI'
       : type === 'crypto' ? 'USDT_TRC20'
-      : type === 'wire' ? 'Bank_Transfer'
-      : type === 'local' ? 'Other'
-      : type.toUpperCase();
+        : type === 'wire' ? 'Bank_Transfer'
+          : type === 'local' ? 'Other'
+            : type.toUpperCase();
 
     // Get existing gateway to preserve file paths if new files aren't uploaded
     const existingResult = await pool.query(
@@ -2801,7 +2973,7 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
     if (req.files && req.files.icon && req.files.icon[0]) {
       iconPath = `/uploads/gateways/${req.files.icon[0].filename}`;
     }
-    
+
     if (req.files && req.files.qr_code && req.files.qr_code[0]) {
       qrCodePath = `/uploads/gateways/${req.files.qr_code[0].filename}`;
     }
@@ -2836,10 +3008,10 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
     );
 
     const gateway = result.rows[0];
-    const parsedTypeData = typeof gateway.type_data === 'string' 
-      ? JSON.parse(gateway.type_data) 
+    const parsedTypeData = typeof gateway.type_data === 'string'
+      ? JSON.parse(gateway.type_data)
       : gateway.type_data;
-    
+
     // Map backend type to frontend type
     const typeMapping = {
       'UPI': 'upi',
@@ -2852,7 +3024,7 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
       'Other_Crypto': 'crypto',
       'Other': 'local'
     };
-    
+
     const formattedGateway = {
       id: gateway.id,
       type: typeMapping[gateway.type] || gateway.type.toLowerCase(),
@@ -2898,57 +3070,57 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
 router.patch('/manual-gateways/:id/toggle-recommended', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     if (!id || isNaN(parseInt(id))) {
       return res.status(400).json({
         success: false,
         error: 'Invalid gateway ID'
       });
     }
-    
+
     // Get current status
     const currentResult = await pool.query(
       'SELECT COALESCE(is_recommended, false) as is_recommended FROM manual_payment_gateways WHERE id = $1',
       [id]
     );
-    
+
     if (currentResult.rows.length === 0) {
       return res.status(404).json({
         success: false,
         error: 'Gateway not found'
       });
     }
-    
+
     const newStatus = !currentResult.rows[0].is_recommended;
-    
+
     // Update status
     const result = await pool.query(
       'UPDATE manual_payment_gateways SET is_recommended = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
       [newStatus, id]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(500).json({
         success: false,
         error: 'Failed to update gateway recommended status'
       });
     }
-    
+
     const gateway = result.rows[0];
-    
+
     // Safely parse type_data
     let parsedTypeData = {};
     try {
       if (gateway.type_data) {
-        parsedTypeData = typeof gateway.type_data === 'string' 
-          ? JSON.parse(gateway.type_data) 
+        parsedTypeData = typeof gateway.type_data === 'string'
+          ? JSON.parse(gateway.type_data)
           : gateway.type_data;
       }
     } catch (parseError) {
       console.warn('Error parsing type_data for gateway', id, parseError);
       parsedTypeData = {};
     }
-    
+
     // Map backend type to frontend type
     const typeMapping = {
       'UPI': 'upi',
@@ -2961,7 +3133,7 @@ router.patch('/manual-gateways/:id/toggle-recommended', authenticateAdmin, async
       'Other_Crypto': 'crypto',
       'Other': 'local'
     };
-    
+
     const formattedGateway = {
       id: gateway.id,
       type: typeMapping[gateway.type] || (gateway.type ? gateway.type.toLowerCase() : 'other'),
@@ -3033,7 +3205,7 @@ router.delete('/manual-gateways/:id', authenticateAdmin, async (req, res, next) 
 router.get('/deposits', authenticateAdmin, async (req, res) => {
   try {
     const { status, limit = 500, offset = 0 } = req.query;
-    
+
     let query = `
       SELECT 
         dr.id,
@@ -3062,24 +3234,24 @@ router.get('/deposits', authenticateAdmin, async (req, res) => {
       LEFT JOIN users u ON dr.user_id = u.id
       LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
     `;
-    
+
     const params = [];
     const conditions = [];
-    
+
     if (status && status !== 'all') {
       conditions.push(`dr.status = $${params.length + 1}`);
       params.push(status);
     }
-    
+
     if (conditions.length > 0) {
       query += ` WHERE ${conditions.join(' AND ')}`;
     }
-    
+
     query += ` ORDER BY dr.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     params.push(parseInt(limit), parseInt(offset));
-    
+
     const result = await pool.query(query, params);
-    
+
     // Get total count and sum for pagination
     let countQuery = `SELECT COUNT(*), COALESCE(SUM(amount), 0) as total_sum FROM deposit_requests dr`;
     if (conditions.length > 0) {
@@ -3089,11 +3261,11 @@ router.get('/deposits', authenticateAdmin, async (req, res) => {
     const countResult = await pool.query(countQuery, countParams);
     const total = parseInt(countResult.rows[0].count);
     const totalSum = parseFloat(countResult.rows[0].total_sum || 0);
-    
+
     const items = result.rows.map(row => {
       // Ensure wallet_id is properly converted to integer or null
       const walletId = row.wallet_id ? parseInt(row.wallet_id) : null;
-      
+
       console.log('Deposit row:', {
         id: row.id,
         deposit_to_type: row.deposit_to_type,
@@ -3102,7 +3274,7 @@ router.get('/deposits', authenticateAdmin, async (req, res) => {
         wallet_number: row.wallet_number,
         mt5_account_id: row.mt5_account_id
       });
-      
+
       return {
         id: row.id,
         userId: row.userId,
@@ -3120,10 +3292,10 @@ router.get('/deposits', authenticateAdmin, async (req, res) => {
         bankDetails: null, // Can be populated from gateway type_data if needed
         cryptoAddress: row.transaction_hash || null,
         depositAddress: row.transaction_hash || null,
-      depositTo: row.deposit_to_type || 'wallet',
-      mt5AccountId: row.mt5_account_id || null,
-      walletId: walletId,
-      walletNumber: row.wallet_number || null, // Now comes directly from deposit_requests table
+        depositTo: row.deposit_to_type || 'wallet',
+        mt5AccountId: row.mt5_account_id || null,
+        walletId: walletId,
+        walletNumber: row.wallet_number || null, // Now comes directly from deposit_requests table
         status: row.status,
         rejectionReason: row.status === 'rejected' ? row.admin_notes : null,
         approvedAt: row.status === 'approved' ? row.updated_at : null,
@@ -3132,7 +3304,7 @@ router.get('/deposits', authenticateAdmin, async (req, res) => {
         updatedAt: row.updatedAt
       };
     });
-    
+
     res.json({
       ok: true,
       items,
@@ -3157,7 +3329,7 @@ router.get('/deposits', authenticateAdmin, async (req, res) => {
 router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     const result = await pool.query(
       `UPDATE deposit_requests 
        SET status = 'approved', updated_at = NOW()
@@ -3165,16 +3337,16 @@ router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
        RETURNING *`,
       [id]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({
         ok: false,
         error: 'Deposit request not found or already processed'
       });
     }
-    
+
     const deposit = result.rows[0];
-    
+
     // Add balance based on deposit destination
     // Only handle MT5 deposits for now - wallet deposits will be handled later
     try {
@@ -3182,19 +3354,19 @@ router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
         // Add to MT5 account using /Users/{login}/AddClientBalance API
         const mt5Service = await import('../services/mt5.service.js');
         const login = parseInt(deposit.mt5_account_id, 10);
-        
+
         if (Number.isNaN(login)) {
           throw new Error(`Invalid MT5 account ID: ${deposit.mt5_account_id}`);
         }
-        
+
         console.log(`Adding balance to MT5 account ${login}: ${deposit.amount} ${deposit.currency || 'USD'}`);
-        
+
         await mt5Service.addBalance(
           login,
           parseFloat(deposit.amount),
           `Deposit #${deposit.id} approved`
         );
-        
+
         console.log(`Successfully added balance to MT5 account ${login}`);
       } else if (deposit.deposit_to_type === 'wallet') {
         // Wallet deposits - skip for now, will be handled later
@@ -3217,7 +3389,7 @@ router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
       }
       // For wallet deposits, just log the error but don't rollback
     }
-    
+
     res.json({
       ok: true,
       message: 'Deposit approved successfully'
@@ -3239,7 +3411,7 @@ router.post('/deposits/:id/reject', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { reason } = req.body;
-    
+
     const result = await pool.query(
       `UPDATE deposit_requests 
        SET status = 'rejected', admin_notes = $1, updated_at = NOW()
@@ -3247,14 +3419,14 @@ router.post('/deposits/:id/reject', authenticateAdmin, async (req, res) => {
        RETURNING *`,
       [reason || null, id]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({
         ok: false,
         error: 'Deposit request not found or already processed'
       });
     }
-    
+
     res.json({
       ok: true,
       message: 'Deposit rejected successfully'
@@ -3508,6 +3680,221 @@ router.delete('/payment-gateways/:id', authenticateAdmin, async (req, res, next)
   } catch (error) {
     console.error('Delete automatic payment gateway error:', error);
     next(error);
+  }
+});
+
+/**
+ * GET /api/admin/withdrawals
+ * List all withdrawal requests
+ */
+router.get('/withdrawals', authenticateAdmin, async (req, res) => {
+  try {
+    const { status, limit = 500 } = req.query;
+
+    let query = `
+      SELECT 
+        w.*,
+        json_build_object(
+          'id', u.id,
+          'email', u.email,
+          'name', COALESCE(u.first_name || ' ' || u.last_name, u.email)
+        ) as "User"
+      FROM withdrawals w
+      LEFT JOIN users u ON w.user_id = u.id
+    `;
+    const params = [];
+
+    if (status && status !== 'all') {
+      query += ` WHERE w.status = $1`;
+      params.push(status);
+    }
+
+    query += ` ORDER BY w.created_at DESC LIMIT $${params.length + 1}`;
+    params.push(parseInt(limit));
+
+    const result = await pool.query(query, params);
+
+    res.json({
+      ok: true,
+      items: result.rows,
+      total: result.rows.length
+    });
+  } catch (error) {
+    console.error('Get admin withdrawals error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch withdrawals'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/withdrawals/:id/approve
+ * Approve a withdrawal request
+ */
+router.post('/withdrawals/:id/approve', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { externalTransactionId } = req.body;
+
+    if (!externalTransactionId || !externalTransactionId.trim()) {
+      return res.status(400).json({
+        ok: false,
+        error: 'External transaction ID is required'
+      });
+    }
+
+    // Get withdrawal details
+    const withdrawalResult = await pool.query(
+      'SELECT * FROM withdrawals WHERE id = $1',
+      [id]
+    );
+
+    if (withdrawalResult.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Withdrawal not found'
+      });
+    }
+
+    const withdrawal = withdrawalResult.rows[0];
+
+    if (withdrawal.status !== 'pending') {
+      return res.status(400).json({
+        ok: false,
+        error: `Withdrawal is already ${withdrawal.status}`
+      });
+    }
+
+    // Deduct balance from MT5 account
+    try {
+      await mt5Service.deductBalance(
+        parseInt(withdrawal.mt5_account_id),
+        withdrawal.amount,
+        `Withdrawal approved - TX: ${externalTransactionId.substring(0, 20)}`
+      );
+    } catch (error) {
+      console.error('Failed to deduct MT5 balance:', error);
+      return res.status(500).json({
+        ok: false,
+        error: 'Failed to deduct balance from MT5 account: ' + error.message
+      });
+    }
+
+    // Update withdrawal status
+    await pool.query(
+      `UPDATE withdrawals 
+       SET status = 'approved', 
+           external_transaction_id = $1,
+           approved_by = $2,
+           approved_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $3`,
+      [externalTransactionId.trim(), req.admin.id, id]
+    );
+
+    // Log activity
+    await pool.query(
+      `INSERT INTO activity_logs (admin_id, action, details, created_at)
+       VALUES ($1, 'WITHDRAWAL_APPROVE', $2, NOW())`,
+      [
+        req.admin.id,
+        JSON.stringify({
+          withdrawalId: id,
+          amount: withdrawal.amount,
+          userId: withdrawal.user_id,
+          mt5AccountId: withdrawal.mt5_account_id,
+          externalTransactionId: externalTransactionId.trim()
+        })
+      ]
+    ).catch(err => console.error('Failed to log activity:', err));
+
+    // TODO: Send email notification to user
+
+    res.json({
+      ok: true,
+      message: 'Withdrawal approved successfully'
+    });
+  } catch (error) {
+    console.error('Approve withdrawal error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to approve withdrawal'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/withdrawals/:id/reject
+ * Reject a withdrawal request
+ */
+router.post('/withdrawals/:id/reject', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    // Get withdrawal details
+    const withdrawalResult = await pool.query(
+      'SELECT * FROM withdrawals WHERE id = $1',
+      [id]
+    );
+
+    if (withdrawalResult.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Withdrawal not found'
+      });
+    }
+
+    const withdrawal = withdrawalResult.rows[0];
+
+    if (withdrawal.status !== 'pending') {
+      return res.status(400).json({
+        ok: false,
+        error: `Withdrawal is already ${withdrawal.status}`
+      });
+    }
+
+    // Update withdrawal status
+    await pool.query(
+      `UPDATE withdrawals 
+       SET status = 'rejected', 
+           rejection_reason = $1,
+           rejected_by = $2,
+           rejected_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $3`,
+      [reason || 'No reason provided', req.admin.id, id]
+    );
+
+    // Log activity
+    await pool.query(
+      `INSERT INTO activity_logs (admin_id, action, details, created_at)
+       VALUES ($1, 'WITHDRAWAL_REJECT', $2, NOW())`,
+      [
+        req.admin.id,
+        JSON.stringify({
+          withdrawalId: id,
+          amount: withdrawal.amount,
+          userId: withdrawal.user_id,
+          mt5AccountId: withdrawal.mt5_account_id,
+          reason: reason || 'No reason provided'
+        })
+      ]
+    ).catch(err => console.error('Failed to log activity:', err));
+
+    // TODO: Send email notification to user
+
+    res.json({
+      ok: true,
+      message: 'Withdrawal rejected successfully'
+    });
+  } catch (error) {
+    console.error('Reject withdrawal error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to reject withdrawal'
+    });
   }
 });
 

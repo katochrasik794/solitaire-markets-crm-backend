@@ -9,8 +9,10 @@ import kycRoutes from './routes/kyc.js';
 import accountsRoutes from './routes/accounts.js';
 import walletRoutes from './routes/wallet.js';
 import depositsRoutes from './routes/deposits.js';
+import withdrawalsRoutes from './routes/withdrawals.js';
 import reportsRoutes from './routes/reports.js';
 import adminRoutes from './routes/admin.js';
+import supportRoutes from './routes/support.js';
 import pool from './config/database.js';
 
 dotenv.config();
@@ -69,9 +71,9 @@ const cancelExpiredDeposits = async () => {
     );
 
     if (result.rows.length > 0) {
-      console.log(`✅ Cancelled ${result.rows.length} expired deposit(s):`, 
+      console.log(`✅ Cancelled ${result.rows.length} expired deposit(s):`,
         result.rows.map(r => `#${r.id} (${r.cregis_order_id})`).join(', '));
-      
+
       // Also update cregis_transactions if they exist
       for (const row of result.rows) {
         await pool.query(
@@ -117,8 +119,10 @@ app.use('/api/kyc', kycRoutes);
 app.use('/api/accounts', accountsRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/deposits', depositsRoutes);
+app.use('/api/withdrawals', withdrawalsRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/support', supportRoutes);
 
 // Debug: Log registered routes
 console.log('✅ Routes registered:');
@@ -128,6 +132,7 @@ console.log('  - /api/kyc');
 console.log('  - /api/accounts');
 console.log('  - /api/wallet');
 console.log('  - /api/deposits');
+console.log('  - /api/withdrawals');
 console.log('  - /api/reports');
 console.log('  - /api/admin');
 
