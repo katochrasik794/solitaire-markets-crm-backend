@@ -442,9 +442,9 @@ router.post('/create', authenticate, async (req, res, next) => {
     // Determine trading server
     const tradingServer = isDemo ? 'Solitaire Markets-Demo' : 'Solitaire Markets-Live';
 
-    // Determine account type based on group (you can customize this logic)
-    // For now, we'll use 'standard' as default, but you can map it based on group_name
-    const accountType = groupName.includes('Pro') || groupName.includes('Premier') ? 'premier' : 'standard';
+    // Determine account type based on group
+    // Use the dedicated name if available, otherwise fall back to group name or 'standard'
+    const accountType = mt5Group.dedicated_name || mt5Group.group_name || 'standard';
 
     // Discover existing columns on trading_accounts to be backward compatible
     const colsRes = await pool.query(
@@ -524,7 +524,9 @@ router.post('/create', authenticate, async (req, res, next) => {
       'is_copy_account',
       'leverage',
       'trading_server',
-      'created_at'
+      'trading_server',
+      'created_at',
+      'is_demo'
     ];
     if (existingCols.has('mt5_group_name')) {
       selectCols.push('mt5_group_name');
