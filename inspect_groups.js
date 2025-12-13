@@ -1,17 +1,27 @@
+
 import pool from './config/database.js';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 async function inspectGroups() {
     try {
-        const res = await pool.query('SELECT id, group_name, dedicated_name FROM mt5_groups');
-        console.log('--- ALL GROUPS ---');
-        res.rows.forEach(g => {
-            console.log(`ID: ${g.id}, Name: ${g.group_name}, Dedicated: ${g.dedicated_name}`);
-        });
-        console.log('--- END ---');
+        // Get columns
+        const colsRes = await pool.query(
+            `SELECT column_name, data_type 
+       FROM information_schema.columns 
+       WHERE table_name = 'mt5_groups'`
+        );
+        console.log('Columns:', colsRes.rows.map(r => `${r.column_name} (${r.data_type})`));
+
+        // Get data
+        const res = await pool.query('SELECT * FROM mt5_groups');
+        console.log('Groups Data:', JSON.stringify(res.rows, null, 2));
+
+        pool.end();
     } catch (err) {
         console.error(err);
-    } finally {
-        pool.end();
+        process.exit(1);
     }
 }
 
