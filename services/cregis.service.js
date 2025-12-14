@@ -146,12 +146,15 @@ export const createPayment = async ({
   tokens = ['USDT-TRC20'], // Default to USDT TRC20
   gatewayConfig = null // Gateway config from database
 }) => {
+  // Declare variables outside try block so they're accessible in catch block
+  let CREGIS_PROJECT_ID, CREGIS_API_KEY, CREGIS_GATEWAY_URL, CREGIS_WEBHOOK_SECRET;
+  
   try {
     // Use gateway config from database if provided, otherwise use env variables
-    const CREGIS_PROJECT_ID = gatewayConfig?.project_id || DEFAULT_CREGIS_PROJECT_ID;
-    const CREGIS_API_KEY = gatewayConfig?.api_key || DEFAULT_CREGIS_API_KEY;
-    const CREGIS_GATEWAY_URL = gatewayConfig?.gateway_url || DEFAULT_CREGIS_GATEWAY_URL;
-    const CREGIS_WEBHOOK_SECRET = gatewayConfig?.webhook_secret || DEFAULT_CREGIS_WEBHOOK_SECRET;
+    CREGIS_PROJECT_ID = gatewayConfig?.project_id || DEFAULT_CREGIS_PROJECT_ID;
+    CREGIS_API_KEY = gatewayConfig?.api_key || DEFAULT_CREGIS_API_KEY;
+    CREGIS_GATEWAY_URL = gatewayConfig?.gateway_url || DEFAULT_CREGIS_GATEWAY_URL;
+    CREGIS_WEBHOOK_SECRET = gatewayConfig?.webhook_secret || DEFAULT_CREGIS_WEBHOOK_SECRET;
 
     // Validate that gateway URL is set
     if (!CREGIS_GATEWAY_URL) {
@@ -282,17 +285,21 @@ export const createPayment = async ({
       }
     };
   } catch (error) {
+    // Use DEFAULT values if variables weren't initialized (in case of early error)
+    const gatewayUrl = CREGIS_GATEWAY_URL || DEFAULT_CREGIS_GATEWAY_URL;
+    const projectId = CREGIS_PROJECT_ID || DEFAULT_CREGIS_PROJECT_ID;
+    
     console.error('Cregis createPayment error:', {
       message: error.message,
       stack: error.stack,
-      url: `${CREGIS_GATEWAY_URL}/api/v2/checkout`,
-      projectId: CREGIS_PROJECT_ID
+      url: `${gatewayUrl}/api/v2/checkout`,
+      projectId: projectId
     });
     return {
       success: false,
       error: error.message || 'Failed to create payment order',
       details: process.env.NODE_ENV === 'development' ? {
-        url: `${CREGIS_GATEWAY_URL}/api/v2/checkout`,
+        url: `${gatewayUrl}/api/v2/checkout`,
         error: error.message
       } : undefined
     };
