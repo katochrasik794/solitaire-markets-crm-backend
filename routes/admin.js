@@ -130,12 +130,26 @@ router.get('/test', (req, res) => {
 router.post('/login', validateLogin, async (req, res, next) => {
   try {
     const { email, password } = req.body;
+    console.log('🔐 Admin login attempt:', { email: email?.substring(0, 10) + '...', hasPassword: !!password });
+
+    // Check database connection
+    try {
+      await pool.query('SELECT 1');
+    } catch (dbError) {
+      console.error('❌ Database connection error:', dbError);
+      return res.status(500).json({
+        success: false,
+        message: 'Database connection failed. Please try again later.',
+        error: process.env.NODE_ENV === 'development' ? dbError.message : undefined
+      });
+    }
 
     // Find admin by email
     const result = await pool.query(
       'SELECT id, username, email, password_hash, admin_role, is_active, login_attempts, locked_until FROM admin WHERE email = $1',
       [email]
     );
+    console.log('📋 Admin query result:', { found: result.rows.length > 0 });
 
     if (result.rows.length === 0) {
       return res.status(401).json({
@@ -268,8 +282,21 @@ router.post('/login', validateLogin, async (req, res, next) => {
       }
     });
   } catch (error) {
-    console.error('Admin login error:', error);
-    next(error);
+    console.error('❌ Admin login error:', error);
+    console.error('Error stack:', error.stack);
+    console.error('Error details:', {
+      message: error.message,
+      name: error.name,
+      code: error.code,
+      detail: error.detail
+    });
+    
+    // Return a proper error response instead of passing to error handler
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Login failed. Please try again.',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 

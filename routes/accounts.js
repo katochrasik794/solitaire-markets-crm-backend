@@ -158,7 +158,9 @@ router.get('/', authenticate, async (req, res, next) => {
       'account_status',
       'is_demo',
       'trading_server',
-      'created_at'
+      'created_at',
+      'balance',
+      'equity'
     ];
 
     const optionalCols = [];

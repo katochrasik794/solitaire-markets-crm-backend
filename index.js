@@ -29,7 +29,7 @@ const testDatabaseConnection = async (retries = 3, delay = 2000) => {
     try {
       const result = await pool.query('SELECT NOW()');
       console.log('✅ Connected to PostgreSQL database');
-      return;
+      return true;
     } catch (err) {
       console.error(`❌ Database connection attempt ${i + 1}/${retries} failed:`, err.message);
       if (i < retries - 1) {
@@ -51,9 +51,80 @@ const testDatabaseConnection = async (retries = 3, delay = 2000) => {
       }
     }
   }
+  return false;
 };
 
-testDatabaseConnection();
+// Ensure withdrawals table exists
+const ensureWithdrawalsTable = async () => {
+  try {
+    // Check if table exists
+    const checkTable = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'withdrawals'
+      );
+    `);
+    
+    if (!checkTable.rows[0].exists) {
+      console.log('📦 Creating withdrawals table...');
+      await pool.query(`
+        CREATE TABLE withdrawals (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          amount DECIMAL(15, 2) NOT NULL,
+          currency VARCHAR(10) DEFAULT 'USD',
+          method VARCHAR(50) NOT NULL,
+          payment_method VARCHAR(100),
+          bank_name VARCHAR(255),
+          account_name VARCHAR(255),
+          account_number VARCHAR(100),
+          ifsc_swift_code VARCHAR(50),
+          account_type VARCHAR(50),
+          bank_details TEXT,
+          crypto_address VARCHAR(255),
+          wallet_address VARCHAR(255),
+          pm_currency VARCHAR(20),
+          pm_network VARCHAR(50),
+          pm_address VARCHAR(255),
+          mt5_account_id VARCHAR(50),
+          status VARCHAR(50) DEFAULT 'pending',
+          external_transaction_id VARCHAR(255),
+          approved_by INTEGER REFERENCES admin(id),
+          approved_at TIMESTAMP,
+          rejected_by INTEGER REFERENCES admin(id),
+          rejected_at TIMESTAMP,
+          rejection_reason TEXT,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW(),
+          CONSTRAINT positive_amount CHECK (amount > 0)
+        );
+      `);
+      
+      // Create indexes
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON withdrawals(user_id);');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status);');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_withdrawals_created_at ON withdrawals(created_at DESC);');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_withdrawals_mt5_account ON withdrawals(mt5_account_id);');
+      
+      console.log('✅ Withdrawals table created successfully');
+    } else {
+      console.log('✅ Withdrawals table exists');
+    }
+  } catch (error) {
+    console.error('❌ Error ensuring withdrawals table:', error);
+    console.error('Error details:', error.message, error.code);
+    // Don't exit - table might already exist with different structure
+  }
+};
+
+// Initialize database connection and tables
+(async () => {
+  const connected = await testDatabaseConnection();
+  if (connected) {
+    await ensureWithdrawalsTable();
+  }
+})();
 
 // Scheduled job to cancel expired deposits (runs every 5 minutes)
 const cancelExpiredDeposits = async () => {
