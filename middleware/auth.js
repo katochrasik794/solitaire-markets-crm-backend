@@ -1,4 +1,6 @@
 import jwt from 'jsonwebtoken';
+import pool from '../config/database.js';
+import crypto from 'crypto';
 
 /**
  * Middleware to verify JWT token
@@ -51,7 +53,7 @@ export const authenticate = (req, res, next) => {
 /**
  * Admin authentication middleware
  */
-export const authenticateAdmin = (req, res, next) => {
+export const authenticateAdmin = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
 
@@ -78,6 +80,41 @@ export const authenticateAdmin = (req, res, next) => {
       return res.status(403).json({
         success: false,
         message: 'Admin access required'
+      });
+    }
+
+    // Check if token is blacklisted
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    
+    // Check for "logout all" marker first
+    const logoutAllCheck = await pool.query(
+      `SELECT id FROM admin_token_blacklist 
+       WHERE admin_id = $1 
+       AND token_hash = $2 
+       AND expires_at > NOW()`,
+      [decoded.adminId, 'LOGOUT_ALL_' + decoded.adminId]
+    );
+
+    if (logoutAllCheck.rows.length > 0) {
+      return res.status(401).json({
+        success: false,
+        message: 'Session has been logged out from all devices'
+      });
+    }
+
+    // Check if this specific token is blacklisted
+    const blacklistCheck = await pool.query(
+      `SELECT id FROM admin_token_blacklist 
+       WHERE admin_id = $1 
+       AND token_hash = $2 
+       AND expires_at > NOW()`,
+      [decoded.adminId, tokenHash]
+    );
+
+    if (blacklistCheck.rows.length > 0) {
+      return res.status(401).json({
+        success: false,
+        message: 'Token has been revoked'
       });
     }
 

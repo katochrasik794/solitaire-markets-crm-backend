@@ -11,6 +11,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -213,12 +214,13 @@ router.post('/login', validateLogin, async (req, res, next) => {
       [admin.id]
     );
 
-    // Log successful login attempt
+    // Log successful login attempt with token hash to track current session
     try {
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
       await pool.query(
-        `INSERT INTO admin_login_log (admin_id, ip_address, user_agent, success, created_at)
-         VALUES ($1, $2, $3, TRUE, NOW())`,
-        [admin.id, req.ip || req.headers['x-forwarded-for'] || 'unknown', req.headers['user-agent'] || 'unknown']
+        `INSERT INTO admin_login_log (admin_id, ip_address, user_agent, success, token_hash, created_at)
+         VALUES ($1, $2, $3, TRUE, $4, NOW())`,
+        [admin.id, req.ip || req.headers['x-forwarded-for'] || 'unknown', req.headers['user-agent'] || 'unknown', tokenHash]
       );
     } catch (logError) {
       console.error('Error logging successful login:', logError);
@@ -478,6 +480,266 @@ router.delete('/country-admins/:id', authenticateAdmin, async (req, res) => {
   } catch (error) {
     console.error('Delete country admin error:', error);
     res.status(500).json({ ok: false, error: error.message || 'Failed to delete country admin' });
+  }
+});
+
+/**
+ * ============================================
+ * Admin Profile (self)
+ * ============================================
+ */
+
+// GET /api/admin/profile - current admin profile
+router.get('/profile', authenticateAdmin, async (req, res) => {
+  try {
+    const adminId = req.admin.adminId || req.admin.id;
+    if (!adminId) {
+      return res.status(400).json({ ok: false, error: 'Admin id missing in token' });
+    }
+
+    const result = await pool.query(
+      `SELECT id, username, email, admin_role, is_active, last_login, created_at
+       FROM admin
+       WHERE id = $1`,
+      [adminId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Admin profile not found' });
+    }
+
+    res.json({ ok: true, profile: result.rows[0] });
+  } catch (error) {
+    console.error('Get admin profile error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to load profile' });
+  }
+});
+
+// PUT /api/admin/profile - update current admin profile (username/email/password)
+router.put('/profile', authenticateAdmin, async (req, res) => {
+  try {
+    const adminId = req.admin.adminId || req.admin.id;
+    const { username, email, currentPassword, newPassword } = req.body;
+
+    const existingRes = await pool.query(
+      'SELECT id, password_hash FROM admin WHERE id = $1',
+      [adminId]
+    );
+    if (existingRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Admin not found' });
+    }
+
+    // If changing password, verify currentPassword
+    if (newPassword) {
+      if (!currentPassword) {
+        return res.status(400).json({ ok: false, error: 'Current password is required' });
+      }
+      const ok = await bcrypt.compare(currentPassword, existingRes.rows[0].password_hash);
+      if (!ok) {
+        return res.status(400).json({ ok: false, error: 'Current password is incorrect' });
+      }
+    }
+
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    if (username) {
+      fields.push(`username = $${idx++}`);
+      values.push(username);
+    }
+    if (email) {
+      fields.push(`email = $${idx++}`);
+      values.push(email);
+    }
+    if (newPassword) {
+      const hash = await bcrypt.hash(newPassword, 10);
+      fields.push(`password_hash = $${idx++}`);
+      values.push(hash);
+    }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ ok: false, error: 'Nothing to update' });
+    }
+
+    values.push(adminId);
+
+    const updateRes = await pool.query(
+      `UPDATE admin SET ${fields.join(', ')}, updated_at = NOW()
+       WHERE id = $${idx}
+       RETURNING id, username, email, admin_role, is_active, last_login, created_at`,
+      values
+    );
+
+    res.json({ ok: true, profile: updateRes.rows[0] });
+  } catch (error) {
+    console.error('Update admin profile error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to update profile' });
+  }
+});
+
+// GET /api/admin/login-history - recent login history for current admin
+router.get('/login-history', authenticateAdmin, async (req, res) => {
+  try {
+    const adminId = req.admin.adminId || req.admin.id;
+    const currentToken = req.headers.authorization?.substring(7); // Remove 'Bearer ' prefix
+    const currentTokenHash = currentToken ? crypto.createHash('sha256').update(currentToken).digest('hex') : null;
+    
+    const result = await pool.query(
+      `SELECT id,
+              ip_address,
+              user_agent,
+              location,
+              device,
+              browser,
+              os,
+              success,
+              failure_reason,
+              token_hash,
+              created_at AT TIME ZONE 'UTC' AS timestamp_utc
+       FROM admin_login_log
+       WHERE admin_id = $1
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [adminId]
+    );
+
+    const history = result.rows.map((row) => ({
+      id: row.id,
+      ip_address: row.ip_address,
+      location: row.location || null,
+      device: row.device || row.browser || row.os || row.user_agent || null,
+      user_agent: row.user_agent,
+      success: row.success,
+      failure_reason: row.failure_reason || null,
+      timestamp: row.timestamp_utc, // UTC time; frontend can format to local
+      isCurrentSession: currentTokenHash && row.token_hash === currentTokenHash, // Mark current session
+    }));
+
+    res.json({ ok: true, history });
+  } catch (error) {
+    console.error('Get admin login history error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to load login history' });
+  }
+});
+
+/**
+ * POST /api/admin/logout/device
+ * Logout from current device (blacklist current token)
+ */
+router.post('/logout/device', authenticateAdmin, async (req, res) => {
+  try {
+    const adminId = req.admin.adminId;
+    const token = req.headers.authorization?.substring(7); // Remove 'Bearer ' prefix
+    
+    if (!token) {
+      return res.status(400).json({ ok: false, error: 'No token provided' });
+    }
+
+    // Decode token to get expiration
+    let decoded;
+    try {
+      decoded = jwt.decode(token);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: 'Invalid token' });
+    }
+
+    if (!decoded || !decoded.exp) {
+      return res.status(400).json({ ok: false, error: 'Invalid token format' });
+    }
+
+    // Hash the token for storage
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expiresAt = new Date(decoded.exp * 1000);
+
+    // Add token to blacklist
+    await pool.query(
+      `INSERT INTO admin_token_blacklist (admin_id, token_hash, ip_address, user_agent, logout_type, expires_at)
+       VALUES ($1, $2, $3, $4, 'device', $5)`,
+      [
+        adminId,
+        tokenHash,
+        req.ip || req.headers['x-forwarded-for'] || 'unknown',
+        req.headers['user-agent'] || 'unknown',
+        expiresAt
+      ]
+    );
+
+    res.json({ ok: true, message: 'Logged out from this device successfully' });
+  } catch (error) {
+    console.error('Logout device error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to logout from device' });
+  }
+});
+
+/**
+ * POST /api/admin/logout/all
+ * Logout from all devices (blacklist all tokens for this admin)
+ */
+router.post('/logout/all', authenticateAdmin, async (req, res) => {
+  try {
+    const adminId = req.admin.adminId;
+    const token = req.headers.authorization?.substring(7); // Remove 'Bearer ' prefix
+    
+    if (!token) {
+      return res.status(400).json({ ok: false, error: 'No token provided' });
+    }
+
+    // Decode token to get expiration
+    let decoded;
+    try {
+      decoded = jwt.decode(token);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: 'Invalid token' });
+    }
+
+    if (!decoded || !decoded.exp) {
+      return res.status(400).json({ ok: false, error: 'Invalid token format' });
+    }
+
+    // Hash the current token
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expiresAt = new Date(decoded.exp * 1000);
+
+    // Get all recent login logs for this admin to blacklist all active sessions
+    // We'll use a marker approach: add a "logout_all" entry that marks all tokens as invalid
+    await pool.query(
+      `INSERT INTO admin_token_blacklist (admin_id, token_hash, ip_address, user_agent, logout_type, expires_at)
+       VALUES ($1, $2, $3, $4, 'all', $5)`,
+      [
+        adminId,
+        tokenHash,
+        req.ip || req.headers['x-forwarded-for'] || 'unknown',
+        req.headers['user-agent'] || 'unknown',
+        expiresAt
+      ]
+    );
+
+    // Also add a special marker entry that indicates "all devices logged out"
+    // This will be checked in the middleware
+    // Delete any existing "logout all" markers first, then insert new one
+    await pool.query(
+      `DELETE FROM admin_token_blacklist 
+       WHERE admin_id = $1 AND token_hash = $2`,
+      [adminId, 'LOGOUT_ALL_' + adminId]
+    );
+    
+    await pool.query(
+      `INSERT INTO admin_token_blacklist (admin_id, token_hash, ip_address, user_agent, logout_type, expires_at)
+       VALUES ($1, $2, $3, $4, 'all', $5)`,
+      [
+        adminId,
+        'LOGOUT_ALL_' + adminId, // Special marker
+        req.ip || req.headers['x-forwarded-for'] || 'unknown',
+        req.headers['user-agent'] || 'unknown',
+        new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) // 1 year from now
+      ]
+    );
+
+    res.json({ ok: true, message: 'Logged out from all devices successfully' });
+  } catch (error) {
+    console.error('Logout all devices error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to logout from all devices' });
   }
 });
 
