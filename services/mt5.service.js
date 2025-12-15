@@ -151,8 +151,8 @@ export const addBalance = async (
   comment = 'Deposit via API'
 ) => {
   const payload = {
-    Balance: balance,
-    Comment: comment
+    balance,
+    comment
   };
 
   const res = await fetch(
@@ -183,8 +183,8 @@ export const deductBalance = async (
   comment = 'Withdrawal via API'
 ) => {
   const payload = {
-    Balance: balance,
-    Comment: comment
+    balance,
+    comment
   };
 
   const res = await fetch(
@@ -215,8 +215,8 @@ export const addBonus = async (
   comment = 'Bonus via API'
 ) => {
   const payload = {
-    Balance: balance,
-    Comment: comment
+    balance,
+    comment
   };
 
   const res = await fetch(
@@ -247,8 +247,8 @@ export const deductBonus = async (
   comment = 'Bonus deduction via API'
 ) => {
   const payload = {
-    Balance: balance,
-    Comment: comment
+    balance,
+    comment
   };
 
   const res = await fetch(

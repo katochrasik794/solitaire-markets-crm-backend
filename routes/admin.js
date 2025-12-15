@@ -1,11 +1,11 @@
 import express from 'express';
 import pool from '../config/database.js';
+import { adjustWalletBalance, createWalletForUser } from '../services/wallet.service.js';
+import * as mt5Service from '../services/mt5.service.js';
 import { hashPassword, comparePassword } from '../utils/helpers.js';
 import { validateLogin } from '../middleware/validate.js';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import * as mt5Service from '../services/mt5.service.js';
-import { createWalletForUser } from '../services/wallet.service.js';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -308,20 +308,176 @@ router.post('/login', validateLogin, async (req, res, next) => {
 
 /**
  * GET /api/admin/country-admins
- * List all country admins (used for scoping users list)
+ * List all country admins (used for scoping users list and admin UI)
  */
-router.get('/country-admins', authenticateAdmin, async (req, res, next) => {
+router.get('/country-admins', authenticateAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, email, status, country_code AS country, features, created_at, updated_at
+      `SELECT id,
+              name,
+              email,
+              COALESCE(status, 'active')       AS status,
+              country_code                     AS country,
+              COALESCE(features, '')           AS features,
+              created_at,
+              updated_at
        FROM country_admins
        ORDER BY created_at DESC`
     );
-    // Frontend expects a plain array
-    res.json(result.rows);
+
+    const admins = result.rows.map(r => ({
+      ...r,
+      features: r.features
+        ? String(r.features)
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean)
+        : []
+    }));
+
+    res.json(admins);
   } catch (error) {
     console.error('Get country admins error:', error);
-    next(error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to load country admins' });
+  }
+});
+
+/**
+ * POST /api/admin/country-admins
+ * Create a new country admin (Assign Country Partner)
+ */
+router.post('/country-admins', authenticateAdmin, async (req, res) => {
+  try {
+    const { name, email, password, status = 'active', country, features = [] } = req.body;
+
+    if (!email || !password || !country || !name) {
+      return res.status(400).json({ ok: false, error: 'Name, email, password and country are required' });
+    }
+
+    const existing = await pool.query(
+      'SELECT id FROM admin WHERE email = $1',
+      [email]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ ok: false, error: 'Admin with this email already exists' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Create admin user entry
+    const adminRes = await pool.query(
+      `INSERT INTO admin (username, email, password_hash, admin_role, is_active, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,TRUE,NOW(),NOW())
+       RETURNING id`,
+      [name, email, passwordHash, 'country_admin']
+    );
+    const adminId = adminRes.rows[0].id;
+
+    // Create country_admins entry
+    const featString = Array.isArray(features) ? features.join(',') : String(features || '');
+    const caRes = await pool.query(
+      `INSERT INTO country_admins (name, email, status, country_code, features, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,NOW(),NOW())
+       RETURNING id, name, email, status, country_code AS country, features, created_at, updated_at`,
+      [name, email, status, country, featString]
+    );
+
+    const ca = caRes.rows[0];
+    ca.features = featString
+      ? featString.split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+
+    res.json({ ok: true, adminId, countryAdmin: ca });
+  } catch (error) {
+    console.error('Create country admin error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to create country admin' });
+  }
+});
+
+/**
+ * PUT /api/admin/country-admins/:id
+ * Update country admin details and features
+ */
+router.put('/country-admins/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, status, country, features = [] } = req.body;
+
+    const featString = Array.isArray(features) ? features.join(',') : String(features || '');
+
+    const result = await pool.query(
+      `UPDATE country_admins
+       SET name = COALESCE($1,name),
+           status = COALESCE($2,status),
+           country_code = COALESCE($3,country_code),
+           features = $4,
+           updated_at = NOW()
+       WHERE id = $5
+       RETURNING id, name, email, status, country_code AS country, features, created_at, updated_at`,
+      [name, status, country, featString, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Country admin not found' });
+    }
+
+    const row = result.rows[0];
+    row.features = featString
+      ? featString.split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+
+    res.json({ ok: true, admin: row });
+  } catch (error) {
+    console.error('Update country admin error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to update country admin' });
+  }
+});
+
+/**
+ * PATCH /api/admin/country-admins/:id/password
+ */
+router.patch('/country-admins/:id/password', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ ok: false, error: 'Password is required' });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await pool.query(
+      `UPDATE admin SET password_hash = $1, updated_at = NOW()
+       WHERE email = (SELECT email FROM country_admins WHERE id = $2)`,
+      [passwordHash, id]
+    );
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Update country admin password error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to update password' });
+  }
+});
+
+/**
+ * DELETE /api/admin/country-admins/:id
+ */
+router.delete('/country-admins/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const caRes = await pool.query(
+      'DELETE FROM country_admins WHERE id = $1 RETURNING email',
+      [id]
+    );
+    if (caRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Country admin not found' });
+    }
+
+    const email = caRes.rows[0].email;
+    await pool.query('DELETE FROM admin WHERE email = $1', [email]);
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Delete country admin error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to delete country admin' });
   }
 });
 
@@ -1265,8 +1421,9 @@ router.get('/users/:id', authenticateAdmin, async (req, res, next) => {
     let MT5Account = [];
     try {
       const mt5Result = await pool.query(
-        // Use trading_accounts.account_number as the MT5 account/login
-        `SELECT account_number, mt5_group_name, created_at
+        // Use trading_accounts.account_number as the MT5 account/login.
+        // In current schema, "group" is stored in account_type.
+        `SELECT account_number, account_type, created_at
          FROM trading_accounts
          WHERE user_id = $1 AND platform = 'MT5'
          ORDER BY created_at DESC`,
@@ -1276,7 +1433,7 @@ router.get('/users/:id', authenticateAdmin, async (req, res, next) => {
       MT5Account = mt5Result.rows.map(row => ({
         // Admin panel should use the trading account number as MT5 login
         accountId: row.account_number || null,
-        group: row.mt5_group_name || null,
+        group: row.account_type || null,
         createdAt: row.created_at
       }));
     } catch (mt5Error) {
@@ -2040,6 +2197,38 @@ router.get('/mt5/proxy/:accountId/getClientProfile', authenticateAdmin, async (r
     res.status(500).json({
       success: false,
       message: error.message || 'Failed to get client profile',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * GET /api/admin/mt5/proxy/:accountId/getClientBalance
+ * Proxy request to get MT5 client balance (all balances info for a login)
+ */
+router.get('/mt5/proxy/:accountId/getClientBalance', authenticateAdmin, async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const login = parseInt(accountId);
+
+    if (isNaN(login)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid account ID'
+      });
+    }
+
+    const result = await mt5Service.getClientBalance(login);
+
+    res.json({
+      success: true,
+      data: result.data
+    });
+  } catch (error) {
+    console.error('Get MT5 client balance error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to get client balance',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -3508,6 +3697,183 @@ router.post('/deposits/:id/reject', authenticateAdmin, async (req, res) => {
     res.status(500).json({
       ok: false,
       error: error.message || 'Failed to reject deposit'
+    });
+  }
+});
+
+/**
+ * ============================================
+ * Admin MT5 / Wallet Internal Transfers
+ * ============================================
+ */
+
+router.post('/mt5/transfer', authenticateAdmin, async (req, res) => {
+  try {
+    const { from, to, amount, comment } = req.body;
+    const adminId = req.admin.id;
+
+    const numericAmount = Number(amount);
+    if (!from || !to || !numericAmount || numericAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'From, To and positive amount are required'
+      });
+    }
+    if (from === to) {
+      return res.status(400).json({
+        success: false,
+        message: 'From and To must be different'
+      });
+    }
+
+    const [fromType, fromRef] = String(from).split(':');
+    const [toType, toRef] = String(to).split(':');
+
+    if (!['wallet', 'mt5'].includes(fromType) || !['wallet', 'mt5'].includes(toType)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid from/to types'
+      });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Handle wallet side using wallet.service helper
+      async function applyWalletChange(walletId, direction, mt5Login, reference) {
+        const type = direction === 'out' ? 'transfer_out' : 'transfer_in';
+        const source = direction === 'out' ? 'wallet' : 'mt5';
+        const target = direction === 'out' ? 'mt5' : 'wallet';
+        await adjustWalletBalance(
+          {
+            walletId,
+            amount: numericAmount,
+            type,
+            source,
+            target,
+            mt5AccountNumber: mt5Login ? String(mt5Login) : null,
+            reference
+          },
+          client
+        );
+      }
+
+      // Resolve wallet/mt5 records
+      let fromWalletId = null;
+      let toWalletId = null;
+      let fromMt5Login = null;
+      let toMt5Login = null;
+
+      if (fromType === 'wallet') {
+        const w = await client.query(
+          'SELECT id, wallet_number FROM wallets WHERE id = $1',
+          [fromRef]
+        );
+        if (w.rows.length === 0) throw new Error('From wallet not found');
+        fromWalletId = w.rows[0].id;
+      }
+      if (toType === 'wallet') {
+        const w = await client.query(
+          'SELECT id, wallet_number FROM wallets WHERE id = $1',
+          [toRef]
+        );
+        if (w.rows.length === 0) throw new Error('To wallet not found');
+        toWalletId = w.rows[0].id;
+      }
+      if (fromType === 'mt5') {
+        fromMt5Login = parseInt(fromRef, 10);
+        if (Number.isNaN(fromMt5Login)) throw new Error('Invalid from MT5 login');
+      }
+      if (toType === 'mt5') {
+        toMt5Login = parseInt(toRef, 10);
+        if (Number.isNaN(toMt5Login)) throw new Error('Invalid to MT5 login');
+      }
+
+      const refComment = comment || `Admin transfer ${from} → ${to}`;
+
+      // Apply MT5 changes
+      if (fromMt5Login) {
+        await mt5Service.deductBalance(fromMt5Login, numericAmount, refComment);
+      }
+      if (toMt5Login) {
+        await mt5Service.addBalance(toMt5Login, numericAmount, refComment);
+      }
+
+      // Apply wallet changes
+      if (fromWalletId) {
+        await applyWalletChange(fromWalletId, 'out', toMt5Login || fromMt5Login, refComment);
+      }
+      if (toWalletId) {
+        await applyWalletChange(toWalletId, 'in', fromMt5Login || toMt5Login, refComment);
+      }
+
+      await client.query(
+        `INSERT INTO admin_transfers_mt5
+         (admin_id, from_type, from_ref, to_type, to_ref, amount, currency, comment)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          adminId,
+          fromType,
+          fromRef,
+          toType,
+          toRef,
+          numericAmount,
+          'USD',
+          refComment
+        ]
+      );
+
+      await client.query('COMMIT');
+
+      res.json({
+        success: true,
+        message: 'Transfer completed'
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('Admin mt5 transfer error:', err);
+      res.status(500).json({
+        success: false,
+        message: err.message || 'Transfer failed'
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Admin mt5 transfer outer error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Transfer failed'
+    });
+  }
+});
+
+router.get('/mt5/transfers', authenticateAdmin, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 100;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    const result = await pool.query(
+      `SELECT t.id, t.from_type, t.from_ref, t.to_type, t.to_ref,
+              t.amount, t.currency, t.comment, t.created_at,
+              a.email AS admin_email
+       FROM admin_transfers_mt5 t
+       LEFT JOIN admin a ON t.admin_id = a.id
+       ORDER BY t.created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    res.json({
+      ok: true,
+      items: result.rows
+    });
+  } catch (error) {
+    console.error('Admin mt5 transfers list error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to load transfers'
     });
   }
 });
