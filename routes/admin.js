@@ -4713,5 +4713,189 @@ router.post('/withdrawals/:id/reject', authenticateAdmin, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/internal-transfers
+ * Get all internal transfers for admin report
+ */
+router.get('/internal-transfers', authenticateAdmin, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 500;
+    const offset = parseInt(req.query.offset) || 0;
+
+    // Fetch internal transfers with user information
+    const result = await pool.query(
+      `SELECT 
+        it.id,
+        it.user_id,
+        it.from_type,
+        it.from_account,
+        it.to_type,
+        it.to_account,
+        it.amount,
+        it.currency,
+        it.mt5_account_number,
+        it.status,
+        it.reference AS reference_text,
+        it.created_at,
+        it.updated_at,
+        u.id AS user_id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        -- Get from account details
+        CASE 
+          WHEN it.from_type = 'mt5' THEN ta_from.account_number
+          WHEN it.from_type = 'wallet' THEN w_from.wallet_number
+          ELSE it.from_account
+        END AS from_account_display,
+        -- Get to account details
+        CASE 
+          WHEN it.to_type = 'mt5' THEN ta_to.account_number
+          WHEN it.to_type = 'wallet' THEN w_to.wallet_number
+          ELSE it.to_account
+        END AS to_account_display
+      FROM internal_transfers it
+      LEFT JOIN users u ON it.user_id = u.id
+      LEFT JOIN trading_accounts ta_from ON it.from_type = 'mt5' AND it.from_account = ta_from.account_number::text
+      LEFT JOIN trading_accounts ta_to ON it.to_type = 'mt5' AND it.to_account = ta_to.account_number::text
+      LEFT JOIN wallets w_from ON it.from_type = 'wallet' AND it.from_account = w_from.wallet_number
+      LEFT JOIN wallets w_to ON it.to_type = 'wallet' AND it.to_account = w_to.wallet_number
+      ORDER BY it.created_at DESC
+      LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    // Format the data to match frontend expectations
+    const items = result.rows.map(row => {
+      const userName = row.first_name && row.last_name 
+        ? `${row.first_name} ${row.last_name}`.trim()
+        : row.first_name || row.last_name || '-';
+      
+      return {
+        id: row.id,
+        createdAt: row.created_at,
+        amount: parseFloat(row.amount || 0),
+        currency: row.currency || 'USD',
+        status: row.status || 'completed',
+        description: row.reference_text || '-',
+        from: row.from_type === 'mt5' ? {
+          mt5Login: row.from_account_display || row.from_account,
+          user: {
+            name: userName,
+            email: row.email || '-'
+          }
+        } : row.from_type === 'wallet' ? {
+          mt5Login: row.from_account_display || row.from_account,
+          user: {
+            name: userName,
+            email: row.email || '-'
+          }
+        } : null,
+        to: row.to_type === 'mt5' ? {
+          mt5Login: row.to_account_display || row.to_account,
+          user: {
+            name: userName,
+            email: row.email || '-'
+          }
+        } : row.to_type === 'wallet' ? {
+          mt5Login: row.to_account_display || row.to_account,
+          user: {
+            name: userName,
+            email: row.email || '-'
+          }
+        } : null
+      };
+    });
+
+    res.json({
+      ok: true,
+      items: items,
+      total: result.rows.length
+    });
+  } catch (error) {
+    console.error('Get internal transfers error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to load internal transfers'
+    });
+  }
+});
+
+/**
+ * GET /api/admin/wallet-transactions
+ * Admin wallet transactions report (from wallet_transactions table)
+ */
+router.get('/wallet-transactions', authenticateAdmin, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 1000;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    const result = await pool.query(
+      `SELECT
+        wt.id,
+        wt.wallet_id,
+        wt.type,
+        wt.source,
+        wt.target,
+        wt.amount,
+        wt.currency,
+        wt.mt5_account_number,
+        wt.reference,
+        wt.created_at,
+        w.wallet_number,
+        w.currency AS wallet_currency,
+        u.id AS user_id,
+        u.first_name,
+        u.last_name,
+        u.email
+      FROM wallet_transactions wt
+      INNER JOIN wallets w ON wt.wallet_id = w.id
+      INNER JOIN users u ON w.user_id = u.id
+      ORDER BY wt.created_at DESC
+      LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const items = result.rows.map((row) => {
+      const userName = row.first_name && row.last_name
+        ? `${row.first_name} ${row.last_name}`.trim()
+        : row.first_name || row.last_name || '-';
+
+      return {
+        id: row.id,
+        createdAt: row.created_at,
+        userId: row.user_id,
+        userEmail: row.email || '-',
+        userName,
+        mt5AccountId: row.mt5_account_number || null,
+        walletId: row.wallet_number,
+        walletLabel: row.wallet_number
+          ? `${row.wallet_number} (${row.wallet_currency || row.currency || 'USD'})`
+          : null,
+        type: row.type,
+        source: row.source,
+        target: row.target,
+        amount: parseFloat(row.amount || 0),
+        currency: row.currency || row.wallet_currency || 'USD',
+        status: 'completed',
+        description: row.reference || '-',
+        withdrawalId: null,
+      };
+    });
+
+    res.json({
+      ok: true,
+      items,
+      total: items.length,
+    });
+  } catch (error) {
+    console.error('Get wallet transactions error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to load wallet transactions',
+    });
+  }
+});
+
 export default router;
 
