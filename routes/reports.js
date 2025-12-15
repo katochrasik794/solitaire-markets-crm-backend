@@ -523,6 +523,27 @@ router.get('/mt5-account-statement/download/pdf', authenticate, async (req, res)
 
     const transferResult = await pool.query(transferQuery, depositParams);
 
+    // Fetch MT5 withdrawals for PDF
+    const withdrawalQuery = `
+      SELECT 
+        w.id,
+        w.amount,
+        w.currency,
+        w.method,
+        w.payment_method,
+        w.status,
+        w.mt5_account_id,
+        w.created_at
+      FROM withdrawals w
+      WHERE w.user_id = $1 
+        AND w.mt5_account_id IS NOT NULL
+        ${accountNumber ? 'AND w.mt5_account_id = $2' : ''}
+      ORDER BY w.created_at DESC
+    `;
+
+    const withdrawalParams = accountNumber ? [userId, accountNumber] : [userId];
+    const withdrawalResult = await pool.query(withdrawalQuery, withdrawalParams);
+
     const transactions = [
       ...depositResult.rows.map(row => ({
         date: new Date(row.created_at).toLocaleDateString(),
@@ -533,6 +554,25 @@ router.get('/mt5-account-statement/download/pdf', authenticate, async (req, res)
         status: row.status,
         account: row.mt5_account_id
       })),
+      ...withdrawalResult.rows.map(row => {
+        let description = 'Withdrawal';
+        if (row.method === 'crypto') {
+          description = `Withdrawal via ${row.payment_method || 'Crypto'}`;
+        } else if (row.method === 'bank') {
+          description = 'Withdrawal via Bank Transfer';
+        } else {
+          description = `Withdrawal via ${row.method || 'Unknown'}`;
+        }
+        return {
+          date: new Date(row.created_at).toLocaleDateString(),
+          type: 'Withdrawal',
+          description: description,
+          amount: parseFloat(row.amount),
+          currency: row.currency || 'USD',
+          status: row.status,
+          account: row.mt5_account_id
+        };
+      }),
       ...transferResult.rows.map(row => ({
         date: new Date(row.created_at).toLocaleDateString(),
         type: row.type === 'transfer_in' ? 'Deposit' : 'Withdrawal',
@@ -555,48 +595,70 @@ router.get('/mt5-account-statement/download/pdf', authenticate, async (req, res)
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
-    doc.pipe(res);
-
-    // Header
-    doc.fontSize(20).text('MT5 Account Statement', { align: 'center' });
-    doc.moveDown();
-    doc.fontSize(12).text(`Account: ${accountNumber || 'All Accounts'}`, { align: 'center' });
-    doc.text(`User: ${user.first_name || ''} ${user.last_name || ''} (${user.email})`, { align: 'center' });
-    doc.text(`Generated: ${new Date().toLocaleString()}`, { align: 'center' });
-    doc.moveDown(2);
-
-    // Table header
-    const tableTop = doc.y;
-    const itemHeight = 20;
-    let y = tableTop;
-
-    doc.fontSize(10);
-    doc.text('Date', 50, y);
-    doc.text('Type', 120, y);
-    doc.text('Description', 200, y);
-    doc.text('Amount', 350, y, { width: 100, align: 'right' });
-    doc.text('Status', 460, y);
-    y += itemHeight;
-
-    // Draw line
-    doc.moveTo(50, y).lineTo(550, y).stroke();
-    y += 10;
-
-    // Table rows
-    transactions.forEach((tx) => {
-      if (y > 700) {
-        doc.addPage();
-        y = 50;
+    // Handle PDF generation errors
+    doc.on('error', (error) => {
+      console.error('PDF generation stream error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: 'Failed to generate PDF'
+        });
       }
-      doc.text(tx.date, 50, y);
-      doc.text(tx.type, 120, y);
-      doc.text(tx.description.substring(0, 30), 200, y, { width: 140 });
-      doc.text(`${tx.currency} ${tx.amount.toFixed(2)}`, 350, y, { width: 100, align: 'right' });
-      doc.text(tx.status, 460, y);
-      y += itemHeight;
     });
 
-    doc.end();
+    doc.pipe(res);
+
+    try {
+      // Header
+      doc.fontSize(20).text('MT5 Account Statement', { align: 'center' });
+      doc.moveDown();
+      doc.fontSize(12).text(`Account: ${accountNumber || 'All Accounts'}`, { align: 'center' });
+      doc.text(`User: ${user.first_name || ''} ${user.last_name || ''} (${user.email})`, { align: 'center' });
+      doc.text(`Generated: ${new Date().toLocaleString()}`, { align: 'center' });
+      doc.moveDown(2);
+
+      // Table header
+      const tableTop = doc.y;
+      const itemHeight = 20;
+      let y = tableTop;
+
+      doc.fontSize(10);
+      doc.text('Date', 50, y);
+      doc.text('Type', 120, y);
+      doc.text('Description', 200, y);
+      doc.text('Amount', 350, y, { width: 100, align: 'right' });
+      doc.text('Status', 460, y);
+      y += itemHeight;
+
+      // Draw line
+      doc.moveTo(50, y).lineTo(550, y).stroke();
+      y += 10;
+
+      // Table rows
+      transactions.forEach((tx) => {
+        if (y > 700) {
+          doc.addPage();
+          y = 50;
+        }
+        doc.text(tx.date || '-', 50, y);
+        doc.text(tx.type || '-', 120, y);
+        doc.text((tx.description || '-').substring(0, 30), 200, y, { width: 140 });
+        doc.text(`${tx.currency || 'USD'} ${(tx.amount || 0).toFixed(2)}`, 350, y, { width: 100, align: 'right' });
+        doc.text(tx.status || '-', 460, y);
+        y += itemHeight;
+      });
+
+      doc.end();
+    } catch (pdfError) {
+      console.error('PDF content generation error:', pdfError);
+      doc.end();
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: 'Failed to generate PDF content'
+        });
+      }
+    }
   } catch (error) {
     console.error('PDF generation error:', error);
     res.status(500).json({
@@ -675,6 +737,27 @@ router.get('/mt5-account-statement/download/excel', authenticate, async (req, re
 
     const transferResult = await pool.query(transferQuery, depositParams);
 
+    // Fetch MT5 withdrawals for Excel
+    const withdrawalQuery = `
+      SELECT 
+        w.id,
+        w.amount,
+        w.currency,
+        w.method,
+        w.payment_method,
+        w.status,
+        w.mt5_account_id,
+        w.created_at
+      FROM withdrawals w
+      WHERE w.user_id = $1 
+        AND w.mt5_account_id IS NOT NULL
+        ${accountNumber ? 'AND w.mt5_account_id = $2' : ''}
+      ORDER BY w.created_at DESC
+    `;
+
+    const withdrawalParams = accountNumber ? [userId, accountNumber] : [userId];
+    const withdrawalResult = await pool.query(withdrawalQuery, withdrawalParams);
+
     const transactions = [
       ...depositResult.rows.map(row => ({
         date: new Date(row.created_at).toLocaleString(),
@@ -685,6 +768,25 @@ router.get('/mt5-account-statement/download/excel', authenticate, async (req, re
         status: row.status,
         account: row.mt5_account_id
       })),
+      ...withdrawalResult.rows.map(row => {
+        let description = 'Withdrawal';
+        if (row.method === 'crypto') {
+          description = `Withdrawal via ${row.payment_method || 'Crypto'}`;
+        } else if (row.method === 'bank') {
+          description = 'Withdrawal via Bank Transfer';
+        } else {
+          description = `Withdrawal via ${row.method || 'Unknown'}`;
+        }
+        return {
+          date: new Date(row.created_at).toLocaleString(),
+          type: 'Withdrawal',
+          description: description,
+          amount: parseFloat(row.amount),
+          currency: row.currency || 'USD',
+          status: row.status,
+          account: row.mt5_account_id
+        };
+      }),
       ...transferResult.rows.map(row => ({
         date: new Date(row.created_at).toLocaleString(),
         type: row.type === 'transfer_in' ? 'Deposit' : 'Withdrawal',
@@ -753,6 +855,380 @@ router.get('/mt5-account-statement/download/excel', authenticate, async (req, re
       success: false,
       error: error.message || 'Failed to generate Excel'
     });
+  }
+});
+
+/**
+ * GET /api/reports/transaction-history/download/pdf
+ * Download Transaction History as PDF
+ */
+router.get('/transaction-history/download/pdf', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Fetch all transactions (no limit for PDF)
+    const depositQuery = `
+      SELECT 
+        dr.id,
+        dr.amount,
+        dr.currency,
+        dr.status,
+        dr.deposit_to_type,
+        dr.mt5_account_id,
+        dr.wallet_number,
+        dr.created_at,
+        COALESCE(mg.name, ag.wallet_name) as gateway_name,
+        COALESCE(mg.type, ag.gateway_type) as gateway_type
+      FROM deposit_requests dr
+      LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
+      LEFT JOIN LATERAL (
+        SELECT wallet_name, gateway_type
+        FROM auto_gateway
+        WHERE gateway_type = 'Cryptocurrency' 
+          AND is_active = TRUE
+        ORDER BY display_order ASC, created_at DESC
+        LIMIT 1
+      ) ag ON dr.cregis_order_id IS NOT NULL
+      WHERE dr.user_id = $1
+      ORDER BY dr.created_at DESC
+    `;
+
+    const depositResult = await pool.query(depositQuery, [userId]);
+
+    const withdrawalQuery = `
+      SELECT 
+        w.id,
+        w.amount,
+        w.currency,
+        w.method,
+        w.payment_method,
+        w.status,
+        w.mt5_account_id,
+        w.wallet_id,
+        w.created_at,
+        wt.wallet_number
+      FROM withdrawals w
+      LEFT JOIN wallets wt ON w.wallet_id = wt.id
+      WHERE w.user_id = $1
+      ORDER BY w.created_at DESC
+    `;
+
+    const withdrawalResult = await pool.query(withdrawalQuery, [userId]);
+
+    const accountQuery = `
+      SELECT 
+        id,
+        account_number,
+        platform,
+        account_type,
+        balance,
+        equity,
+        currency,
+        created_at
+      FROM trading_accounts
+      WHERE user_id = $1 AND platform = 'MT5'
+      ORDER BY created_at DESC
+    `;
+
+    const accountResult = await pool.query(accountQuery, [userId]);
+
+    // Format transactions
+    const transactions = [
+      ...depositResult.rows.map(row => ({
+        date: new Date(row.created_at).toLocaleDateString(),
+        type: 'Deposit',
+        description: `Deposit via ${formatGatewayName(row.gateway_name, row.gateway_type)}`,
+        amount: parseFloat(row.amount),
+        currency: row.currency || 'USD',
+        status: row.status,
+        account: row.mt5_account_id ? `MT5: ${row.mt5_account_id}` : (row.wallet_number ? `Wallet: ${row.wallet_number}` : '-')
+      })),
+      ...withdrawalResult.rows.map(row => {
+        let description = 'Withdrawal';
+        if (row.method === 'crypto') {
+          description = `Withdrawal via ${row.payment_method || 'Crypto'}`;
+        } else if (row.method === 'bank') {
+          description = 'Withdrawal via Bank Transfer';
+        }
+        return {
+          date: new Date(row.created_at).toLocaleDateString(),
+          type: 'Withdrawal',
+          description: description,
+          amount: parseFloat(row.amount),
+          currency: row.currency || 'USD',
+          status: row.status,
+          account: row.mt5_account_id ? `MT5: ${row.mt5_account_id}` : (row.wallet_number ? `Wallet: ${row.wallet_number}` : '-')
+        };
+      }),
+      ...accountResult.rows.map(row => ({
+        date: new Date(row.created_at).toLocaleDateString(),
+        type: 'Account Creation',
+        description: `MT5 Account Created: ${row.account_number}`,
+        amount: parseFloat(row.balance || 0),
+        currency: row.currency || 'USD',
+        status: 'Completed',
+        account: `MT5: ${row.account_number}`
+      }))
+    ].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    // Get user info
+    const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [userId]);
+    const user = userResult.rows[0];
+
+    // Create PDF
+    const doc = new PDFDocument({ margin: 50 });
+    const filename = `Transaction_History_${Date.now()}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    doc.on('error', (error) => {
+      console.error('PDF generation stream error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: 'Failed to generate PDF'
+        });
+      }
+    });
+
+    doc.pipe(res);
+
+    try {
+      // Header
+      doc.fontSize(20).text('Transaction History', { align: 'center' });
+      doc.moveDown();
+      doc.fontSize(12).text(`User: ${user.first_name || ''} ${user.last_name || ''} (${user.email})`, { align: 'center' });
+      doc.text(`Generated: ${new Date().toLocaleString()}`, { align: 'center' });
+      doc.moveDown(2);
+
+      // Table header
+      const tableTop = doc.y;
+      const itemHeight = 20;
+      let y = tableTop;
+
+      doc.fontSize(10);
+      doc.text('Date', 50, y);
+      doc.text('Type', 120, y);
+      doc.text('Description', 200, y);
+      doc.text('Amount', 350, y, { width: 100, align: 'right' });
+      doc.text('Status', 460, y);
+      doc.text('Account', 520, y);
+      y += itemHeight;
+
+      // Draw line
+      doc.moveTo(50, y).lineTo(550, y).stroke();
+      y += 10;
+
+      // Table rows
+      transactions.forEach((tx) => {
+        if (y > 700) {
+          doc.addPage();
+          y = 50;
+        }
+        doc.text(tx.date || '-', 50, y);
+        doc.text(tx.type || '-', 120, y);
+        doc.text((tx.description || '-').substring(0, 30), 200, y, { width: 140 });
+        doc.text(`${tx.currency || 'USD'} ${(tx.amount || 0).toFixed(2)}`, 350, y, { width: 100, align: 'right' });
+        doc.text(tx.status || '-', 460, y);
+        doc.text((tx.account || '-').substring(0, 20), 520, y, { width: 30 });
+        y += itemHeight;
+      });
+
+      doc.end();
+    } catch (pdfError) {
+      console.error('PDF content generation error:', pdfError);
+      doc.end();
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: 'Failed to generate PDF content'
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Transaction History PDF generation error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to generate PDF'
+      });
+    }
+  }
+});
+
+/**
+ * GET /api/reports/transaction-history/download/excel
+ * Download Transaction History as Excel
+ */
+router.get('/transaction-history/download/excel', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Fetch all transactions (no limit for Excel)
+    const depositQuery = `
+      SELECT 
+        dr.id,
+        dr.amount,
+        dr.currency,
+        dr.status,
+        dr.deposit_to_type,
+        dr.mt5_account_id,
+        dr.wallet_number,
+        dr.created_at,
+        COALESCE(mg.name, ag.wallet_name) as gateway_name,
+        COALESCE(mg.type, ag.gateway_type) as gateway_type
+      FROM deposit_requests dr
+      LEFT JOIN manual_payment_gateways mg ON dr.gateway_id = mg.id
+      LEFT JOIN LATERAL (
+        SELECT wallet_name, gateway_type
+        FROM auto_gateway
+        WHERE gateway_type = 'Cryptocurrency' 
+          AND is_active = TRUE
+        ORDER BY display_order ASC, created_at DESC
+        LIMIT 1
+      ) ag ON dr.cregis_order_id IS NOT NULL
+      WHERE dr.user_id = $1
+      ORDER BY dr.created_at DESC
+    `;
+
+    const depositResult = await pool.query(depositQuery, [userId]);
+
+    const withdrawalQuery = `
+      SELECT 
+        w.id,
+        w.amount,
+        w.currency,
+        w.method,
+        w.payment_method,
+        w.status,
+        w.mt5_account_id,
+        w.wallet_id,
+        w.created_at,
+        wt.wallet_number
+      FROM withdrawals w
+      LEFT JOIN wallets wt ON w.wallet_id = wt.id
+      WHERE w.user_id = $1
+      ORDER BY w.created_at DESC
+    `;
+
+    const withdrawalResult = await pool.query(withdrawalQuery, [userId]);
+
+    const accountQuery = `
+      SELECT 
+        id,
+        account_number,
+        platform,
+        account_type,
+        balance,
+        equity,
+        currency,
+        created_at
+      FROM trading_accounts
+      WHERE user_id = $1 AND platform = 'MT5'
+      ORDER BY created_at DESC
+    `;
+
+    const accountResult = await pool.query(accountQuery, [userId]);
+
+    // Format transactions
+    const transactions = [
+      ...depositResult.rows.map(row => ({
+        date: new Date(row.created_at).toLocaleString(),
+        type: 'Deposit',
+        description: `Deposit via ${formatGatewayName(row.gateway_name, row.gateway_type)}`,
+        amount: parseFloat(row.amount),
+        currency: row.currency || 'USD',
+        status: row.status,
+        account: row.mt5_account_id ? `MT5: ${row.mt5_account_id}` : (row.wallet_number ? `Wallet: ${row.wallet_number}` : '-')
+      })),
+      ...withdrawalResult.rows.map(row => {
+        let description = 'Withdrawal';
+        if (row.method === 'crypto') {
+          description = `Withdrawal via ${row.payment_method || 'Crypto'}`;
+        } else if (row.method === 'bank') {
+          description = 'Withdrawal via Bank Transfer';
+        }
+        return {
+          date: new Date(row.created_at).toLocaleString(),
+          type: 'Withdrawal',
+          description: description,
+          amount: parseFloat(row.amount),
+          currency: row.currency || 'USD',
+          status: row.status,
+          account: row.mt5_account_id ? `MT5: ${row.mt5_account_id}` : (row.wallet_number ? `Wallet: ${row.wallet_number}` : '-')
+        };
+      }),
+      ...accountResult.rows.map(row => ({
+        date: new Date(row.created_at).toLocaleString(),
+        type: 'Account Creation',
+        description: `MT5 Account Created: ${row.account_number}`,
+        amount: parseFloat(row.balance || 0),
+        currency: row.currency || 'USD',
+        status: 'Completed',
+        account: `MT5: ${row.account_number}`
+      }))
+    ].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    // Get user info
+    const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [userId]);
+    const user = userResult.rows[0];
+
+    // Create Excel workbook
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Transaction History');
+
+    // Add header row
+    worksheet.columns = [
+      { header: 'Date', key: 'date', width: 20 },
+      { header: 'Type', key: 'type', width: 15 },
+      { header: 'Description', key: 'description', width: 40 },
+      { header: 'Amount', key: 'amount', width: 15 },
+      { header: 'Currency', key: 'currency', width: 10 },
+      { header: 'Status', key: 'status', width: 15 },
+      { header: 'Account', key: 'account', width: 20 }
+    ];
+
+    // Style header
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF00A896' }
+    };
+    worksheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+    // Add data rows
+    transactions.forEach(tx => {
+      worksheet.addRow({
+        date: tx.date,
+        type: tx.type,
+        description: tx.description,
+        amount: tx.amount,
+        currency: tx.currency,
+        status: tx.status,
+        account: tx.account
+      });
+    });
+
+    // Format amount column
+    worksheet.getColumn('amount').numFmt = '#,##0.00';
+
+    const filename = `Transaction_History_${Date.now()}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error('Transaction History Excel generation error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to generate Excel'
+      });
+    }
   }
 });
 

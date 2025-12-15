@@ -58,7 +58,25 @@ export const createAccessToken = async (userId, levelName = 'basic-kyc-level') =
     if (!response.ok) {
         console.error('Sumsub Error Response:', data);
         console.error('Response Status:', response.status);
-        throw new Error(data.description || 'Failed to create access token');
+        console.error('Response Text:', text);
+        
+        // Provide more detailed error messages
+        let errorMsg = 'Failed to create access token';
+        if (data && data.description) {
+            errorMsg = data.description;
+        } else if (data && data.message) {
+            errorMsg = data.message;
+        } else if (response.status === 403) {
+            errorMsg = 'Access denied. Please check your Sumsub credentials and level name.';
+        } else if (response.status === 401) {
+            errorMsg = 'Invalid Sumsub credentials. Please check your API token and secret key.';
+        } else if (response.status === 404) {
+            errorMsg = 'Verification level not found. Please check SUMSUB_LEVEL_NAME configuration.';
+        } else if (response.status >= 500) {
+            errorMsg = 'Sumsub service is temporarily unavailable. Please try again later.';
+        }
+        
+        throw new Error(errorMsg);
     }
     return data;
 };

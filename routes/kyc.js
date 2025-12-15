@@ -53,10 +53,41 @@ router.post('/profile', authenticate, async (req, res) => {
 // Initialize Sumsub (get token, return applicantId)
 router.post('/sumsub/init', authenticate, async (req, res) => {
   try {
+    // Check if Sumsub credentials are configured
+    if (!process.env.SUMSUB_APP_TOKEN || !process.env.SUMSUB_SECRET_KEY) {
+      console.error('Sumsub credentials missing:', {
+        hasAppToken: !!process.env.SUMSUB_APP_TOKEN,
+        hasSecretKey: !!process.env.SUMSUB_SECRET_KEY
+      });
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Sumsub verification service is not configured. Please contact support.',
+        error: 'SUMSUB_APP_TOKEN or SUMSUB_SECRET_KEY is missing'
+      });
+    }
+
     const userId = req.user.id.toString();
-    const levelName = process.env.SUMSUB_LEVEL_NAME || 'id-and-phone-verification';
+    const levelName = process.env.SUMSUB_LEVEL_NAME || 'id-only';
+    
+    console.log('Sumsub configuration:', {
+      hasAppToken: !!process.env.SUMSUB_APP_TOKEN,
+      hasSecretKey: !!process.env.SUMSUB_SECRET_KEY,
+      levelName: levelName,
+      apiUrl: process.env.SUMSUB_API_URL || 'https://api.sumsub.com'
+    });
+
+    console.log('Initializing Sumsub for user:', userId, 'with level:', levelName);
 
     const tokenData = await createAccessToken(userId, levelName);
+
+    if (!tokenData || !tokenData.token) {
+      console.error('Invalid token data from Sumsub:', tokenData);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to get access token from Sumsub. Please try again.',
+        error: 'Invalid token data'
+      });
+    }
 
     // Save applicant link
     await pool.query(
@@ -73,7 +104,28 @@ router.post('/sumsub/init', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Sumsub init error:', error);
-    res.status(500).json({ success: false, error: 'Failed to initialize Sumsub' });
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack
+    });
+    
+    // Provide more specific error messages
+    let errorMessage = 'Failed to initialize verification. Please try again.';
+    if (error.message.includes('SUMSUB_SECRET_KEY is missing') || error.message.includes('SUMSUB_APP_TOKEN is missing')) {
+      errorMessage = 'Verification service is not configured. Please contact support.';
+    } else if (error.message.includes('403') || error.message.includes('Forbidden')) {
+      errorMessage = 'Verification level not found or access denied. Please contact support.';
+    } else if (error.message.includes('Invalid JSON') || error.message.includes('HTML error')) {
+      errorMessage = 'Invalid response from verification service. Please try again later.';
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+
+    res.status(500).json({ 
+      success: false, 
+      message: errorMessage,
+      error: error.message || 'Failed to initialize Sumsub'
+    });
   }
 });
 
@@ -82,7 +134,7 @@ router.post('/sumsub/init', authenticate, async (req, res) => {
 router.get('/sumsub/access-token/:applicantId', authenticate, async (req, res) => {
   try {
     const { applicantId } = req.params;
-    const levelName = process.env.SUMSUB_LEVEL_NAME || 'id-and-liveness';
+    const levelName = process.env.SUMSUB_LEVEL_NAME || 'id-only';
     const tokenData = await createAccessToken(req.user.id.toString(), levelName);
 
     res.json({
