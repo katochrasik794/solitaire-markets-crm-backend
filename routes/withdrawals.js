@@ -18,6 +18,7 @@ router.post('/', authenticate, async (req, res) => {
             method,
             paymentMethod,
             mt5AccountId,
+            walletId,
             password,
             // Crypto fields
             cryptoAddress,
@@ -35,11 +36,18 @@ router.post('/', authenticate, async (req, res) => {
 
         const userId = req.user.id;
 
-        // Validate required fields
-        if (!amount || !method || !mt5AccountId || !password) {
+        // Validate required fields - either mt5AccountId or walletId must be provided
+        if (!amount || !method || !password) {
             return res.status(400).json({
                 ok: false,
-                error: 'Amount, method, MT5 account ID, and password are required'
+                error: 'Amount, method, and password are required'
+            });
+        }
+
+        if (!mt5AccountId && !walletId) {
+            return res.status(400).json({
+                ok: false,
+                error: 'Either MT5 account ID or wallet ID is required'
             });
         }
 
@@ -62,9 +70,9 @@ router.post('/', authenticate, async (req, res) => {
             });
         }
 
-        // Verify user password
+        // Verify user password from users table (for confirmation only, not stored in withdrawals)
         const userResult = await pool.query(
-            'SELECT password FROM users WHERE id = $1',
+            'SELECT id, password_hash FROM users WHERE id = $1',
             [userId]
         );
 
@@ -75,44 +83,78 @@ router.post('/', authenticate, async (req, res) => {
             });
         }
 
-        const isPasswordValid = await bcrypt.compare(password, userResult.rows[0].password);
+        // Compare provided password with user's login password from users table
+        if (!userResult.rows[0].password_hash) {
+            return res.status(500).json({
+                ok: false,
+                error: 'User password not found in database'
+            });
+        }
+
+        const isPasswordValid = await bcrypt.compare(password, userResult.rows[0].password_hash);
         if (!isPasswordValid) {
             return res.status(401).json({
                 ok: false,
-                error: 'Invalid password'
+                error: 'Invalid password. Please enter your login password.'
             });
         }
 
-        // Verify MT5 account belongs to user
-        const accountResult = await pool.query(
-            'SELECT id FROM trading_accounts WHERE account_number = $1 AND user_id = $2',
-            [mt5AccountId, userId]
-        );
+        let accountBalance = 0;
+        let accountCurrency = currency;
 
-        if (accountResult.rows.length === 0) {
-            return res.status(403).json({
-                ok: false,
-                error: 'MT5 account not found or does not belong to you'
-            });
-        }
+        // Verify account belongs to user and check balance
+        if (mt5AccountId) {
+            // Verify MT5 account belongs to user and get balance from database
+            const accountResult = await pool.query(
+                'SELECT id, currency, balance, equity FROM trading_accounts WHERE account_number = $1 AND user_id = $2',
+                [mt5AccountId, userId]
+            );
 
-        // Check MT5 account balance
-        try {
-            const balanceResult = await mt5Service.getClientBalance(parseInt(mt5AccountId));
-            const currentBalance = balanceResult.data?.Balance || 0;
-
-            if (currentBalance < withdrawalAmount) {
-                return res.status(400).json({
+            if (accountResult.rows.length === 0) {
+                return res.status(403).json({
                     ok: false,
-                    error: `Insufficient balance. Available: $${currentBalance.toFixed(2)}`
+                    error: 'MT5 account not found or does not belong to you'
                 });
             }
-        } catch (error) {
-            console.error('Failed to check MT5 balance:', error);
-            return res.status(500).json({
-                ok: false,
-                error: 'Failed to verify account balance'
-            });
+
+            accountCurrency = accountResult.rows[0].currency || currency;
+            // Use balance from database (already synced from MT5)
+            accountBalance = parseFloat(accountResult.rows[0].balance || 0);
+
+            // If balance is 0 or null, try to get from equity as fallback
+            if (accountBalance === 0 || !accountBalance) {
+                accountBalance = parseFloat(accountResult.rows[0].equity || 0);
+            }
+
+            if (accountBalance < withdrawalAmount) {
+                return res.status(400).json({
+                    ok: false,
+                    error: `Insufficient balance. Available: $${accountBalance.toFixed(2)}`
+                });
+            }
+        } else if (walletId) {
+            // Verify wallet belongs to user
+            const walletResult = await pool.query(
+                'SELECT id, balance, currency FROM wallets WHERE id = $1 AND user_id = $2 AND status = $3',
+                [walletId, userId, 'active']
+            );
+
+            if (walletResult.rows.length === 0) {
+                return res.status(403).json({
+                    ok: false,
+                    error: 'Wallet not found or does not belong to you'
+                });
+            }
+
+            accountBalance = parseFloat(walletResult.rows[0].balance || 0);
+            accountCurrency = walletResult.rows[0].currency || currency;
+
+            if (accountBalance < withdrawalAmount) {
+                return res.status(400).json({
+                    ok: false,
+                    error: `Insufficient balance. Available: $${accountBalance.toFixed(2)}`
+                });
+            }
         }
 
         // Validate payment method specific fields
@@ -138,14 +180,14 @@ router.post('/', authenticate, async (req, res) => {
         user_id, amount, currency, method, payment_method,
         bank_name, account_name, account_number, ifsc_swift_code, account_type, bank_details,
         crypto_address, wallet_address, pm_currency, pm_network, pm_address,
-        mt5_account_id, status, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'pending', NOW(), NOW())
+        mt5_account_id, wallet_id, status, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'pending', NOW(), NOW())
       RETURNING *`,
             [
-                userId, withdrawalAmount, currency, method, paymentMethod,
+                userId, withdrawalAmount, accountCurrency, method, paymentMethod,
                 bankName, accountName, accountNumber, ifscSwiftCode, accountType, bankDetails,
                 cryptoAddress, cryptoAddress || pmAddress, pmCurrency, pmNetwork, pmAddress,
-                mt5AccountId
+                mt5AccountId || null, walletId || null
             ]
         );
 

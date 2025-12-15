@@ -136,6 +136,28 @@ router.get('/transaction-history', authenticate, async (req, res) => {
 
     const tradingAccountsResult = await pool.query(tradingAccountsQuery, [userId, parseInt(limit), parseInt(offset)]);
 
+    // Fetch withdrawals for this user
+    const withdrawalQuery = `
+      SELECT 
+        w.id,
+        w.amount,
+        w.currency,
+        w.method,
+        w.payment_method,
+        w.status,
+        w.mt5_account_id,
+        w.wallet_id,
+        w.created_at,
+        wt.wallet_number
+      FROM withdrawals w
+      LEFT JOIN wallets wt ON w.wallet_id = wt.id
+      WHERE w.user_id = $1
+      ORDER BY w.created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+
+    const withdrawalResult = await pool.query(withdrawalQuery, [userId, parseInt(limit), parseInt(offset)]);
+
     // Combine and format the results
     const transactions = [
       ...depositResult.rows.map(row => {
@@ -153,6 +175,36 @@ router.get('/transaction-history', authenticate, async (req, res) => {
           gatewayType: row.gateway_type,
           createdAt: row.created_at,
           description: `Deposit via ${formattedGateway}`
+        };
+      }),
+      ...withdrawalResult.rows.map(row => {
+        let description = 'Withdrawal';
+        if (row.method === 'crypto') {
+          description = `Withdrawal via ${row.payment_method || 'Crypto'}`;
+        } else if (row.method === 'bank') {
+          description = 'Withdrawal via Bank Transfer';
+        } else {
+          description = `Withdrawal via ${row.method || 'Unknown'}`;
+        }
+        
+        let accountInfo = null;
+        if (row.mt5_account_id) {
+          accountInfo = row.mt5_account_id;
+        } else if (row.wallet_number) {
+          accountInfo = row.wallet_number;
+        }
+
+        return {
+          id: `withdrawal_${row.id}`,
+          type: 'withdrawal',
+          amount: parseFloat(row.amount),
+          currency: row.currency || 'USD',
+          status: row.status,
+          mt5AccountId: row.mt5_account_id,
+          walletNumber: row.wallet_number,
+          createdAt: row.created_at,
+          description: description,
+          accountNumber: accountInfo
         };
       }),
       ...tradingAccountsResult.rows.map(row => ({
@@ -174,11 +226,15 @@ router.get('/transaction-history', authenticate, async (req, res) => {
       'SELECT COUNT(*) as count FROM deposit_requests WHERE user_id = $1',
       [userId]
     );
+    const withdrawalCountResult = await pool.query(
+      'SELECT COUNT(*) as count FROM withdrawals WHERE user_id = $1',
+      [userId]
+    );
     const accountCountResult = await pool.query(
       'SELECT COUNT(*) as count FROM trading_accounts WHERE user_id = $1 AND platform = \'MT5\'',
       [userId]
     );
-    const total = parseInt(depositCountResult.rows[0].count) + parseInt(accountCountResult.rows[0].count);
+    const total = parseInt(depositCountResult.rows[0].count) + parseInt(withdrawalCountResult.rows[0].count) + parseInt(accountCountResult.rows[0].count);
 
     res.json({
       success: true,
@@ -208,6 +264,11 @@ router.get('/mt5-account-statement', authenticate, async (req, res) => {
     const { accountNumber, limit = 1000, offset = 0 } = req.query;
 
     let transactions = [];
+
+    // Build query parameters
+    const depositParams = accountNumber 
+      ? [userId, parseInt(limit), parseInt(offset), accountNumber]
+      : [userId, parseInt(limit), parseInt(offset)];
 
     // Fetch MT5 deposits (deposits made to MT5 accounts)
     const depositQuery = `
@@ -274,6 +335,27 @@ router.get('/mt5-account-statement', authenticate, async (req, res) => {
 
     const transferResult = await pool.query(transferQuery, depositParams);
 
+    // Fetch MT5 withdrawals (withdrawals from MT5 accounts)
+    const withdrawalQuery = `
+      SELECT 
+        w.id,
+        w.amount,
+        w.currency,
+        w.method,
+        w.payment_method,
+        w.status,
+        w.mt5_account_id,
+        w.created_at
+      FROM withdrawals w
+      WHERE w.user_id = $1 
+        AND w.mt5_account_id IS NOT NULL
+        ${accountNumber ? 'AND w.mt5_account_id = $4' : ''}
+      ORDER BY w.created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+
+    const withdrawalResult = await pool.query(withdrawalQuery, depositParams);
+
     // Combine transactions
     transactions = [
       ...depositResult.rows.map(row => ({
@@ -290,6 +372,28 @@ router.get('/mt5-account-statement', authenticate, async (req, res) => {
         description: `Deposit via ${formatGatewayName(row.gateway_name, row.gateway_type)}`,
         reference: `DEP-${row.id}`
       })),
+      ...withdrawalResult.rows.map(row => {
+        let description = 'Withdrawal';
+        if (row.method === 'crypto') {
+          description = `Withdrawal via ${row.payment_method || 'Crypto'}`;
+        } else if (row.method === 'bank') {
+          description = 'Withdrawal via Bank Transfer';
+        } else {
+          description = `Withdrawal via ${row.method || 'Unknown'}`;
+        }
+        return {
+          id: `withdrawal_${row.id}`,
+          type: 'withdrawal',
+          operationType: 'debit',
+          amount: parseFloat(row.amount),
+          currency: row.currency || 'USD',
+          status: row.status,
+          mt5AccountId: row.mt5_account_id,
+          createdAt: row.created_at,
+          description: description,
+          reference: `WD-${row.id}`
+        };
+      }),
       ...transferResult.rows.map(row => ({
         id: `transfer_${row.id}`,
         type: row.transaction_type,
@@ -312,6 +416,13 @@ router.get('/mt5-account-statement', authenticate, async (req, res) => {
       accountNumber ? [userId, accountNumber] : [userId]
     );
 
+    const withdrawalCountResult = await pool.query(
+      accountNumber
+        ? 'SELECT COUNT(*) as count FROM withdrawals WHERE user_id = $1 AND mt5_account_id IS NOT NULL AND mt5_account_id = $2'
+        : 'SELECT COUNT(*) as count FROM withdrawals WHERE user_id = $1 AND mt5_account_id IS NOT NULL',
+      accountNumber ? [userId, accountNumber] : [userId]
+    );
+
     const transferCountResult = await pool.query(
       accountNumber
         ? `SELECT COUNT(*) as count FROM wallet_transactions wt
@@ -323,7 +434,7 @@ router.get('/mt5-account-statement', authenticate, async (req, res) => {
       accountNumber ? [userId, accountNumber] : [userId]
     );
 
-    const total = parseInt(depositCountResult.rows[0].count) + parseInt(transferCountResult.rows[0].count);
+    const total = parseInt(depositCountResult.rows[0].count) + parseInt(withdrawalCountResult.rows[0].count) + parseInt(transferCountResult.rows[0].count);
 
     res.json({
       success: true,
