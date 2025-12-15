@@ -2186,7 +2186,7 @@ router.get('/mt5/proxy/:accountId/getClientProfile', authenticateAdmin, async (r
       });
     }
 
-    const result = await mt5Service.getUserProfile(login);
+    const result = await mt5Service.getClientProfile(login);
 
     res.json({
       success: true,

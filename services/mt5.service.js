@@ -118,6 +118,11 @@ export const getClientProfile = async (login) => {
   return { success: true, data };
 };
 
+// Backwards-compatible alias (some routes still call getUserProfile)
+export const getUserProfile = async (login) => {
+  return getClientProfile(login);
+};
+
 /**
  * POST /client/auth/login
  * Body: { "accountId": number, "password": string }
