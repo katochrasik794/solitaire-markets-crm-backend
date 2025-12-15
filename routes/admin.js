@@ -482,6 +482,121 @@ router.delete('/country-admins/:id', authenticateAdmin, async (req, res) => {
 });
 
 /**
+ * ============================================
+ * Admin Roles & Role Assignments
+ * ============================================
+ */
+
+// Get all roles
+router.get('/roles', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, description, permissions, is_system, created_at, updated_at
+       FROM admin_roles
+       ORDER BY name ASC`
+    );
+    res.json({ ok: true, roles: result.rows });
+  } catch (error) {
+    console.error('Get admin roles error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to fetch roles' });
+  }
+});
+
+// Create a new role
+router.post('/roles', authenticateAdmin, async (req, res) => {
+  try {
+    const { name, description, permissions } = req.body;
+    if (!name) return res.status(400).json({ ok: false, error: 'Role name is required' });
+
+    const permsJson = permissions && typeof permissions === 'object'
+      ? permissions
+      : { features: Array.isArray(permissions) ? permissions : [] };
+
+    const result = await pool.query(
+      `INSERT INTO admin_roles (name, description, permissions, is_system)
+       VALUES ($1,$2,$3,FALSE)
+       RETURNING id, name, description, permissions, is_system, created_at, updated_at`,
+      [name, description || null, permsJson]
+    );
+
+    res.json({ ok: true, role: result.rows[0] });
+  } catch (error) {
+    console.error('Create admin role error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to create role' });
+  }
+});
+
+// Update a role
+router.patch('/roles/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description, permissions } = req.body;
+
+    const permsJson = permissions && typeof permissions === 'object'
+      ? permissions
+      : (Array.isArray(permissions) ? { features: permissions } : null);
+
+    const result = await pool.query(
+      `UPDATE admin_roles
+       SET name = COALESCE($1, name),
+           description = COALESCE($2, description),
+           permissions = COALESCE($3, permissions),
+           updated_at = NOW()
+       WHERE id = $4 AND is_system = FALSE
+       RETURNING id, name, description, permissions, is_system, created_at, updated_at`,
+      [name, description, permsJson, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Role not found or system role cannot be edited' });
+    }
+
+    res.json({ ok: true, role: result.rows[0] });
+  } catch (error) {
+    console.error('Update admin role error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to update role' });
+  }
+});
+
+// Delete a role
+router.delete('/roles/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `DELETE FROM admin_roles
+       WHERE id = $1 AND is_system = FALSE
+       RETURNING id`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Role not found or system role cannot be deleted' });
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Delete admin role error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to delete role' });
+  }
+});
+
+// List admin users for role assignment UI
+router.get('/admins', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, username, email, admin_role, is_active, last_login
+       FROM admin
+       ORDER BY id ASC`
+    );
+    res.json({ ok: true, admins: result.rows });
+  } catch (error) {
+    console.error('Get admins error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to fetch admins' });
+  }
+});
+
+
+/**
  * GET /api/admin/countries
  * Admin-friendly countries list (used in AddUser.jsx)
  */
