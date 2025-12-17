@@ -1,33 +1,82 @@
-import { isValidEmail, validatePassword } from '../utils/helpers.js';
+import { isValidEmail, validatePassword, sanitizeInput } from '../utils/helpers.js';
 
 /**
  * Validate registration request
  */
 export const validateRegister = (req, res, next) => {
-  const { email, password, firstName, lastName } = req.body;
+  // Sanitize all inputs
+  const { email, password, firstName, lastName, phoneCode, phoneNumber, country, referredBy } = req.body;
+
+  // Sanitize string inputs
+  const sanitizedData = {
+    email: email ? sanitizeInput(String(email).toLowerCase().trim()) : '',
+    password: password ? String(password) : '', // Don't sanitize password (needs special chars)
+    firstName: firstName ? sanitizeInput(String(firstName).trim()) : '',
+    lastName: lastName ? sanitizeInput(String(lastName).trim()) : '',
+    phoneCode: phoneCode ? sanitizeInput(String(phoneCode).trim()) : '',
+    phoneNumber: phoneNumber ? sanitizeInput(String(phoneNumber).trim()) : '',
+    country: country ? sanitizeInput(String(country).trim()) : '',
+    referredBy: referredBy ? sanitizeInput(String(referredBy).trim()) : ''
+  };
+
+  // Validate length constraints
+  if (sanitizedData.firstName.length > 15) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: ['First name must be 15 characters or less']
+    });
+  }
+
+  if (sanitizedData.lastName.length > 15) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: ['Last name must be 15 characters or less']
+    });
+  }
+
+  if (sanitizedData.email.length > 60) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: ['Email must be 60 characters or less']
+    });
+  }
+
+  if (sanitizedData.phoneNumber.length > 15) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: ['Phone number must be 15 characters or less']
+    });
+  }
 
   const errors = [];
 
-  if (!email) {
+  if (!sanitizedData.email) {
     errors.push('Email is required');
-  } else if (!isValidEmail(email)) {
-    errors.push('Invalid email format');
+  } else {
+    const emailValidation = isValidEmail(sanitizedData.email);
+    if (!emailValidation.valid) {
+      errors.push(emailValidation.message);
+    }
   }
 
-  if (!password) {
+  if (!sanitizedData.password) {
     errors.push('Password is required');
   } else {
-    const passwordValidation = validatePassword(password);
+    const passwordValidation = validatePassword(sanitizedData.password);
     if (!passwordValidation.valid) {
       errors.push(passwordValidation.message);
     }
   }
 
-  if (!firstName) {
+  if (!sanitizedData.firstName) {
     errors.push('First name is required');
   }
 
-  if (!lastName) {
+  if (!sanitizedData.lastName) {
     errors.push('Last name is required');
   }
 
@@ -39,6 +88,9 @@ export const validateRegister = (req, res, next) => {
     });
   }
 
+  // Replace req.body with sanitized data
+  req.body = sanitizedData;
+
   next();
 };
 
@@ -46,17 +98,26 @@ export const validateRegister = (req, res, next) => {
  * Validate login request
  */
 export const validateLogin = (req, res, next) => {
+  // Sanitize inputs
   const { email, password } = req.body;
+
+  const sanitizedData = {
+    email: email ? sanitizeInput(String(email).toLowerCase().trim()) : '',
+    password: password ? String(password) : '' // Don't sanitize password
+  };
 
   const errors = [];
 
-  if (!email) {
+  if (!sanitizedData.email) {
     errors.push('Email is required');
-  } else if (!isValidEmail(email)) {
-    errors.push('Invalid email format');
+  } else {
+    const emailValidation = isValidEmail(sanitizedData.email);
+    if (!emailValidation.valid) {
+      errors.push(emailValidation.message);
+    }
   }
 
-  if (!password) {
+  if (!sanitizedData.password) {
     errors.push('Password is required');
   }
 
@@ -67,6 +128,9 @@ export const validateLogin = (req, res, next) => {
       errors
     });
   }
+
+  // Replace req.body with sanitized data
+  req.body = sanitizedData;
 
   next();
 };
@@ -84,10 +148,11 @@ export const validateForgotPassword = (req, res, next) => {
     });
   }
 
-  if (!isValidEmail(email)) {
+  const emailValidation = isValidEmail(email);
+  if (!emailValidation.valid) {
     return res.status(400).json({
       success: false,
-      message: 'Invalid email format'
+      message: emailValidation.message
     });
   }
 

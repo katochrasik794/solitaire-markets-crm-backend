@@ -30,28 +30,165 @@ export const generateResetToken = () => {
 };
 
 /**
- * Validate email format
+ * Validate email format and check for spammy patterns
  * @param {string} email - Email address to validate
- * @returns {boolean} - True if email is valid
+ * @returns {object} - { valid: boolean, message: string }
  */
 export const isValidEmail = (email) => {
+  if (!email || typeof email !== 'string') {
+    return { valid: false, message: 'Email is required' };
+  }
+
+  const trimmedEmail = email.trim().toLowerCase();
+
+  // Basic format check
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email);
+  if (!emailRegex.test(trimmedEmail)) {
+    return { valid: false, message: 'Invalid email format' };
+  }
+
+  // Check length (60 characters max)
+  if (trimmedEmail.length > 60) {
+    return { valid: false, message: 'Email must be 60 characters or less' };
+  }
+
+  // Split email into local and domain parts
+  const [localPart, domain] = trimmedEmail.split('@');
+
+  // Validate local part (before @)
+  if (localPart.length < 1 || localPart.length > 30) {
+    return { valid: false, message: 'Invalid email format' };
+  }
+
+  // Validate domain part
+  if (!domain || domain.length < 4 || domain.length > 253) {
+    return { valid: false, message: 'Invalid email domain' };
+  }
+
+  // Check for valid TLD (at least 2 characters, common TLDs)
+  const tldRegex = /\.(com|net|org|edu|gov|mil|int|co|io|me|info|biz|name|pro|xyz|tech|online|site|website|store|shop|app|dev|test|example|invalid|localhost)$/i;
+  if (!tldRegex.test(domain)) {
+    // Allow other TLDs but check minimum length
+    const parts = domain.split('.');
+    const tld = parts[parts.length - 1];
+    if (!tld || tld.length < 2 || tld.length > 10) {
+      return { valid: false, message: 'Invalid email domain' };
+    }
+  }
+
+  // Check for spammy patterns
+  const spamPatterns = [
+    /^[0-9]+@/, // Starts with only numbers
+    /@[0-9]+\.[a-z]+$/, // Domain is mostly numbers
+    /(.)\1{4,}/, // Repeated characters (aaaaa, 11111)
+    /[0-9]{6,}/, // 6+ consecutive numbers
+    /^[a-z0-9]+[0-9]{5,}@/, // Many numbers at end of local part
+    /@(test|temp|fake|spam|trash|throwaway|disposable)/, // Suspicious domain keywords
+    /@[a-z]{1,2}\.[a-z]{1,2}$/, // Very short domain (a.b)
+  ];
+
+  for (const pattern of spamPatterns) {
+    if (pattern.test(trimmedEmail)) {
+      return { valid: false, message: 'Please use a valid email address' };
+    }
+  }
+
+  // Check for suspicious local part patterns
+  if (localPart.match(/^[0-9]+$/) || localPart.length < 2) {
+    return { valid: false, message: 'Please use a valid email address' };
+  }
+
+  // Check for common disposable email domains
+  const disposableDomains = [
+    'tempmail.com', '10minutemail.com', 'guerrillamail.com',
+    'mailinator.com', 'throwaway.email', 'trashmail.com'
+  ];
+  
+  if (disposableDomains.some(domain => trimmedEmail.includes(domain))) {
+    return { valid: false, message: 'Disposable email addresses are not allowed' };
+  }
+
+  return { valid: true, message: 'Email is valid' };
 };
 
 /**
  * Validate password strength
  * @param {string} password - Password to validate
- * @returns {object} - { valid: boolean, message: string }
+ * @returns {object} - { valid: boolean, message: string, requirements: object }
  */
 export const validatePassword = (password) => {
   if (!password) {
-    return { valid: false, message: 'Password is required' };
+    return { 
+      valid: false, 
+      message: 'Password is required',
+      requirements: {
+        minLength: false,
+        hasUppercase: false,
+        hasLowercase: false,
+        hasNumber: false,
+        hasSpecialChar: false
+      }
+    };
   }
-  if (password.length < 6) {
-    return { valid: false, message: 'Password must be at least 6 characters long' };
+
+  const requirements = {
+    minLength: password.length >= 8,
+    hasUppercase: /[A-Z]/.test(password),
+    hasLowercase: /[a-z]/.test(password),
+    hasNumber: /[0-9]/.test(password),
+    hasSpecialChar: /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)
+  };
+
+  const allMet = Object.values(requirements).every(req => req === true);
+
+  if (!allMet) {
+    const missing = [];
+    if (!requirements.minLength) missing.push('at least 8 characters');
+    if (!requirements.hasUppercase) missing.push('one uppercase letter');
+    if (!requirements.hasLowercase) missing.push('one lowercase letter');
+    if (!requirements.hasNumber) missing.push('one number');
+    if (!requirements.hasSpecialChar) missing.push('one special character');
+    
+    return { 
+      valid: false, 
+      message: `Password must contain ${missing.join(', ')}`,
+      requirements
+    };
   }
-  return { valid: true, message: 'Password is valid' };
+
+  return { 
+    valid: true, 
+    message: 'Password is valid',
+    requirements
+  };
+};
+
+/**
+ * Sanitize input to prevent SQL injection and XSS
+ * @param {string} input - Input string to sanitize
+ * @returns {string} - Sanitized string
+ */
+export const sanitizeInput = (input) => {
+  if (typeof input !== 'string') return input;
+  
+  // Remove SQL injection patterns
+  const sqlPatterns = [
+    /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE|UNION|SCRIPT)\b)/gi,
+    /('|(\\')|(;)|(--)|(\/\*)|(\*\/)|(xp_)|(sp_))/gi
+  ];
+  
+  let sanitized = input;
+  sqlPatterns.forEach(pattern => {
+    sanitized = sanitized.replace(pattern, '');
+  });
+  
+  // Remove HTML/script tags
+  sanitized = sanitized.replace(/<[^>]*>/g, '');
+  
+  // Trim whitespace
+  sanitized = sanitized.trim();
+  
+  return sanitized;
 };
 
 /**
