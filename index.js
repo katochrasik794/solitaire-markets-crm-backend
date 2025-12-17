@@ -206,6 +206,7 @@ console.log('  - /api/deposits');
 console.log('  - /api/withdrawals');
 console.log('  - /api/reports');
 console.log('  - /api/admin');
+console.log('  - /api/support');
 
 // Inspect admin routes
 if (adminRoutes && adminRoutes.stack) {

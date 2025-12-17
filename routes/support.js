@@ -1,14 +1,10 @@
 import express from 'express';
 import pool from '../config/database.js';
 import { authenticate, authenticateAdmin } from '../middleware/auth.js';
+import { sendEmail } from '../services/email.js';
 
 const router = express.Router();
-
-/**
- * ============================================
- * User Endpoints
- * ============================================
- */
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@solitairemarkets.me';
 
 /**
  * GET /api/support
@@ -67,6 +63,31 @@ router.post('/', authenticate, async (req, res) => {
 
             await client.query('COMMIT');
 
+            // Send notification to support
+            try {
+                const userEmail = req.user.email; // Assuming req.user has email from auth middleware
+                // If req.user doesn't have email, we might need to fetch it. 
+                // authenticate middleware usually decodes token. Token might have email.
+                // Let's assume it does or fetch it if needed.
+                // Actually, let's fetch user details to be safe or use what's available.
+
+                await sendEmail({
+                    to: SUPPORT_EMAIL,
+                    subject: `[New Ticket #${ticketId}] ${subject}`,
+                    html: `
+                        <h3>New Support Ticket Created</h3>
+                        <p><strong>User:</strong> ${req.user.id}</p>
+                        <p><strong>Category:</strong> ${category}</p>
+                        <p><strong>Priority:</strong> ${priority}</p>
+                        <p><strong>Subject:</strong> ${subject}</p>
+                        <hr />
+                        <p>${message}</p>
+                    `
+                });
+            } catch (emailErr) {
+                console.error('Failed to send support notification email:', emailErr);
+            }
+
             res.json({
                 success: true,
                 message: 'Ticket created successfully',
@@ -83,6 +104,8 @@ router.post('/', authenticate, async (req, res) => {
         res.status(500).json({ success: false, error: 'Failed to create ticket' });
     }
 });
+
+// ...
 
 /**
  * GET /api/support/:id
@@ -146,6 +169,7 @@ router.post('/:id/reply', authenticate, async (req, res) => {
         if (ticketResult.rows.length === 0) {
             return res.status(404).json({ success: false, error: 'Ticket not found' });
         }
+        const ticket = ticketResult.rows[0];
 
         // Add message
         await pool.query(
@@ -160,12 +184,31 @@ router.post('/:id/reply', authenticate, async (req, res) => {
             [id]
         );
 
+        // Send notification to support
+        try {
+            await sendEmail({
+                to: SUPPORT_EMAIL,
+                subject: `[Reply on #${id}] ${ticket.subject}`,
+                html: `
+                    <h3>New Reply from User</h3>
+                    <p><strong>Ticket ID:</strong> #${id}</p>
+                    <p><strong>Subject:</strong> ${ticket.subject}</p>
+                    <hr />
+                    <p>${message}</p>
+                `
+            });
+        } catch (emailErr) {
+            console.error('Failed to send reply notification email:', emailErr);
+        }
+
         res.json({ success: true, message: 'Reply added successfully' });
     } catch (error) {
         console.error('Reply error:', error);
         res.status(500).json({ success: false, error: 'Failed to send reply' });
     }
 });
+
+// ...
 
 /**
  * ============================================
@@ -188,13 +231,18 @@ router.get('/admin/all', authenticateAdmin, async (req, res) => {
         const params = [];
 
         if (status && status !== 'all') {
-            query += ` WHERE t.status = $1`;
-            params.push(status);
+            // Handle 'opened' vs 'open' mismatch just in case
+            const searchStatus = status === 'opened' ? 'open' : status;
+            query += ` WHERE LOWER(TRIM(t.status)) = LOWER(TRIM($1))`;
+            params.push(searchStatus);
         }
 
         query += ` ORDER BY t.updated_at DESC`;
 
         const result = await pool.query(query, params);
+        console.log('Admin list tickets result:', result.rows.length, 'rows');
+        console.log('Query:', query);
+        console.log('Params:', params);
 
         res.json({
             success: true,
@@ -260,6 +308,20 @@ router.post('/admin/:id/reply', authenticateAdmin, async (req, res) => {
         const { id } = req.params;
         const { message, status } = req.body;
 
+        // Fetch ticket to get user_id
+        const ticketResult = await pool.query(
+            `SELECT t.*, u.email as user_email, u.first_name 
+             FROM support_tickets t
+             JOIN users u ON t.user_id = u.id
+             WHERE t.id = $1`,
+            [id]
+        );
+
+        if (ticketResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Ticket not found' });
+        }
+        const ticket = ticketResult.rows[0];
+
         // Add message
         await pool.query(
             `INSERT INTO support_messages (ticket_id, sender_id, sender_type, message)
@@ -273,6 +335,25 @@ router.post('/admin/:id/reply', authenticateAdmin, async (req, res) => {
             `UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id = $2`,
             [newStatus, id]
         );
+
+        // Send notification to user
+        try {
+            await sendEmail({
+                to: ticket.user_email,
+                subject: `[Support Reply] ${ticket.subject}`,
+                html: `
+                    <h3>Support Team Replied</h3>
+                    <p>Hi ${ticket.first_name || 'User'},</p>
+                    <p>You have a new reply on your support ticket <strong>#${id}</strong>.</p>
+                    <hr />
+                    <p>${message}</p>
+                    <hr />
+                    <p>You can view the full conversation in your dashboard.</p>
+                `
+            });
+        } catch (emailErr) {
+            console.error('Failed to send user notification email:', emailErr);
+        }
 
         res.json({ success: true, message: 'Replied successfully' });
     } catch (error) {
