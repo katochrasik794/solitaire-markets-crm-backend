@@ -1,2 +1,5 @@
 .env
-uploads/
+.env.bak
+.env*.bak
+*.env.bak
+

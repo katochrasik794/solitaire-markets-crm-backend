@@ -19,10 +19,13 @@ if (process.env.DATABASE_URL) {
     connectionTimeoutMillis: 60000, // Increased to 60 seconds for remote databases
   };
 
-  // Only force SSL when explicitly needed (production / cloud DB)
-  // For local development PostgreSQL usually DOES NOT use SSL, so enabling it causes "connection terminated unexpectedly"
-  if (process.env.NODE_ENV === 'production' || process.env.DB_SSL === 'true') {
+  // Enable SSL by default for DATABASE_URL (most remote/cloud databases require it)
+  // Only disable if explicitly set to false
+  if (process.env.DB_SSL !== 'false') {
     poolConfig.ssl = { rejectUnauthorized: false };
+    console.log('🔒 SSL enabled for database connection');
+  } else {
+    console.log('⚠️  SSL disabled for database connection (DB_SSL=false)');
   }
 } else {
   console.log('📦 Using individual DB environment variables for database connection');

@@ -41,7 +41,7 @@ const testDatabaseConnection = async (retries = 3, delay = 2000) => {
           hasDatabaseUrl: !!process.env.DATABASE_URL,
           databaseUrl: process.env.DATABASE_URL ? (process.env.DATABASE_URL.substring(0, 30) + '...') : 'not set',
           nodeEnv: process.env.NODE_ENV,
-          sslConfigured: process.env.NODE_ENV === 'production' || process.env.DB_SSL === 'true'
+          sslConfigured: process.env.DB_SSL !== 'false'
         });
         console.error('Please check:');
         console.error('1. DATABASE_URL is set correctly');
