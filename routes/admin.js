@@ -293,7 +293,7 @@ router.post('/login', validateLogin, async (req, res, next) => {
       code: error.code,
       detail: error.detail
     });
-
+    
     // Return a proper error response instead of passing to error handler
     res.status(500).json({
       success: false,
@@ -3981,13 +3981,40 @@ router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
 
         console.log(`Successfully added balance to MT5 account ${login}`);
       } else if (deposit.deposit_to_type === 'wallet') {
-        // Wallet deposits - skip for now, will be handled later
-        console.log(`Wallet deposit #${deposit.id} approved but balance not added yet (will be handled later)`);
+        // Add balance to wallet
+        if (!deposit.wallet_id) {
+          // If wallet_id is not set, fetch it from user_id
+          const walletResult = await pool.query(
+            'SELECT id FROM wallets WHERE user_id = $1 LIMIT 1',
+            [deposit.user_id]
+          );
+          
+          if (walletResult.rows.length === 0) {
+            throw new Error(`No wallet found for user ${deposit.user_id}`);
+          }
+          
+          deposit.wallet_id = walletResult.rows[0].id;
+        }
+
+        console.log(`Adding balance to wallet ${deposit.wallet_id}: ${deposit.amount} ${deposit.currency || 'USD'}`);
+
+        await adjustWalletBalance(
+          {
+            walletId: deposit.wallet_id,
+            amount: parseFloat(deposit.amount),
+            type: 'deposit',
+            source: 'wallet',
+            target: 'wallet',
+            currency: deposit.currency || 'USD',
+            reference: `Deposit #${deposit.id} approved`
+          }
+        );
+
+        console.log(`Successfully added balance to wallet ${deposit.wallet_id}`);
       }
     } catch (balanceError) {
       console.error('Error adding balance:', balanceError);
-      // Rollback the approval if balance update fails for MT5
-      if (deposit.deposit_to_type === 'mt5') {
+      // Rollback the approval if balance update fails
         await pool.query(
           `UPDATE deposit_requests 
            SET status = 'pending', updated_at = NOW()
@@ -3996,10 +4023,8 @@ router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
         );
         return res.status(500).json({
           ok: false,
-          error: `Failed to add balance to MT5 account: ${balanceError.message}`
+        error: `Failed to add balance: ${balanceError.message}`
         });
-      }
-      // For wallet deposits, just log the error but don't rollback
     }
 
     res.json({

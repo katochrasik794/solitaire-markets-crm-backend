@@ -13,6 +13,7 @@ import withdrawalsRoutes from './routes/withdrawals.js';
 import reportsRoutes from './routes/reports.js';
 import adminRoutes from './routes/admin.js';
 import supportRoutes from './routes/support.js';
+import tickerRoutes from './routes/tickers.js';
 import pool from './config/database.js';
 
 dotenv.config();
@@ -194,6 +195,7 @@ app.use('/api/withdrawals', withdrawalsRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/support', supportRoutes);
+app.use('/api/tickers', tickerRoutes);
 
 // Debug: Log registered routes
 console.log('✅ Routes registered:');
@@ -207,6 +209,7 @@ console.log('  - /api/withdrawals');
 console.log('  - /api/reports');
 console.log('  - /api/admin');
 console.log('  - /api/support');
+console.log('  - /api/tickers');
 
 // Inspect admin routes
 if (adminRoutes && adminRoutes.stack) {
