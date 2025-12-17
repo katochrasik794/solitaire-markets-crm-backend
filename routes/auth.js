@@ -105,9 +105,9 @@ router.post('/login', validateLogin, async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
-    // Find user by email
+    // Find user by email (include status so we can block banned accounts)
     const result = await pool.query(
-      'SELECT id, email, password_hash, first_name, last_name, country, referral_code, referred_by FROM users WHERE email = $1',
+      'SELECT id, email, password_hash, first_name, last_name, country, referral_code, referred_by, status FROM users WHERE email = $1',
       [email]
     );
 
@@ -119,6 +119,14 @@ router.post('/login', validateLogin, async (req, res, next) => {
     }
 
     const user = result.rows[0];
+
+    // If user account is banned, block login
+    if (user.status && user.status.toLowerCase() === 'banned') {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been blocked. Please contact support.'
+      });
+    }
 
     // Verify password
     const isPasswordValid = await comparePassword(password, user.password_hash);

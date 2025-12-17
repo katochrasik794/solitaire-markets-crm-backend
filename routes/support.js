@@ -105,114 +105,9 @@ router.post('/', authenticate, async (req, res) => {
     }
 });
 
-// ...
-
-/**
- * GET /api/support/:id
- * Get ticket details and messages
- */
-router.get('/:id', authenticate, async (req, res) => {
-    try {
-        const { id } = req.params;
-
-        // Fetch ticket (verify ownership)
-        const ticketResult = await pool.query(
-            `SELECT * FROM support_tickets WHERE id = $1 AND user_id = $2`,
-            [id, req.user.id]
-        );
-
-        if (ticketResult.rows.length === 0) {
-            return res.status(404).json({ success: false, error: 'Ticket not found' });
-        }
-
-        // Fetch messages
-        const messagesResult = await pool.query(
-            `SELECT m.*, 
-        CASE 
-          WHEN m.sender_type = 'user' THEN (SELECT first_name || ' ' || last_name FROM users WHERE id = m.sender_id)
-          WHEN m.sender_type = 'admin' THEN (SELECT username FROM admin WHERE id = m.sender_id)
-        END as sender_name
-       FROM support_messages m
-       WHERE ticket_id = $1
-       ORDER BY created_at ASC`,
-            [id]
-        );
-
-        res.json({
-            success: true,
-            data: {
-                ticket: ticketResult.rows[0],
-                messages: messagesResult.rows
-            }
-        });
-    } catch (error) {
-        console.error('Get ticket details error:', error);
-        res.status(500).json({ success: false, error: 'Failed to fetch ticket details' });
-    }
-});
-
-/**
- * POST /api/support/:id/reply
- * Reply to a ticket
- */
-router.post('/:id/reply', authenticate, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { message } = req.body;
-
-        // Verify ownership
-        const ticketResult = await pool.query(
-            `SELECT * FROM support_tickets WHERE id = $1 AND user_id = $2`,
-            [id, req.user.id]
-        );
-
-        if (ticketResult.rows.length === 0) {
-            return res.status(404).json({ success: false, error: 'Ticket not found' });
-        }
-        const ticket = ticketResult.rows[0];
-
-        // Add message
-        await pool.query(
-            `INSERT INTO support_messages (ticket_id, sender_id, sender_type, message)
-       VALUES ($1, $2, 'user', $3)`,
-            [id, req.user.id, message]
-        );
-
-        // Update ticket updated_at and status (optional: re-open if closed)
-        await pool.query(
-            `UPDATE support_tickets SET updated_at = NOW(), status = 'open' WHERE id = $1`,
-            [id]
-        );
-
-        // Send notification to support
-        try {
-            await sendEmail({
-                to: SUPPORT_EMAIL,
-                subject: `[Reply on #${id}] ${ticket.subject}`,
-                html: `
-                    <h3>New Reply from User</h3>
-                    <p><strong>Ticket ID:</strong> #${id}</p>
-                    <p><strong>Subject:</strong> ${ticket.subject}</p>
-                    <hr />
-                    <p>${message}</p>
-                `
-            });
-        } catch (emailErr) {
-            console.error('Failed to send reply notification email:', emailErr);
-        }
-
-        res.json({ success: true, message: 'Reply added successfully' });
-    } catch (error) {
-        console.error('Reply error:', error);
-        res.status(500).json({ success: false, error: 'Failed to send reply' });
-    }
-});
-
-// ...
-
 /**
  * ============================================
- * Admin Endpoints
+ * Admin Endpoints (MUST be before /:id routes)
  * ============================================
  */
 
@@ -380,6 +275,113 @@ router.post('/admin/:id/status', authenticateAdmin, async (req, res) => {
     } catch (error) {
         console.error('Admin update status error:', error);
         res.status(500).json({ success: false, error: 'Failed to update status' });
+    }
+});
+
+/**
+ * ============================================
+ * User Endpoints (MUST be after admin routes)
+ * ============================================
+ */
+
+/**
+ * GET /api/support/:id
+ * Get ticket details and messages
+ */
+router.get('/:id', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Fetch ticket (verify ownership)
+        const ticketResult = await pool.query(
+            `SELECT * FROM support_tickets WHERE id = $1 AND user_id = $2`,
+            [id, req.user.id]
+        );
+
+        if (ticketResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Ticket not found' });
+        }
+
+        // Fetch messages
+        const messagesResult = await pool.query(
+            `SELECT m.*, 
+        CASE 
+          WHEN m.sender_type = 'user' THEN (SELECT first_name || ' ' || last_name FROM users WHERE id = m.sender_id)
+          WHEN m.sender_type = 'admin' THEN (SELECT username FROM admin WHERE id = m.sender_id)
+        END as sender_name
+       FROM support_messages m
+       WHERE ticket_id = $1
+       ORDER BY created_at ASC`,
+            [id]
+        );
+
+        res.json({
+            success: true,
+            data: {
+                ticket: ticketResult.rows[0],
+                messages: messagesResult.rows
+            }
+        });
+    } catch (error) {
+        console.error('Get ticket details error:', error);
+        res.status(500).json({ success: false, error: 'Failed to fetch ticket details' });
+    }
+});
+
+/**
+ * POST /api/support/:id/reply
+ * Reply to a ticket
+ */
+router.post('/:id/reply', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { message } = req.body;
+
+        // Verify ownership
+        const ticketResult = await pool.query(
+            `SELECT * FROM support_tickets WHERE id = $1 AND user_id = $2`,
+            [id, req.user.id]
+        );
+
+        if (ticketResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Ticket not found' });
+        }
+        const ticket = ticketResult.rows[0];
+
+        // Add message
+        await pool.query(
+            `INSERT INTO support_messages (ticket_id, sender_id, sender_type, message)
+       VALUES ($1, $2, 'user', $3)`,
+            [id, req.user.id, message]
+        );
+
+        // Update ticket updated_at and status (optional: re-open if closed)
+        await pool.query(
+            `UPDATE support_tickets SET updated_at = NOW(), status = 'open' WHERE id = $1`,
+            [id]
+        );
+
+        // Send notification to support
+        try {
+            await sendEmail({
+                to: SUPPORT_EMAIL,
+                subject: `[Reply on #${id}] ${ticket.subject}`,
+                html: `
+                    <h3>New Reply from User</h3>
+                    <p><strong>Ticket ID:</strong> #${id}</p>
+                    <p><strong>Subject:</strong> ${ticket.subject}</p>
+                    <hr />
+                    <p>${message}</p>
+                `
+            });
+        } catch (emailErr) {
+            console.error('Failed to send reply notification email:', emailErr);
+        }
+
+        res.json({ success: true, message: 'Reply added successfully' });
+    } catch (error) {
+        console.error('Reply error:', error);
+        res.status(500).json({ success: false, error: 'Failed to send reply' });
     }
 });
 
