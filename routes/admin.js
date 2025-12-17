@@ -12,6 +12,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import crypto from 'crypto';
+import { sendOperationEmail, sendEmail } from '../services/email.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -292,7 +293,7 @@ router.post('/login', validateLogin, async (req, res, next) => {
       code: error.code,
       detail: error.detail
     });
-    
+
     // Return a proper error response instead of passing to error handler
     res.status(500).json({
       success: false,
@@ -331,9 +332,9 @@ router.get('/country-admins', authenticateAdmin, async (req, res) => {
       ...r,
       features: r.features
         ? String(r.features)
-            .split(',')
-            .map(s => s.trim())
-            .filter(Boolean)
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean)
         : []
     }));
 
@@ -584,7 +585,7 @@ router.get('/login-history', authenticateAdmin, async (req, res) => {
     const adminId = req.admin.adminId || req.admin.id;
     const currentToken = req.headers.authorization?.substring(7); // Remove 'Bearer ' prefix
     const currentTokenHash = currentToken ? crypto.createHash('sha256').update(currentToken).digest('hex') : null;
-    
+
     const result = await pool.query(
       `SELECT id,
               ip_address,
@@ -631,7 +632,7 @@ router.post('/logout/device', authenticateAdmin, async (req, res) => {
   try {
     const adminId = req.admin.adminId;
     const token = req.headers.authorization?.substring(7); // Remove 'Bearer ' prefix
-    
+
     if (!token) {
       return res.status(400).json({ ok: false, error: 'No token provided' });
     }
@@ -680,7 +681,7 @@ router.post('/logout/all', authenticateAdmin, async (req, res) => {
   try {
     const adminId = req.admin.adminId;
     const token = req.headers.authorization?.substring(7); // Remove 'Bearer ' prefix
-    
+
     if (!token) {
       return res.status(400).json({ ok: false, error: 'No token provided' });
     }
@@ -723,7 +724,7 @@ router.post('/logout/all', authenticateAdmin, async (req, res) => {
        WHERE admin_id = $1 AND token_hash = $2`,
       [adminId, 'LOGOUT_ALL_' + adminId]
     );
-    
+
     await pool.query(
       `INSERT INTO admin_token_blacklist (admin_id, token_hash, ip_address, user_agent, logout_type, expires_at)
        VALUES ($1, $2, $3, $4, 'all', $5)`,
@@ -1438,33 +1439,6 @@ router.patch('/users/:id', authenticateAdmin, async (req, res, next) => {
   }
 });
 
-/**
- * POST /api/admin/email-templates/preview
- * Return HTML preview for a given template body
- */
-router.post('/email-templates/preview', authenticateAdmin, async (req, res) => {
-  try {
-    const { html_code = '' } = req.body || {};
-
-    // If no HTML provided, return empty preview
-    if (!html_code.trim()) {
-      return res.json({ ok: true, preview_html: '' });
-    }
-
-    // For now, just echo back the HTML for preview purposes.
-    // If sanitization is needed, this is the place to add it.
-    res.json({
-      ok: true,
-      preview_html: html_code
-    });
-  } catch (error) {
-    console.error('Email template preview error:', error);
-    res.status(500).json({
-      ok: false,
-      error: error.message || 'Failed to generate preview'
-    });
-  }
-});
 
 /**
  * PATCH /api/admin/users/:id/email-verify
@@ -2012,7 +1986,7 @@ router.get('/mt5/users', authenticateAdmin, async (req, res, next) => {
 
       // Calculate balance (use equity if available, otherwise balance)
       const accountBalance = parseFloat(row.equity || row.balance || 0);
-      
+
       // Add to total balance (only for non-demo accounts)
       if (!row.is_demo) {
         usersMap[userId].totalBalance += accountBalance;
@@ -4767,10 +4741,10 @@ router.get('/internal-transfers', authenticateAdmin, async (req, res) => {
 
     // Format the data to match frontend expectations
     const items = result.rows.map(row => {
-      const userName = row.first_name && row.last_name 
+      const userName = row.first_name && row.last_name
         ? `${row.first_name} ${row.last_name}`.trim()
         : row.first_name || row.last_name || '-';
-      
+
       return {
         id: row.id,
         createdAt: row.created_at,
@@ -4894,6 +4868,545 @@ router.get('/wallet-transactions', authenticateAdmin, async (req, res) => {
       ok: false,
       error: error.message || 'Failed to load wallet transactions',
     });
+  }
+});
+
+/**
+ * ============================================
+ * Send Emails Management
+ * ============================================
+ */
+
+// GET /api/admin/send-emails/search-users
+router.get('/send-emails/search-users', authenticateAdmin, async (req, res) => {
+  try {
+    const { q = '', limit = 20 } = req.query;
+
+    if (!q || q.length < 2) {
+      return res.json({ ok: true, users: [] });
+    }
+
+    const result = await pool.query(
+      `SELECT id, email, first_name, last_name, is_email_verified, status 
+       FROM users 
+       WHERE email ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1 
+       ORDER BY created_at DESC 
+       LIMIT $2`,
+      [`%${q}%`, limit]
+    );
+
+    const users = result.rows.map(u => ({
+      id: u.id,
+      email: u.email,
+      name: `${u.first_name || ''} ${u.last_name || ''}`.trim(),
+      emailVerified: u.is_email_verified,
+      status: u.status
+    }));
+
+    res.json({ ok: true, users });
+  } catch (err) {
+    console.error('GET /admin/send-emails/search-users failed:', err);
+    res.status(500).json({ ok: false, error: 'Failed to search users' });
+  }
+});
+
+// Helper to build user query
+const buildUserQuery = (recipientType, specificUsers = [], startParamIndex = 1) => {
+  let whereClause = '';
+  let params = [];
+
+  switch (recipientType) {
+    case 'all':
+      whereClause = '1=1';
+      break;
+    case 'verified':
+      whereClause = 'is_email_verified = true';
+      break;
+    case 'unverified':
+      whereClause = 'is_email_verified = false';
+      break;
+    case 'active':
+      whereClause = "status = 'active'";
+      break;
+    case 'banned':
+      whereClause = "status = 'banned'";
+      break;
+    case 'inactive':
+      whereClause = "status != 'active'";
+      break;
+    case 'kyc_verified':
+      whereClause = "kyc_status = 'approved'";
+      break;
+    case 'kyc_unverified':
+      whereClause = "(kyc_status IS NULL OR kyc_status != 'approved')";
+      break;
+    case 'specific':
+      if (specificUsers && specificUsers.length > 0) {
+        // specificUsers can be IDs or emails.
+        // If specificUsers is array of objects {id, email}, map to IDs
+        let ids = [];
+        let emails = [];
+
+        specificUsers.forEach(u => {
+          if (typeof u === 'object') {
+            if (u.id) ids.push(u.id);
+            else if (u.email) emails.push(u.email);
+          } else if (String(u).includes('@')) {
+            emails.push(u);
+          } else {
+            ids.push(u);
+          }
+        });
+
+        if (ids.length > 0) {
+          whereClause = `id = ANY($${startParamIndex})`;
+          params.push(ids);
+        } else if (emails.length > 0) {
+          whereClause = `email = ANY($${startParamIndex})`;
+          params.push(emails);
+        } else {
+          whereClause = '1=0';
+        }
+      } else {
+        whereClause = '1=0';
+      }
+      break;
+    default:
+      whereClause = '1=0';
+  }
+  return { whereClause, params };
+};
+
+// POST /api/admin/send-emails/preview
+router.post('/send-emails/preview', authenticateAdmin, async (req, res) => {
+  try {
+    const { recipientType, specificUsers = [] } = req.body || {};
+
+    if (!recipientType) {
+      return res.status(400).json({ ok: false, error: 'Recipient type is required' });
+    }
+
+    const { whereClause, params } = buildUserQuery(recipientType, specificUsers);
+
+    // Get count
+    const countRes = await pool.query(`SELECT COUNT(*) FROM users WHERE ${whereClause}`, params);
+    const count = parseInt(countRes.rows[0].count);
+
+    // Get sample users
+    const sampleRes = await pool.query(
+      `SELECT id, email, first_name, last_name, is_email_verified, status 
+       FROM users 
+       WHERE ${whereClause} 
+       ORDER BY created_at DESC 
+       LIMIT 10`,
+      params
+    );
+
+    const sampleUsers = sampleRes.rows.map(u => ({
+      id: u.id,
+      email: u.email,
+      name: `${u.first_name || ''} ${u.last_name || ''}`.trim(),
+      emailVerified: u.is_email_verified,
+      status: u.status
+    }));
+
+    res.json({
+      ok: true,
+      count,
+      sampleUsers,
+    });
+  } catch (err) {
+    console.error('POST /admin/send-emails/preview failed:', err);
+    res.status(500).json({ ok: false, error: err.message || 'Failed to preview recipients' });
+  }
+});
+
+// POST /api/admin/send-emails
+router.post('/send-emails', authenticateAdmin, async (req, res) => {
+  try {
+    const { recipientType, specificUsers = [], subject, body, isHtml = true, imageUrl, attachments = [], templateId, templateVariables = {} } = req.body || {};
+    const adminId = req.admin.adminId;
+
+    if (!recipientType) {
+      return res.status(400).json({ ok: false, error: 'Recipient type is required' });
+    }
+
+    // If template is selected, subject and body are not required (template has its own)
+    if (!templateId) {
+      if (!subject || !body) {
+        return res.status(400).json({ ok: false, error: 'Subject and body are required when no template is selected' });
+      }
+    }
+
+    const { whereClause, params } = buildUserQuery(recipientType, specificUsers);
+
+    // Fetch users
+    const usersRes = await pool.query(
+      `SELECT id, email, first_name, last_name 
+       FROM users 
+       WHERE ${whereClause}`,
+      params
+    );
+
+    const users = usersRes.rows;
+
+    if (users.length === 0) {
+      return res.status(404).json({ ok: false, error: 'No users found matching criteria' });
+    }
+
+    // Get template if selected
+    let selectedTemplate = null;
+    if (templateId) {
+      const tmplRes = await pool.query('SELECT * FROM email_templates WHERE id = $1', [templateId]);
+      if (tmplRes.rows.length > 0) {
+        selectedTemplate = tmplRes.rows[0];
+      }
+    }
+
+    // Determine final subject
+    let finalSubject = subject;
+    if (selectedTemplate && !finalSubject) {
+      finalSubject = selectedTemplate.name; // Fallback to template name
+      // Try to extract title from HTML? Maybe overkill for now.
+    }
+
+    let successCount = 0;
+    let failureCount = 0;
+    const results = [];
+
+    // Send emails
+    for (const user of users) {
+      try {
+        const recipientName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+        let htmlContent = body;
+
+        if (selectedTemplate) {
+          htmlContent = selectedTemplate.html_code;
+
+          // Replace standard variables
+          const vars = {
+            ...templateVariables,
+            recipientName,
+            recipientEmail: user.email,
+            subject: finalSubject,
+            content: body || '',
+            currentYear: new Date().getFullYear(),
+            companyName: 'Solitaire Markets',
+            companyEmail: 'support@solitairemarkets.me',
+            logoUrl: 'https://solitairemarkets.me/assets/images/logo.png'
+          };
+
+          Object.keys(vars).forEach(key => {
+            const regex = new RegExp(`{{${key}}}`, 'g');
+            htmlContent = htmlContent.replace(regex, vars[key]);
+          });
+        } else {
+          // Wrap body in basic template if no template selected?
+          // For now, just use body as is or wrap in simple div
+          if (isHtml && !body.includes('<html')) {
+            htmlContent = `
+                        <div style="font-family: Arial, sans-serif; padding: 20px;">
+                            ${body}
+                        </div>
+                    `;
+          }
+        }
+
+        // Send
+        await sendEmail({
+          to: user.email,
+          subject: finalSubject,
+          html: htmlContent,
+          attachments: attachments // Pass attachments if any
+        });
+
+        // Log success
+        await pool.query(
+          `INSERT INTO sent_emails 
+                 (recipient_email, recipient_name, subject, content_body, is_html, recipient_type, status, sent_at, admin_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'sent', NOW(), $7)`,
+          [user.email, recipientName, finalSubject, htmlContent, true, recipientType, adminId]
+        );
+
+        successCount++;
+        results.push({ email: user.email, status: 'success' });
+
+      } catch (err) {
+        console.error(`Failed to send email to ${user.email}:`, err);
+        failureCount++;
+        results.push({ email: user.email, status: 'failed', error: err.message });
+
+        // Log failure
+        await pool.query(
+          `INSERT INTO sent_emails 
+                 (recipient_email, recipient_name, subject, content_body, is_html, recipient_type, status, error_message, admin_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'failed', $7, $8)`,
+          [user.email, `${user.first_name || ''} ${user.last_name || ''}`, finalSubject, body || '', true, recipientType, err.message, adminId]
+        );
+      }
+    }
+
+    res.json({
+      ok: true,
+      message: `Emails sent: ${successCount} successful, ${failureCount} failed`,
+      recipientsCount: users.length,
+      successCount,
+      failureCount,
+      results: results.slice(0, 50)
+    });
+
+  } catch (err) {
+    console.error('POST /admin/send-emails failed:', err);
+    res.status(500).json({ ok: false, error: err.message || 'Failed to send emails' });
+  }
+});
+
+/**
+ * ============================================
+ * Email Templates & Sent Emails
+ * ============================================
+ */
+
+// GET /api/admin/email-templates
+router.get('/email-templates', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM email_templates ORDER BY created_at DESC'
+    );
+    res.json({ ok: true, templates: result.rows });
+  } catch (error) {
+    console.error('Get email templates error:', error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// GET /api/admin/email-templates/:id
+router.get('/email-templates/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('SELECT * FROM email_templates WHERE id = $1', [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Template not found' });
+    }
+
+    res.json({ ok: true, template: result.rows[0] });
+  } catch (error) {
+    console.error('Get email template error:', error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// POST /api/admin/email-templates
+router.post('/email-templates', authenticateAdmin, async (req, res) => {
+  try {
+    const { name, description, html_code, variables, is_default, from_email } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO email_templates 
+       (name, description, html_code, variables, is_default, from_email, created_at, updated_at, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7)
+       RETURNING *`,
+      [
+        name,
+        description,
+        html_code,
+        JSON.stringify(variables || []),
+        is_default || false,
+        from_email,
+        req.admin.adminId
+      ]
+    );
+
+    res.json({ ok: true, template: result.rows[0] });
+  } catch (error) {
+    console.error('Create email template error:', error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// PUT /api/admin/email-templates/:id
+router.put('/email-templates/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description, html_code, variables, is_default, from_email } = req.body;
+
+    const result = await pool.query(
+      `UPDATE email_templates 
+       SET name = COALESCE($1, name),
+           description = COALESCE($2, description),
+           html_code = COALESCE($3, html_code),
+           variables = COALESCE($4, variables),
+           is_default = COALESCE($5, is_default),
+           from_email = COALESCE($6, from_email),
+           updated_at = NOW()
+       WHERE id = $7
+       RETURNING *`,
+      [
+        name,
+        description,
+        html_code,
+        variables ? JSON.stringify(variables) : null,
+        is_default,
+        from_email,
+        id
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Template not found' });
+    }
+
+    res.json({ ok: true, template: result.rows[0] });
+  } catch (error) {
+    console.error('Update email template error:', error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// DELETE /api/admin/email-templates/:id
+router.delete('/email-templates/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM email_templates WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Delete email template error:', error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// POST /api/admin/email-templates/:id/send-test
+router.post('/email-templates/:id/send-test', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { email, variables } = req.body;
+
+    // Fetch template
+    const tmplRes = await pool.query('SELECT * FROM email_templates WHERE id = $1', [id]);
+    if (tmplRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Template not found' });
+    }
+    const template = tmplRes.rows[0];
+
+    // Send email
+    let htmlContent = template.html_code;
+
+    // Replace variables
+    if (variables && typeof variables === 'object') {
+      Object.keys(variables).forEach(key => {
+        const regex = new RegExp(`{{${key}}}`, 'g');
+        htmlContent = htmlContent.replace(regex, variables[key]);
+      });
+    }
+
+    // Also replace standard variables if not provided
+    const standardVars = {
+      logoUrl: 'https://solitairemarkets.me/assets/images/logo.png', // Placeholder
+      companyEmail: 'support@solitairemarkets.me',
+      currentYear: new Date().getFullYear(),
+      recipientName: 'Test User'
+    };
+
+    Object.keys(standardVars).forEach(key => {
+      if (!variables || !variables[key]) {
+        const regex = new RegExp(`{{${key}}}`, 'g');
+        htmlContent = htmlContent.replace(regex, standardVars[key]);
+      }
+    });
+
+    await sendEmail({
+      to: email,
+      subject: `Test: ${template.name}`,
+      html: htmlContent
+    });
+
+    // Log to sent_emails
+    await pool.query(
+      `INSERT INTO sent_emails 
+       (recipient_email, recipient_name, subject, content_body, is_html, recipient_type, status, sent_at, admin_id)
+       VALUES ($1, $2, $3, $4, TRUE, 'test', 'sent', NOW(), $5)`,
+      [email, variables?.recipientName || 'Test User', `Test: ${template.name}`, htmlContent, req.admin.adminId]
+    );
+
+    res.json({ ok: true, message: 'Test email sent successfully' });
+  } catch (error) {
+    console.error('Send test email error:', error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// GET /api/admin/sent-emails
+router.get('/sent-emails', authenticateAdmin, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    const result = await pool.query(
+      `SELECT * FROM sent_emails ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const countRes = await pool.query('SELECT COUNT(*) FROM sent_emails');
+
+    res.json({
+      ok: true,
+      items: result.rows,
+      total: parseInt(countRes.rows[0].count, 10)
+    });
+  } catch (error) {
+    console.error('Get sent emails error:', error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// POST /api/admin/email-templates/preview
+router.post('/email-templates/preview', authenticateAdmin, async (req, res) => {
+  try {
+    const { html_code, variables } = req.body;
+    let previewHtml = html_code;
+
+    // Default variables for preview
+    const defaultVars = {
+      recipientName: 'John Doe',
+      recipientEmail: 'john@example.com',
+      subject: 'Email Subject',
+      content: 'This is a sample content for preview.',
+      currentYear: new Date().getFullYear(),
+      companyName: 'Solitaire Markets',
+      companyEmail: 'support@solitairemarkets.me',
+      logoUrl: 'https://solitairemarkets.me/assets/images/logo.png',
+      login: '123456',
+      accountLogin: '123456',
+      password: 'password123',
+      accountType: 'Standard',
+      amount: '1000.00',
+      date: new Date().toLocaleDateString(),
+      transactionType: 'Deposit',
+      fromAccount: '123456',
+      toAccount: '654321',
+      otp: '123456',
+      verificationMessage: 'Please verify your email address.',
+      ...variables // Override with provided variables
+    };
+
+    console.log('🔍 Preview Request:', {
+      hasHtml: !!html_code,
+      variablesKeys: Object.keys(variables || {}),
+      defaultVarsKeys: Object.keys(defaultVars)
+    });
+
+    // Replace variables
+    Object.keys(defaultVars).forEach(key => {
+      // Handle {{key}} and {{ key }}
+      const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
+      previewHtml = previewHtml.replace(regex, defaultVars[key]);
+    });
+
+    res.json({ ok: true, preview_html: previewHtml });
+  } catch (error) {
+    console.error('Preview template error:', error);
+    res.status(500).json({ ok: false, error: error.message });
   }
 });
 

@@ -101,3 +101,95 @@ export const verifyEmailConnection = async () => {
   }
 };
 
+
+/**
+ * Send operation email (Deposit, Withdrawal, Bonus)
+ * @param {string} type - Type of operation (deposit, withdrawal, bonus_add, bonus_deduct)
+ * @param {object} payload - Data for the email (email, account_login, amount, date, name)
+ * @returns {Promise<object>} - Email send result
+ */
+export const sendOperationEmail = async (type, payload) => {
+  try {
+    const { email, account_login, amount, date, name } = payload || {};
+    if (!email) return { ok: false, error: 'missing email' };
+
+    const safeAmount = typeof amount === 'number' ? amount.toFixed(2) : String(amount || '0');
+    const ts = date || new Date().toISOString();
+    const subjectMap = {
+      deposit: 'Deposit Approved',
+      withdrawal: 'Withdrawal Approved',
+      bonus_add: 'Bonus Added',
+      bonus_deduct: 'Bonus Deducted',
+    };
+    const title = subjectMap[type] || 'Notification';
+    const lineMap = {
+      deposit: 'Deposit Approved',
+      withdrawal: 'Withdrawal Approved',
+      bonus_add: 'Bonus Added',
+      bonus_deduct: 'Bonus Deducted',
+    };
+    const line = lineMap[type] || 'notification';
+    const html = `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #222; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; margin-bottom: 20px;">
+          <h2 style="margin: 0; font-size: 24px;">${line}</h2>
+        </div>
+        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+          <p style="margin: 0 0 15px 0; font-size: 16px;">Hi ${name || 'Valued Customer'},</p>
+          <div style="background: white; padding: 15px; border-radius: 6px; border-left: 4px solid #667eea;">
+            <p style="margin: 5px 0; font-size: 14px;"><strong>MT5:</strong> ${account_login || '-'}</p>
+            <p style="margin: 5px 0; font-size: 14px;"><strong>Amount:</strong> ${safeAmount}</p>
+            <p style="margin: 5px 0; font-size: 14px;"><strong>Source:</strong> Admin</p>
+            <p style="margin: 5px 0; font-size: 14px;"><strong>Date:</strong> ${new Date().toLocaleString()}</p>
+          </div>
+        </div>
+        <p style="font-size: 14px; color: #666;">If you did not authorize this action, please contact support immediately.</p>
+        <p style="font-size: 14px; margin-top: 30px;">Regards,<br/><strong>${process.env.EMAIL_FROM_NAME || 'Solitaire Markets'}</strong></p>
+      </div>
+    `;
+
+    const mailOptions = {
+      from: `"${process.env.EMAIL_FROM_NAME || 'Solitaire Markets'}" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+      to: email,
+      subject: line,
+      text: `${line}\n\nHi ${name || 'Valued Customer'},\n\nMT5: ${account_login || '-'}\nAmount: ${safeAmount}\nSource: Admin\nDate: ${new Date().toLocaleString()}\n\nIf you did not authorize this action, please contact support immediately.\n\nRegards,\n${process.env.EMAIL_FROM_NAME || 'Solitaire Markets'}`,
+      html,
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log('Operation email sent:', info.messageId);
+    return { ok: true, messageId: info.messageId };
+  } catch (e) {
+    console.warn('sendOperationEmail failed:', e.message);
+    return { ok: false, error: e.message };
+  }
+};
+
+/**
+ * Send a generic email
+ * @param {object} options - Email options
+ * @param {string} options.to - Recipient email
+ * @param {string} options.subject - Email subject
+ * @param {string} options.html - HTML content
+ * @param {string} options.text - Text content (optional)
+ * @returns {Promise<object>} - Email send result
+ */
+export const sendEmail = async ({ to, subject, html, text, attachments }) => {
+  try {
+    const mailOptions = {
+      from: `"${process.env.EMAIL_FROM_NAME || 'Solitaire Markets'}" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+      to,
+      subject,
+      html,
+      text: text || html.replace(/<[^>]*>/g, ''), // Fallback text generation
+      attachments,
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log('Generic email sent:', info.messageId);
+    return { ok: true, messageId: info.messageId };
+  } catch (error) {
+    console.error('Error sending generic email:', error);
+    throw error;
+  }
+};

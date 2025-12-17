@@ -65,7 +65,7 @@ const ensureWithdrawalsTable = async () => {
         AND table_name = 'withdrawals'
       );
     `);
-    
+
     if (!checkTable.rows[0].exists) {
       console.log('📦 Creating withdrawals table...');
       await pool.query(`
@@ -100,13 +100,13 @@ const ensureWithdrawalsTable = async () => {
           CONSTRAINT positive_amount CHECK (amount > 0)
         );
       `);
-      
+
       // Create indexes
       await pool.query('CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON withdrawals(user_id);');
       await pool.query('CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status);');
       await pool.query('CREATE INDEX IF NOT EXISTS idx_withdrawals_created_at ON withdrawals(created_at DESC);');
       await pool.query('CREATE INDEX IF NOT EXISTS idx_withdrawals_mt5_account ON withdrawals(mt5_account_id);');
-      
+
       console.log('✅ Withdrawals table created successfully');
     } else {
       console.log('✅ Withdrawals table exists');
@@ -206,6 +206,16 @@ console.log('  - /api/deposits');
 console.log('  - /api/withdrawals');
 console.log('  - /api/reports');
 console.log('  - /api/admin');
+
+// Inspect admin routes
+if (adminRoutes && adminRoutes.stack) {
+  console.log('🔍 Inspecting Admin Routes:');
+  adminRoutes.stack.forEach(r => {
+    if (r.route && r.route.path) {
+      console.log(`  - ${Object.keys(r.route.methods).join(',').toUpperCase()} ${r.route.path}`);
+    }
+  });
+}
 
 // Debug endpoint to list all registered routes
 app.get('/api/debug/routes', (req, res) => {
