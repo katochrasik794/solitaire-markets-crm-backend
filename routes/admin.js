@@ -2,7 +2,7 @@ import express from 'express';
 import pool from '../config/database.js';
 import { adjustWalletBalance, createWalletForUser } from '../services/wallet.service.js';
 import * as mt5Service from '../services/mt5.service.js';
-import { hashPassword, comparePassword } from '../utils/helpers.js';
+import { hashPassword, comparePassword, generateRandomPassword, encryptPassword } from '../utils/helpers.js';
 import { validateLogin } from '../middleware/validate.js';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
@@ -1854,6 +1854,399 @@ router.get('/users/:id/logins', authenticateAdmin, async (req, res, next) => {
 });
 
 /**
+ * POST /api/admin/users/:id/accounts/create
+ * Admin endpoint to create MT5 account for a user (bypasses portal password check)
+ */
+router.post('/users/:id/accounts/create', authenticateAdmin, async (req, res, next) => {
+  try {
+    const userId = parseInt(req.params.id);
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user id'
+      });
+    }
+
+    const {
+      mt5GroupId,
+      leverage,
+      masterPassword,
+      isDemo
+    } = req.body;
+
+    // Validation
+    if (!mt5GroupId || !leverage || !masterPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'MT5 group, leverage, and master password are required'
+      });
+    }
+
+    // Get user details
+    const userResult = await pool.query(
+      'SELECT id, email, first_name, last_name, phone_code, phone_number, country FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    // Get MT5 group details
+    const groupResult = await pool.query(
+      'SELECT id, group_name, dedicated_name, currency FROM mt5_groups WHERE id = $1 AND is_active = TRUE',
+      [mt5GroupId]
+    );
+
+    if (groupResult.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or inactive MT5 group selected'
+      });
+    }
+
+    const mt5Group = groupResult.rows[0];
+    let groupName = mt5Group.group_name;
+    if (groupName) {
+      groupName = groupName.replace(/\\+/g, '\\');
+    }
+    const currency = mt5Group.currency || 'USD';
+
+    // Use leverage from form
+    const finalLeverage = parseInt(leverage);
+
+    // Generate passwords
+    const mainPassword = generateRandomPassword(12);
+    const investorDigits = Math.floor(100 + Math.random() * 900);
+    const investorPassword = `SolitaireINV@${investorDigits}`;
+
+    // Prepare user data
+    const accountName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'New Client Account';
+    const phone = user.phone_code && user.phone_number
+      ? `${user.phone_code}-${user.phone_number}`
+      : user.phone_number || '';
+    const country = user.country || '';
+
+    // Prepare MT5 account creation data
+    const accountData = {
+      name: accountName,
+      group: groupName,
+      leverage: finalLeverage,
+      masterPassword: masterPassword,
+      investorPassword: investorPassword,
+      email: user.email,
+      country: country,
+      city: '',
+      phone: phone,
+      comment: 'Created by admin'
+    };
+
+    // Call MT5 Manager API
+    let mt5Response;
+    try {
+      const result = await mt5Service.createAccount(accountData);
+      mt5Response = result.data;
+      console.log('MT5 account created successfully by admin:', JSON.stringify(mt5Response, null, 2));
+    } catch (apiError) {
+      console.error('MT5 API error:', apiError);
+      return res.status(500).json({
+        success: false,
+        message: apiError.message || 'Failed to create account via MT5 API. Please try again later.'
+      });
+    }
+
+    // Extract account number (login) from MT5 response
+    const findLogin = (obj) => {
+      if (!obj || typeof obj !== 'object') return null;
+      for (const [key, value] of Object.entries(obj)) {
+        const k = key.toLowerCase();
+        if (['login', 'account', 'accountid', 'loginid'].includes(k) && value) {
+          return value;
+        }
+        if (value && typeof value === 'object') {
+          const nested = findLogin(value);
+          if (nested) return nested;
+        }
+      }
+      return null;
+    };
+
+    let mt5Login =
+      mt5Response.account ||
+      mt5Response.accountNumber ||
+      mt5Response.login ||
+      mt5Response.Login ||
+      findLogin(mt5Response) ||
+      null;
+
+    let accountNumber;
+    if (mt5Login) {
+      accountNumber = String(mt5Login);
+    } else {
+      const accountNumberResult = await pool.query(
+        'SELECT generate_account_number() as account_number'
+      );
+      accountNumber = accountNumberResult.rows[0].account_number;
+      console.warn('MT5 API did not include a login; using internal account number', {
+        accountNumber,
+        rawResponse: mt5Response
+      });
+    }
+
+    // Encrypt passwords before storing
+    const encryptedMasterPassword = encryptPassword(masterPassword);
+    const encryptedMainPassword = encryptPassword(mainPassword);
+    const encryptedInvestorPassword = encryptPassword(investorPassword);
+
+    // Determine trading server
+    const tradingServer = isDemo ? 'Solitaire Markets-Demo' : 'Solitaire Markets-Live';
+
+    // Determine account type
+    const accountType = mt5Group.dedicated_name || mt5Group.group_name || 'standard';
+
+    // Discover existing columns
+    const colsRes = await pool.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'trading_accounts'`
+    );
+    const existingCols = new Set(colsRes.rows.map((r) => r.column_name));
+
+    const insertFields = [];
+    const insertValues = [];
+    const addField = (col, value) => {
+      if (existingCols.has(col)) {
+        insertFields.push(col);
+        insertValues.push(value);
+      }
+    };
+
+    addField('user_id', userId);
+    addField('account_number', accountNumber);
+    addField('platform', 'MT5');
+    addField('account_type', accountType);
+    addField('currency', currency);
+    addField('is_swap_free', false);
+    addField('is_copy_account', false);
+    addField('leverage', finalLeverage);
+    addField('reason_for_account', 'Created by admin');
+    addField('trading_server', tradingServer);
+    addField('mt5_group_id', mt5GroupId);
+    addField('mt5_group_name', groupName);
+    addField('name', accountName);
+    addField('master_password', encryptedMasterPassword);
+    addField('password', encryptedMainPassword);
+    addField('email', user.email);
+    addField('country', country);
+    addField('city', '');
+    addField('phone', phone);
+    addField('comment', 'Created by admin');
+    addField('investor_password', encryptedInvestorPassword);
+    addField('is_demo', !!isDemo);
+
+    const placeholders = insertFields.map((_, idx) => `$${idx + 1}`).join(', ');
+
+    // Insert account
+    const insertResult = await pool.query(
+      `INSERT INTO trading_accounts (${insertFields.join(', ')})
+       VALUES (${placeholders})
+       RETURNING id`,
+      insertValues
+    );
+
+    // If Demo account, auto-deposit 10,000
+    if (isDemo && mt5Login) {
+      try {
+        const depositAmount = 10000;
+        await mt5Service.addBalance(mt5Login, depositAmount, 'Demo Account Opening Bonus');
+        await pool.query(
+          'UPDATE trading_accounts SET balance = $1, equity = $1 WHERE account_number = $2',
+          [depositAmount, accountNumber]
+        );
+      } catch (depError) {
+        console.error('Failed to add demo deposit:', depError);
+      }
+    }
+
+    const newId = insertResult.rows[0].id;
+
+    // Fetch the new account
+    const selectCols = [
+      'id',
+      'account_number',
+      'platform',
+      'account_type',
+      'currency',
+      'leverage',
+      'trading_server',
+      'created_at',
+      'is_demo'
+    ];
+    if (existingCols.has('mt5_group_name')) {
+      selectCols.push('mt5_group_name');
+    }
+
+    const accountResult = await pool.query(
+      `SELECT ${selectCols.join(', ')} FROM trading_accounts WHERE id = $1`,
+      [newId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Account created successfully',
+      data: {
+        ...accountResult.rows[0],
+        mt5Response: mt5Login
+      }
+    });
+  } catch (error) {
+    console.error('Admin create account error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to create account'
+    });
+  }
+});
+
+/**
+ * PATCH /api/admin/users/:id/password
+ * Admin endpoint to change user's CRM password
+ */
+router.patch('/users/:id/password', authenticateAdmin, async (req, res, next) => {
+  try {
+    const userId = parseInt(req.params.id);
+    const { newPassword } = req.body;
+
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid user id'
+      });
+    }
+
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Password must be at least 8 characters long'
+      });
+    }
+
+    // Check if user exists
+    const userResult = await pool.query(
+      'SELECT id, email FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'User not found'
+      });
+    }
+
+    // Hash the new password
+    const passwordHash = await hashPassword(newPassword);
+
+    // Update password in database
+    await pool.query(
+      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+      [passwordHash, userId]
+    );
+
+    // Log activity
+    await pool.query(
+      `INSERT INTO activity_logs (admin_id, action, details, created_at)
+       VALUES ($1, 'USER_PASSWORD_CHANGE', $2, NOW())`,
+      [
+        req.admin.id,
+        JSON.stringify({
+          userId: userId,
+          userEmail: userResult.rows[0].email
+        })
+      ]
+    ).catch(err => console.error('Failed to log activity:', err));
+
+    res.json({
+      ok: true,
+      message: 'User password updated successfully'
+    });
+  } catch (error) {
+    console.error('Change user password error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to change user password'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/users/:id/login-as
+ * Admin endpoint to login as a user (impersonation)
+ */
+router.post('/users/:id/login-as', authenticateAdmin, async (req, res, next) => {
+  try {
+    const userId = parseInt(req.params.id);
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user id'
+      });
+    }
+
+    // Get user details
+    const userResult = await pool.query(
+      'SELECT id, email, first_name, last_name, country, referral_code, referred_by FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    // Generate JWT token for the user (same as regular login)
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login as user successful',
+      data: {
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          firstName: user.first_name,
+          lastName: user.last_name,
+          country: user.country,
+          referralCode: user.referral_code,
+          referredBy: user.referred_by
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Admin login as user error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to login as user'
+    });
+  }
+});
+
+/**
  * GET /api/admin/users/:id/payment-methods
  * Placeholder payment methods list for user
  */
@@ -2517,6 +2910,105 @@ router.put('/mt5/account/:accountId', authenticateAdmin, async (req, res) => {
     res.status(500).json({
       ok: false,
       error: error.message || 'Failed to update MT5 account'
+    });
+  }
+});
+
+/**
+ * PUT /api/admin/mt5/account/:accountId/password
+ * Change MT5 account password (updates MT5 API first, then database)
+ */
+router.put('/mt5/account/:accountId/password', authenticateAdmin, async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const { newPassword } = req.body;
+    const login = parseInt(accountId);
+
+    if (isNaN(login)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid account ID'
+      });
+    }
+
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Password must be at least 8 characters long'
+      });
+    }
+
+    // Step 1: Update password in MT5 API first using the correct endpoint
+    // PUT /Security/users/{login}/password/change?passwordType=main
+    let mt5Result;
+    try {
+      console.log(`[MT5 Password Change] Attempting to change password for account ${login}`);
+      mt5Result = await mt5Service.changePassword(login, newPassword, 'master');
+      
+      // Check if the API call was successful
+      if (!mt5Result || !mt5Result.success) {
+        const errorMsg = mt5Result?.error || mt5Result?.message || 'Failed to update password in MT5 API';
+        console.error(`[MT5 Password Change] API call failed:`, errorMsg);
+        throw new Error(errorMsg);
+      }
+      
+      console.log(`[MT5 Password Change] Successfully changed password in MT5 for account ${login}`);
+    } catch (mt5Error) {
+      console.error('[MT5 Password Change] MT5 API error:', {
+        accountId: login,
+        error: mt5Error.message,
+        stack: mt5Error.stack
+      });
+      // Return error without updating database
+      return res.status(500).json({
+        ok: false,
+        error: mt5Error.message || 'Failed to update password in MT5. Please check the password and try again.'
+      });
+    }
+
+    // Step 2: Only update database if MT5 API call succeeded
+    try {
+      const { encryptPassword } = await import('../utils/helpers.js');
+      const encryptedPassword = encryptPassword(newPassword);
+
+      // Update master_password in trading_accounts
+      await pool.query(
+        `UPDATE trading_accounts 
+         SET master_password = $1, updated_at = NOW()
+         WHERE account_number = $2`,
+        [encryptedPassword, accountId.toString()]
+      );
+
+      // Log activity
+      await pool.query(
+        `INSERT INTO activity_logs (admin_id, action, details, created_at)
+         VALUES ($1, 'MT5_PASSWORD_CHANGE', $2, NOW())`,
+        [
+          req.admin.id,
+          JSON.stringify({
+            accountId: login
+          })
+        ]
+      ).catch(err => console.error('Failed to log activity:', err));
+
+      res.json({
+        ok: true,
+        message: 'MT5 password updated successfully in both MT5 and database'
+      });
+    } catch (dbError) {
+      console.error('Database update error after MT5 success:', dbError);
+      // Even if DB update fails, password was changed in MT5, so we should inform admin
+      res.status(500).json({
+        ok: false,
+        error: 'Password changed in MT5 but failed to update database. Please contact support.',
+        warning: true
+      });
+    }
+  } catch (error) {
+    console.error('Change MT5 password error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to change MT5 password'
     });
   }
 });

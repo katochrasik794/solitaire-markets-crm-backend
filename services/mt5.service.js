@@ -311,6 +311,7 @@ export const updateUser = async (login, updateData = {}) => {
   if (updateData.phone !== undefined) payload.phone = updateData.phone;
   if (updateData.leverage !== undefined) payload.leverage = updateData.leverage;
   if (updateData.comment !== undefined) payload.comment = updateData.comment;
+  if (updateData.masterPassword !== undefined) payload.masterPassword = updateData.masterPassword;
 
   const res = await fetch(`${MT5_BASE_URL}/Users/${login}`, {
     method: 'PUT',
@@ -365,15 +366,22 @@ export const changePassword = async (login, newPassword, passwordType = 'master'
     }
   } catch (e) {
     console.warn('MT5 Response was not JSON:', text);
+    // If response is not JSON but contains error info, try to extract it
+    if (text && text.includes('error') || text && text.includes('Error')) {
+      data = { error: text, message: text };
+    }
   }
 
   if (!res.ok) {
-    throw new Error(
-      data.Message ||
-      data.error ||
-      data.message ||
-      `Failed to change password: ${res.status}`
-    );
+    // Extract error code if present (e.g., "Invalid account password (3006)")
+    const errorMessage = data.Message || data.error || data.message || text || `Failed to change password: ${res.status}`;
+    const errorCode = data.ErrorCode || data.errorCode || (errorMessage.match(/\((\d+)\)/) ? errorMessage.match(/\((\d+)\)/)[1] : null);
+    
+    const fullError = errorCode 
+      ? `${errorMessage} (Error Code: ${errorCode})`
+      : errorMessage;
+    
+    throw new Error(fullError);
   }
   return { success: true, data };
 };
