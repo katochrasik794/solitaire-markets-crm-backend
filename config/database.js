@@ -22,10 +22,20 @@ if (process.env.DATABASE_URL) {
   // Enable SSL by default for DATABASE_URL (most remote/cloud databases require it)
   // Only disable if explicitly set to false
   if (process.env.DB_SSL !== 'false') {
-    // For Render PostgreSQL, use require mode
-    poolConfig.ssl = process.env.NODE_ENV === 'production' 
-      ? { require: true, rejectUnauthorized: false }
-      : { rejectUnauthorized: false };
+    // For Render PostgreSQL and other cloud providers, always use SSL
+    // Check if DATABASE_URL contains 'render.com' or other cloud providers
+    const isCloudDatabase = process.env.DATABASE_URL && (
+      process.env.DATABASE_URL.includes('render.com') ||
+      process.env.DATABASE_URL.includes('amazonaws.com') ||
+      process.env.DATABASE_URL.includes('azure.com') ||
+      process.env.DATABASE_URL.includes('heroku.com')
+    );
+    
+    if (isCloudDatabase || process.env.NODE_ENV === 'production') {
+      poolConfig.ssl = { require: true, rejectUnauthorized: false };
+    } else {
+      poolConfig.ssl = { rejectUnauthorized: false };
+    }
     console.log('🔒 SSL enabled for database connection');
   } else {
     console.log('⚠️  SSL disabled for database connection (DB_SSL=false)');

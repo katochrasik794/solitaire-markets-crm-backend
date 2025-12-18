@@ -25,8 +25,8 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Test database connection on startup with retry logic
-const testDatabaseConnection = async (retries = 3, delay = 2000) => {
+// Test database connection on startup with retry logic (non-blocking)
+const testDatabaseConnection = async (retries = 5, delay = 3000) => {
   for (let i = 0; i < retries; i++) {
     try {
       const result = await pool.query('SELECT NOW()');
@@ -45,11 +45,14 @@ const testDatabaseConnection = async (retries = 3, delay = 2000) => {
           nodeEnv: process.env.NODE_ENV,
           sslConfigured: process.env.DB_SSL !== 'false'
         });
+        console.error('⚠️  Database connection failed after all retries, but continuing startup...');
+        console.error('⚠️  The server will continue to retry connections in the background.');
         console.error('Please check:');
         console.error('1. DATABASE_URL is set correctly');
         console.error('2. Database server is accessible');
         console.error('3. Network connection is stable');
-        process.exit(1);
+        // Don't exit - let the server start and retry in background
+        return false;
       }
     }
   }
@@ -167,13 +170,28 @@ const cancelExpiredDeposits = async () => {
   }
 };
 
-// Initialize database connection and tables
+// Initialize database connection and tables (non-blocking)
 (async () => {
-  const connected = await testDatabaseConnection();
-  if (connected) {
-    await ensureWithdrawalsTable();
-    // Only run cancelExpiredDeposits after connection is established
-    cancelExpiredDeposits();
+  try {
+    const connected = await testDatabaseConnection();
+    if (connected) {
+      await ensureWithdrawalsTable();
+      // Only run cancelExpiredDeposits after connection is established
+      cancelExpiredDeposits();
+    } else {
+      // Retry connection in background
+      console.log('🔄 Will retry database connection in background...');
+      setTimeout(async () => {
+        const retryConnected = await testDatabaseConnection(10, 5000);
+        if (retryConnected) {
+          await ensureWithdrawalsTable();
+          cancelExpiredDeposits();
+        }
+      }, 10000); // Retry after 10 seconds
+    }
+  } catch (error) {
+    console.error('❌ Error during database initialization:', error.message);
+    // Don't exit - continue startup
   }
 })();
 
@@ -194,9 +212,38 @@ app.use(express.urlencoded({ extended: true }));
 // Serve uploaded files
 app.use('/uploads', express.static(join(__dirname, 'uploads')));
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Server is running' });
+// Health check endpoint (for Render and other platforms)
+app.get('/api/health', async (req, res) => {
+  try {
+    // Try to ping database
+    await pool.query('SELECT 1');
+    res.json({ 
+      status: 'ok', 
+      message: 'Server is running',
+      database: 'connected'
+    });
+  } catch (error) {
+    // Still return 200 but indicate DB is not connected
+    res.status(200).json({ 
+      status: 'ok', 
+      message: 'Server is running',
+      database: 'disconnected',
+      warning: 'Database connection pending'
+    });
+  }
+});
+
+// Root endpoint for Render health checks
+app.head('/', (req, res) => {
+  res.status(200).end();
+});
+
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'Solitaire CRM API Server',
+    version: '1.0.0'
+  });
 });
 
 // Routes - MUST be before 404 handler
