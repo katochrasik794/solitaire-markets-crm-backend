@@ -3139,6 +3139,276 @@ router.put(
 );
 
 /**
+ * POST /api/admin/group-management/:id/report
+ * Generate a comprehensive report for a specific MT5 group
+ */
+router.post(
+  '/group-management/:id/report',
+  authenticateAdmin,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ ok: false, error: 'Invalid group id' });
+      }
+
+      // Get group info
+      const groupResult = await pool.query(
+        'SELECT id, group_name, dedicated_name FROM mt5_groups WHERE id = $1',
+        [id]
+      );
+
+      if (groupResult.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: 'Group not found' });
+      }
+
+      const group = groupResult.rows[0];
+      const groupName = group.group_name || group.dedicated_name || 'Unknown';
+
+      // Build WHERE clause - try multiple column combinations
+      // Use a safe approach that tries the most common column first
+      let accountsResult;
+      let userIds = [];
+      let totalUsers = 0;
+      let usersWithBalance = 0;
+      let usersWithoutBalance = 0;
+      let usersInProfit = 0;
+      let usersInLoss = 0;
+      
+      // Try different column combinations until one works
+      const queryAttempts = [
+        {
+          query: `SELECT DISTINCT ta.user_id, u.id, u.email, u.first_name, u.last_name
+                  FROM trading_accounts ta
+                  JOIN users u ON ta.user_id = u.id
+                  WHERE ta.mt5_group_id = $1 AND ta.platform = 'MT5'`,
+          params: [id]
+        },
+        {
+          query: `SELECT DISTINCT ta.user_id, u.id, u.email, u.first_name, u.last_name
+                  FROM trading_accounts ta
+                  JOIN users u ON ta.user_id = u.id
+                  WHERE ta.mt5_group_name = $1 AND ta.platform = 'MT5'`,
+          params: [group.group_name]
+        },
+        {
+          query: `SELECT DISTINCT ta.user_id, u.id, u.email, u.first_name, u.last_name
+                  FROM trading_accounts ta
+                  JOIN users u ON ta.user_id = u.id
+                  WHERE ta."group" = $1 AND ta.platform = 'MT5'`,
+          params: [group.group_name]
+        }
+      ];
+      
+      let successfulQuery = null;
+      for (const attempt of queryAttempts) {
+        try {
+          accountsResult = await pool.query(attempt.query, attempt.params);
+          successfulQuery = attempt;
+          break;
+        } catch (queryError) {
+          // Continue to next attempt
+          continue;
+        }
+      }
+      
+      if (!successfulQuery) {
+        // No working query found - return empty report
+        return res.json({
+          ok: true,
+          data: {
+            groupId: id,
+            groupName: groupName,
+            totalUsers: 0,
+            usersWithBalance: 0,
+            usersWithoutBalance: 0,
+            usersInProfit: 0,
+            usersInLoss: 0,
+            totalDeposit: 0,
+            totalWithdrawal: 0,
+            allClientsDeposit: 0,
+            allClientsWithdrawal: 0,
+            allClientsPnL: 0,
+            generatedAt: new Date().toISOString()
+          }
+        });
+      }
+      
+      userIds = accountsResult.rows.map(r => r.user_id);
+      totalUsers = userIds.length;
+      
+      // Use the same WHERE pattern for subsequent queries
+      const baseWhere = successfulQuery.query.includes('mt5_group_id') 
+        ? 'ta.mt5_group_id = $1'
+        : successfulQuery.query.includes('mt5_group_name')
+        ? 'ta.mt5_group_name = $1'
+        : 'ta."group" = $1';
+      const baseParams = successfulQuery.params;
+
+
+      // Get users with balance > 0
+      try {
+        const usersWithBalanceResult = await pool.query(
+          `SELECT DISTINCT ta.user_id
+           FROM trading_accounts ta
+           WHERE ${baseWhere}
+           AND ta.platform = 'MT5'
+           AND (COALESCE(ta.balance, 0) > 0 OR COALESCE(ta.equity, 0) > 0)`,
+          baseParams
+        );
+        usersWithBalance = usersWithBalanceResult.rows.length;
+        usersWithoutBalance = totalUsers - usersWithBalance;
+      } catch (e) {
+        console.error('Error fetching users with balance:', e);
+      }
+
+      // Get users in profit (equity > balance + credit)
+      try {
+        const usersInProfitResult = await pool.query(
+          `SELECT DISTINCT ta.user_id
+           FROM trading_accounts ta
+           WHERE ${baseWhere}
+           AND ta.platform = 'MT5'
+           AND COALESCE(ta.equity, 0) > (COALESCE(ta.balance, 0) + COALESCE(ta.credit, 0))`,
+          baseParams
+        );
+        usersInProfit = usersInProfitResult.rows.length;
+      } catch (e) {
+        console.error('Error fetching users in profit:', e);
+      }
+
+      // Get users in loss (equity < balance + credit)
+      try {
+        const usersInLossResult = await pool.query(
+          `SELECT DISTINCT ta.user_id
+           FROM trading_accounts ta
+           WHERE ${baseWhere}
+           AND ta.platform = 'MT5'
+           AND COALESCE(ta.equity, 0) < (COALESCE(ta.balance, 0) + COALESCE(ta.credit, 0))`,
+          baseParams
+        );
+        usersInLoss = usersInLossResult.rows.length;
+      } catch (e) {
+        console.error('Error fetching users in loss:', e);
+      }
+
+      // Get total deposits for this group
+      let totalDeposit = 0;
+      if (userIds.length > 0) {
+        try {
+          const depositsResult = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0) as total
+             FROM deposit_requests
+             WHERE status = 'approved'
+             AND user_id = ANY($1::int[])`,
+            [userIds]
+          );
+          totalDeposit = parseFloat(depositsResult.rows[0]?.total || 0);
+        } catch (e) {
+          console.error('Error fetching deposits:', e);
+        }
+      }
+
+      // Get total withdrawals for this group
+      let totalWithdrawal = 0;
+      if (userIds.length > 0) {
+        try {
+          const withdrawalsResult = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0) as total
+             FROM withdrawals
+             WHERE status = 'approved'
+             AND user_id = ANY($1::int[])`,
+            [userIds]
+          );
+          totalWithdrawal = parseFloat(withdrawalsResult.rows[0]?.total || 0);
+        } catch (e) {
+          console.error('Error fetching withdrawals:', e);
+        }
+      }
+
+      // Get all clients overall deposit (all users, not just this group)
+      let allClientsDeposit = 0;
+      try {
+        const allDepositsResult = await pool.query(
+          `SELECT COALESCE(SUM(amount), 0) as total
+           FROM deposit_requests
+           WHERE status = 'approved'`
+        );
+        allClientsDeposit = parseFloat(allDepositsResult.rows[0]?.total || 0);
+      } catch (e) {
+        console.error('Error fetching all clients deposits:', e);
+      }
+
+      // Get all clients overall withdrawal
+      let allClientsWithdrawal = 0;
+      try {
+        const allWithdrawalsResult = await pool.query(
+          `SELECT COALESCE(SUM(amount), 0) as total
+           FROM withdrawals
+           WHERE status = 'approved'`
+        );
+        allClientsWithdrawal = parseFloat(allWithdrawalsResult.rows[0]?.total || 0);
+      } catch (e) {
+        console.error('Error fetching all clients withdrawals:', e);
+      }
+
+      // Calculate overall P&L (Profit and Loss) - difference between equity and (balance + credit) for all accounts
+      let allClientsPnL = 0;
+      try {
+        const pnlResult = await pool.query(
+          `SELECT 
+            COALESCE(SUM(ta.equity - (COALESCE(ta.balance, 0) + COALESCE(ta.credit, 0))), 0) as total_pnl
+           FROM trading_accounts ta
+           WHERE ta.platform = 'MT5'`
+        );
+        allClientsPnL = parseFloat(pnlResult.rows[0]?.total_pnl || 0);
+      } catch (e) {
+        console.error('Error calculating P&L:', e);
+      }
+
+      const report = {
+        groupId: id,
+        groupName: groupName,
+        totalUsers,
+        usersWithBalance,
+        usersWithoutBalance,
+        usersInProfit,
+        usersInLoss,
+        totalDeposit,
+        totalWithdrawal,
+        allClientsDeposit,
+        allClientsWithdrawal,
+        allClientsPnL,
+        generatedAt: new Date().toISOString()
+      };
+
+      res.json({
+        ok: true,
+        data: report
+      });
+    } catch (error) {
+      console.error('Generate group report error:', error);
+      console.error('Error stack:', error.stack);
+      console.error('Error details:', {
+        message: error.message,
+        code: error.code,
+        detail: error.detail,
+        hint: error.hint
+      });
+      res.status(500).json({
+        ok: false,
+        error: error.message || 'Failed to generate group report',
+        details: process.env.NODE_ENV === 'development' ? {
+          code: error.code,
+          detail: error.detail,
+          hint: error.hint
+        } : undefined
+      });
+    }
+  }
+);
+
+/**
  * GET /api/admin/mt5/groups
  * Get all MT5 groups from MT5 API
  */
