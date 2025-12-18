@@ -120,17 +120,12 @@ const ensureWithdrawalsTable = async () => {
   }
 };
 
-// Initialize database connection and tables
-(async () => {
-  const connected = await testDatabaseConnection();
-  if (connected) {
-    await ensureWithdrawalsTable();
-  }
-})();
-
 // Scheduled job to cancel expired deposits (runs every 5 minutes)
 const cancelExpiredDeposits = async () => {
   try {
+    // Test connection first - if it fails, skip this run
+    await pool.query('SELECT 1');
+    
     // Find pending deposits with cregis_order_id that are older than 60 minutes
     const result = await pool.query(
       `UPDATE deposit_requests 
@@ -149,21 +144,40 @@ const cancelExpiredDeposits = async () => {
 
       // Also update cregis_transactions if they exist
       for (const row of result.rows) {
-        await pool.query(
-          `UPDATE cregis_transactions 
-           SET cregis_status = 'expired', updated_at = NOW()
-           WHERE deposit_request_id = $1`,
-          [row.id]
-        );
+        try {
+          await pool.query(
+            `UPDATE cregis_transactions 
+             SET cregis_status = 'expired', updated_at = NOW()
+             WHERE deposit_request_id = $1`,
+            [row.id]
+          );
+        } catch (err) {
+          // Ignore errors updating cregis_transactions (table might not exist)
+          console.warn(`⚠️  Could not update cregis_transactions for deposit #${row.id}:`, err.message);
+        }
       }
     }
   } catch (error) {
-    console.error('❌ Error cancelling expired deposits:', error);
+    // Don't log connection errors as errors - they're expected during startup
+    if (error.message && error.message.includes('Connection terminated')) {
+      console.warn('⚠️  Database not ready yet, skipping expired deposits check');
+    } else {
+      console.error('❌ Error cancelling expired deposits:', error.message);
+    }
   }
 };
 
-// Run immediately on startup, then every 5 minutes
-cancelExpiredDeposits();
+// Initialize database connection and tables
+(async () => {
+  const connected = await testDatabaseConnection();
+  if (connected) {
+    await ensureWithdrawalsTable();
+    // Only run cancelExpiredDeposits after connection is established
+    cancelExpiredDeposits();
+  }
+})();
+
+// Run every 5 minutes (will skip if database is not ready)
 setInterval(cancelExpiredDeposits, 5 * 60 * 1000); // Every 5 minutes
 
 // Middleware

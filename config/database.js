@@ -14,15 +14,18 @@ if (process.env.DATABASE_URL) {
   // Base config using DATABASE_URL
   poolConfig = {
     connectionString: process.env.DATABASE_URL,
-    max: 20,
+    max: 10, // Reduced from 20 for Render compatibility
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 60000, // Increased to 60 seconds for remote databases
+    connectionTimeoutMillis: 10000, // 10 seconds - Render databases should respond quickly
   };
 
   // Enable SSL by default for DATABASE_URL (most remote/cloud databases require it)
   // Only disable if explicitly set to false
   if (process.env.DB_SSL !== 'false') {
-    poolConfig.ssl = { rejectUnauthorized: false };
+    // For Render PostgreSQL, use require mode
+    poolConfig.ssl = process.env.NODE_ENV === 'production' 
+      ? { require: true, rejectUnauthorized: false }
+      : { rejectUnauthorized: false };
     console.log('🔒 SSL enabled for database connection');
   } else {
     console.log('⚠️  SSL disabled for database connection (DB_SSL=false)');
@@ -60,10 +63,18 @@ const pool = new Pool(poolConfig);
 
 // Test connection
 pool.on('connect', (client) => {
-  console.log('✅ New PostgreSQL client connected');
+  // Only log in development to reduce noise
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('✅ New PostgreSQL client connected');
+  }
 });
 
 pool.on('error', (err, client) => {
+  // Don't log connection termination errors during startup - they're expected
+  if (err.message && err.message.includes('Connection terminated')) {
+    // Silently handle - retry logic will handle it
+    return;
+  }
   console.error('❌ Unexpected error on idle PostgreSQL client:', err.message);
   console.error('Error code:', err.code);
   // Don't exit immediately - let the retry logic in index.js handle it
