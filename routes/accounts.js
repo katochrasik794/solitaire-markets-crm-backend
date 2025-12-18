@@ -223,6 +223,7 @@ router.get('/activity', authenticate, async (req, res, next) => {
          platform,
          account_type,
          currency,
+         is_demo,
          created_at
        FROM trading_accounts
        WHERE user_id = $1
@@ -239,7 +240,8 @@ router.get('/activity', authenticate, async (req, res, next) => {
       accountNumber: row.account_number,
       platform: row.platform,
       accountType: row.account_type,
-      currency: row.currency
+      currency: row.currency,
+      isDemo: row.is_demo || false
     }));
 
     res.json({

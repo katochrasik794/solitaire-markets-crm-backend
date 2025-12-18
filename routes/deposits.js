@@ -547,6 +547,55 @@ router.post('/cregis/create', authenticate, async (req, res) => {
 });
 
 /**
+ * GET /api/deposits/my
+ * Get all deposits for the logged in user
+ * MUST be before /cregis/status/:depositId to avoid route conflicts
+ */
+router.get('/my', authenticate, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const { status, limit = 1000 } = req.query;
+
+    // Use only columns that definitely exist based on INSERT statements
+    let query = `
+      SELECT 
+        id, amount, currency, deposit_to_type, mt5_account_id, wallet_id,
+        status, gateway_id, created_at, updated_at
+      FROM deposit_requests
+      WHERE user_id = $1
+    `;
+    const params = [userId];
+
+    if (status && status !== 'all') {
+      query += ` AND status = $2`;
+      params.push(status);
+    }
+
+    query += ` ORDER BY created_at DESC LIMIT $${params.length + 1}`;
+    params.push(parseInt(limit));
+
+    const result = await pool.query(query, params);
+
+    res.json({
+      success: true,
+      items: result.rows,
+      total: result.rows.length
+    });
+  } catch (error) {
+    console.error('Get user deposits error:', error);
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      userId: req.user?.id
+    });
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to fetch deposits'
+    });
+  }
+});
+
+/**
  * GET /api/deposits/cregis/status/:depositId
  * Check payment status for a Cregis deposit
  */
