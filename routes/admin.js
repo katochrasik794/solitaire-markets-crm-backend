@@ -1499,22 +1499,53 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
 
     // Update or insert KYC verification
     if (verified) {
-      // Set KYC as approved
-      await pool.query(
-        `INSERT INTO kyc_verifications (user_id, status, reviewed_at)
-         VALUES ($1, 'approved', NOW())
-         ON CONFLICT (user_id) WHERE status = 'pending'
-         DO UPDATE SET status = 'approved', reviewed_at = NOW()`,
+      // Set KYC as approved - use UPSERT to handle both insert and update
+      // First check if a record exists
+      const existingCheck = await pool.query(
+        'SELECT id FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
         [userId]
       );
+      
+      if (existingCheck.rows.length > 0) {
+        // Update existing record
+        await pool.query(
+          `UPDATE kyc_verifications 
+           SET status = 'approved', reviewed_at = NOW()
+           WHERE user_id = $1`,
+          [userId]
+        );
+      } else {
+        // Insert new record
+        await pool.query(
+          `INSERT INTO kyc_verifications (user_id, status, reviewed_at)
+           VALUES ($1, 'approved', NOW())`,
+          [userId]
+        );
+      }
     } else {
       // Set KYC as pending or remove approval
-      await pool.query(
-        `UPDATE kyc_verifications 
-         SET status = 'pending', reviewed_at = NULL
-         WHERE user_id = $1`,
+      // Check if record exists
+      const existingCheck = await pool.query(
+        'SELECT id FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
         [userId]
       );
+      
+      if (existingCheck.rows.length > 0) {
+        // Update existing record to pending
+        await pool.query(
+          `UPDATE kyc_verifications 
+           SET status = 'pending', reviewed_at = NULL
+           WHERE user_id = $1`,
+          [userId]
+        );
+      } else {
+        // Insert new pending record
+        await pool.query(
+          `INSERT INTO kyc_verifications (user_id, status, reviewed_at)
+           VALUES ($1, 'pending', NULL)`,
+          [userId]
+        );
+      }
     }
 
     res.json({
@@ -1572,7 +1603,7 @@ router.get('/kyc', authenticateAdmin, async (req, res, next) => {
       },
       isDocumentVerified: row.verificationStatus === 'approved',
       isAddressVerified: row.verificationStatus === 'approved',
-      verificationStatus: row.verificationStatus || 'Pending',
+      verificationStatus: (row.verificationStatus || 'pending').toLowerCase(),
       documentReference: row.documentReference || null,
       addressReference: row.addressReference || null,
       documentSubmittedAt: row.documentSubmittedAt || null,
@@ -2247,6 +2278,232 @@ router.post('/users/:id/login-as', authenticateAdmin, async (req, res, next) => 
 });
 
 /**
+ * GET /api/admin/payment-details
+ * Get all payment details for admin review
+ */
+router.get('/payment-details', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { status, limit = 1000 } = req.query;
+
+    let query = `
+      SELECT 
+        pd.id,
+        pd.user_id,
+        pd.payment_method,
+        pd.payment_details,
+        pd.status,
+        pd.reviewed_by,
+        pd.reviewed_at,
+        pd.rejection_reason,
+        pd.created_at,
+        pd.updated_at,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.phone_code,
+        u.phone_number
+      FROM payment_details pd
+      INNER JOIN users u ON pd.user_id = u.id
+    `;
+    const params = [];
+    let paramIndex = 1;
+
+    if (status && status !== 'all') {
+      query += ` WHERE pd.status = $${paramIndex++}`;
+      params.push(status);
+    }
+
+    query += ` ORDER BY pd.created_at DESC LIMIT $${paramIndex++}`;
+    params.push(parseInt(limit));
+
+    const result = await pool.query(query, params);
+
+    const items = result.rows.map(row => {
+      const nameParts = [];
+      if (row.first_name) nameParts.push(row.first_name);
+      if (row.last_name) nameParts.push(row.last_name);
+      const name = nameParts.join(' ').trim() || null;
+
+      const phone = row.phone_code || row.phone_number
+        ? `${row.phone_code || ''} ${row.phone_number || ''}`.trim()
+        : null;
+
+      // Parse payment_details JSONB
+      let paymentDetails = row.payment_details;
+      if (typeof paymentDetails === 'string') {
+        try {
+          paymentDetails = JSON.parse(paymentDetails);
+        } catch (e) {
+          console.error('Error parsing payment_details:', e);
+          paymentDetails = {};
+        }
+      }
+
+      return {
+        id: row.id,
+        userId: row.user_id,
+        user: {
+          id: row.user_id,
+          name,
+          email: row.email,
+          phone
+        },
+        paymentMethod: row.payment_method,
+        paymentDetails,
+        status: row.status,
+        reviewedBy: row.reviewed_by,
+        reviewedAt: row.reviewed_at,
+        rejectionReason: row.rejection_reason,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      };
+    });
+
+    // Separate pending and approved
+    const pending = items.filter(item => item.status === 'pending');
+    const approved = items.filter(item => item.status === 'approved');
+    const rejected = items.filter(item => item.status === 'rejected');
+
+    res.json({
+      ok: true,
+      items,
+      pending,
+      approved,
+      rejected
+    });
+  } catch (error) {
+    console.error('Get admin payment details error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch payment details'
+    });
+  }
+});
+
+/**
+ * PATCH /api/admin/payment-details/:id/approve
+ * Approve a payment detail
+ */
+router.patch('/payment-details/:id/approve', authenticateAdmin, async (req, res, next) => {
+  try {
+    const paymentDetailId = parseInt(req.params.id);
+    const adminId = req.admin.id;
+
+    if (isNaN(paymentDetailId)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid payment detail ID'
+      });
+    }
+
+    // Check if payment detail exists
+    const check = await pool.query(
+      'SELECT id, status FROM payment_details WHERE id = $1',
+      [paymentDetailId]
+    );
+
+    if (check.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Payment detail not found'
+      });
+    }
+
+    // Update status to approved
+    await pool.query(
+      `UPDATE payment_details 
+       SET status = 'approved', 
+           reviewed_by = $1, 
+           reviewed_at = NOW(),
+           rejection_reason = NULL,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [adminId, paymentDetailId]
+    );
+
+    // Log activity
+    await pool.query(
+      `INSERT INTO activity_logs (admin_id, action, details, created_at)
+       VALUES ($1, 'PAYMENT_DETAIL_APPROVED', $2, NOW())`,
+      [adminId, JSON.stringify({ paymentDetailId })]
+    ).catch(err => console.error('Failed to log activity:', err));
+
+    res.json({
+      ok: true,
+      message: 'Payment detail approved successfully'
+    });
+  } catch (error) {
+    console.error('Approve payment detail error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to approve payment detail'
+    });
+  }
+});
+
+/**
+ * PATCH /api/admin/payment-details/:id/reject
+ * Reject a payment detail
+ */
+router.patch('/payment-details/:id/reject', authenticateAdmin, async (req, res, next) => {
+  try {
+    const paymentDetailId = parseInt(req.params.id);
+    const adminId = req.admin.id;
+    const { reason } = req.body;
+
+    if (isNaN(paymentDetailId)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid payment detail ID'
+      });
+    }
+
+    // Check if payment detail exists
+    const check = await pool.query(
+      'SELECT id, status FROM payment_details WHERE id = $1',
+      [paymentDetailId]
+    );
+
+    if (check.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Payment detail not found'
+      });
+    }
+
+    // Update status to rejected
+    await pool.query(
+      `UPDATE payment_details 
+       SET status = 'rejected', 
+           reviewed_by = $1, 
+           reviewed_at = NOW(),
+           rejection_reason = $2,
+           updated_at = NOW()
+       WHERE id = $3`,
+      [adminId, reason || null, paymentDetailId]
+    );
+
+    // Log activity
+    await pool.query(
+      `INSERT INTO activity_logs (admin_id, action, details, created_at)
+       VALUES ($1, 'PAYMENT_DETAIL_REJECTED', $2, NOW())`,
+      [adminId, JSON.stringify({ paymentDetailId, reason: reason || null })]
+    ).catch(err => console.error('Failed to log activity:', err));
+
+    res.json({
+      ok: true,
+      message: 'Payment detail rejected successfully'
+    });
+  } catch (error) {
+    console.error('Reject payment detail error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to reject payment detail'
+    });
+  }
+});
+
+/**
  * GET /api/admin/users/:id/payment-methods
  * Placeholder payment methods list for user
  */
@@ -2473,6 +2730,10 @@ router.get('/group-management', authenticateAdmin, async (req, res, next) => {
         limit_orders,
         limit_symbols,
         limit_positions,
+        minimum_deposit,
+        maximum_deposit,
+        minimum_withdrawal,
+        maximum_withdrawal,
         is_active,
         updated_at AS synced_at,
         created_at
@@ -2721,6 +2982,115 @@ router.put(
       res.status(500).json({
         ok: false,
         error: error.message || 'Failed to update group status'
+      });
+    }
+  }
+);
+
+/**
+ * PUT /api/admin/group-management/:id/limits
+ * Update deposit and withdrawal limits for a group
+ */
+router.put(
+  '/group-management/:id/limits',
+  authenticateAdmin,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ ok: false, error: 'Invalid group id' });
+      }
+
+      const {
+        minimum_deposit,
+        maximum_deposit,
+        minimum_withdrawal,
+        maximum_withdrawal
+      } = req.body;
+
+      // Validate all values are non-negative
+      if (minimum_deposit !== undefined && minimum_deposit < 0) {
+        return res.status(400).json({ ok: false, error: 'Minimum deposit must be >= 0' });
+      }
+      if (maximum_deposit !== undefined && maximum_deposit !== null && maximum_deposit < 0) {
+        return res.status(400).json({ ok: false, error: 'Maximum deposit must be >= 0' });
+      }
+      if (minimum_withdrawal !== undefined && minimum_withdrawal < 0) {
+        return res.status(400).json({ ok: false, error: 'Minimum withdrawal must be >= 0' });
+      }
+      if (maximum_withdrawal !== undefined && maximum_withdrawal !== null && maximum_withdrawal < 0) {
+        return res.status(400).json({ ok: false, error: 'Maximum withdrawal must be >= 0' });
+      }
+
+      // Validate min < max (when max is not null)
+      if (minimum_deposit !== undefined && maximum_deposit !== undefined && maximum_deposit !== null) {
+        if (minimum_deposit > maximum_deposit) {
+          return res.status(400).json({ ok: false, error: 'Minimum deposit must be <= maximum deposit' });
+        }
+      }
+      if (minimum_withdrawal !== undefined && maximum_withdrawal !== undefined && maximum_withdrawal !== null) {
+        if (minimum_withdrawal > maximum_withdrawal) {
+          return res.status(400).json({ ok: false, error: 'Minimum withdrawal must be <= maximum withdrawal' });
+        }
+      }
+
+      // Build update query dynamically
+      const updates = [];
+      const values = [];
+      let paramIndex = 1;
+
+      if (minimum_deposit !== undefined) {
+        updates.push(`minimum_deposit = $${paramIndex++}`);
+        values.push(minimum_deposit);
+      }
+      if (maximum_deposit !== undefined) {
+        updates.push(`maximum_deposit = $${paramIndex++}`);
+        values.push(maximum_deposit);
+      }
+      if (minimum_withdrawal !== undefined) {
+        updates.push(`minimum_withdrawal = $${paramIndex++}`);
+        values.push(minimum_withdrawal);
+      }
+      if (maximum_withdrawal !== undefined) {
+        updates.push(`maximum_withdrawal = $${paramIndex++}`);
+        values.push(maximum_withdrawal);
+      }
+
+      if (updates.length === 0) {
+        return res.status(400).json({ ok: false, error: 'No limit fields to update' });
+      }
+
+      values.push(id);
+      const updateQuery = `
+        UPDATE mt5_groups
+        SET ${updates.join(', ')}, updated_at = NOW()
+        WHERE id = $${paramIndex}
+        RETURNING id, minimum_deposit, maximum_deposit, minimum_withdrawal, maximum_withdrawal
+      `;
+
+      const result = await pool.query(updateQuery, values);
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ ok: false, error: 'Group not found' });
+      }
+
+      // Log activity
+      await pool.query(
+        `INSERT INTO activity_logs (admin_id, action, details, created_at)
+         VALUES ($1, 'GROUP_LIMITS_UPDATE', $2, NOW())`,
+        [req.admin.id, JSON.stringify({ groupId: id, limits: result.rows[0] })]
+      ).catch(err => console.error('Failed to log activity:', err));
+
+      res.json({
+        ok: true,
+        message: 'Group limits updated successfully',
+        data: result.rows[0]
+      });
+    } catch (error) {
+      console.error('Update group limits error:', error);
+      res.status(500).json({
+        ok: false,
+        error: error.message || 'Failed to update group limits'
       });
     }
   }

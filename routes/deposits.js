@@ -186,6 +186,101 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       });
     }
 
+    const depositAmount = parseFloat(amount);
+    if (isNaN(depositAmount) || depositAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid deposit amount'
+      });
+    }
+
+    // Validate deposit limits if depositing to MT5 account
+    if (deposit_to === 'mt5' && mt5_account_id) {
+      const mt5AccountId = String(mt5_account_id).trim();
+      
+      // Check which columns exist for joining with mt5_groups
+      const colsRes = await pool.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'trading_accounts'`
+      );
+      const existingCols = new Set(colsRes.rows.map((r) => r.column_name));
+      
+      const hasMt5GroupName = existingCols.has('mt5_group_name');
+      const hasMt5GroupId = existingCols.has('mt5_group_id');
+      const hasGroup = existingCols.has('group');
+      
+      // Build join condition based on available columns (try ALL possible joins with OR)
+      const joinConditions = [];
+      if (hasMt5GroupName) {
+        joinConditions.push('ta.mt5_group_name = mg.group_name');
+      }
+      if (hasMt5GroupId) {
+        joinConditions.push('ta.mt5_group_id = mg.id');
+      }
+      if (hasGroup) {
+        joinConditions.push('ta.group = mg.group_name');
+      }
+      
+      // Get account's group limits
+      let query = `
+        SELECT 
+          ta.account_number,
+          mg.minimum_deposit,
+          mg.maximum_deposit
+        FROM trading_accounts ta
+      `;
+      
+      if (joinConditions.length > 0) {
+        const joinCondition = joinConditions.join(' OR ');
+        query += `LEFT JOIN mt5_groups mg ON (${joinCondition}) AND mg.is_active = TRUE`;
+      } else {
+        query += `CROSS JOIN (SELECT NULL::DECIMAL(15,2) as minimum_deposit, NULL::DECIMAL(15,2) as maximum_deposit) mg`;
+      }
+      
+      query += ` WHERE ta.account_number = $1 AND ta.user_id = $2 AND ta.platform = 'MT5'`;
+      
+      const accountGroupResult = await pool.query(query, [mt5AccountId, userId]);
+
+      if (accountGroupResult.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'MT5 account not found or does not belong to you'
+        });
+      }
+
+      const groupLimits = accountGroupResult.rows[0];
+      const minDeposit = parseFloat(groupLimits.minimum_deposit || 0);
+      const maxDeposit = groupLimits.maximum_deposit ? parseFloat(groupLimits.maximum_deposit) : null;
+      
+      // Get current account balance
+      const accountBalanceResult = await pool.query(
+        'SELECT balance FROM trading_accounts WHERE account_number = $1 AND user_id = $2',
+        [mt5AccountId, userId]
+      );
+      const currentBalance = accountBalanceResult.rows.length > 0 
+        ? parseFloat(accountBalanceResult.rows[0].balance || 0) 
+        : 0;
+
+      // Validate against limits
+      if (depositAmount < minDeposit) {
+        return res.status(400).json({
+          success: false,
+          error: `Minimum deposit amount is ${currency} ${minDeposit.toFixed(2)}`
+        });
+      }
+
+      // Check if deposit + current balance exceeds maximum deposit limit
+      if (maxDeposit !== null) {
+        const totalAfterDeposit = currentBalance + depositAmount;
+        if (totalAfterDeposit > maxDeposit) {
+          const maxAllowedDeposit = Math.max(0, maxDeposit - currentBalance);
+          return res.status(400).json({
+            success: false,
+            error: `Maximum deposit is ${currency} ${maxAllowedDeposit.toFixed(2)} (account balance + deposit cannot exceed ${currency} ${maxDeposit.toFixed(2)})`
+          });
+        }
+      }
+    }
+
     const proofPath = req.file ? `/uploads/deposit-proofs/${req.file.filename}` : null;
 
     const depositToType = deposit_to === 'mt5' ? 'mt5' : 'wallet';
@@ -277,7 +372,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       [
         userId,
         gateway_id,
-        parseFloat(amount),
+        depositAmount,
         currency,
         converted_amount ? parseFloat(converted_amount) : null,
         converted_currency || null,

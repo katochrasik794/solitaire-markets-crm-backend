@@ -164,17 +164,92 @@ router.get('/', authenticate, async (req, res, next) => {
     ];
 
     const optionalCols = [];
-    if (existingCols.has('mt5_group_name')) optionalCols.push('mt5_group_name');
+    const hasMt5GroupName = existingCols.has('mt5_group_name');
+    const hasMt5GroupId = existingCols.has('mt5_group_id');
+    const hasGroup = existingCols.has('group');
+    
+    if (hasMt5GroupName) optionalCols.push('mt5_group_name');
+    if (hasMt5GroupId) optionalCols.push('mt5_group_id');
+    if (hasGroup) optionalCols.push('group');
 
     const selectCols = baseCols.concat(optionalCols);
 
-    const result = await pool.query(
-      `SELECT ${selectCols.join(', ')}
-       FROM trading_accounts
-       WHERE user_id = $1
-       ORDER BY created_at DESC`,
-      [req.user.id]
-    );
+    // Build query with LEFT JOIN to mt5_groups to get limits
+    // Try to join using ALL possible columns (OR conditions)
+    const joinConditions = [];
+    if (hasMt5GroupId) {
+      // Try ID first (most reliable)
+      joinConditions.push('ta.mt5_group_id = mg.id');
+    }
+    if (hasMt5GroupName) {
+      // Try exact match
+      joinConditions.push('ta.mt5_group_name = mg.group_name');
+      // Try case-insensitive match
+      joinConditions.push('LOWER(ta.mt5_group_name) = LOWER(mg.group_name)');
+    }
+    if (hasGroup) {
+      joinConditions.push('ta.group = mg.group_name');
+      // Try case-insensitive match
+      joinConditions.push('LOWER(ta.group) = LOWER(mg.group_name)');
+    }
+    // Also try matching account_type with dedicated_name (fallback)
+    if (existingCols.has('account_type')) {
+      joinConditions.push(`LOWER(ta.account_type) = LOWER(mg.dedicated_name)`);
+      // Try matching "Pro" with group names containing "pro"
+      joinConditions.push(`LOWER(ta.account_type) = LOWER(SUBSTRING(mg.group_name FROM '[^\\\\]+$'))`);
+    }
+
+    // Build query with LEFT JOIN to mt5_groups to get limits
+    let query = `
+      SELECT 
+        ${selectCols.map(col => `ta.${col}`).join(', ')},
+    `;
+
+    // Only add JOIN if we have a way to join, otherwise use NULL for limits
+    if (joinConditions.length > 0) {
+      const joinCondition = joinConditions.join(' OR ');
+      query += `
+        COALESCE(mg.minimum_deposit, 0) as minimum_deposit,
+        mg.maximum_deposit,
+        COALESCE(mg.minimum_withdrawal, 0) as minimum_withdrawal,
+        mg.maximum_withdrawal
+      FROM trading_accounts ta
+      LEFT JOIN mt5_groups mg ON (${joinCondition}) AND mg.is_active = TRUE
+      `;
+    } else {
+      query += `
+        0::DECIMAL(15,2) as minimum_deposit,
+        NULL::DECIMAL(15,2) as maximum_deposit,
+        0::DECIMAL(15,2) as minimum_withdrawal,
+        NULL::DECIMAL(15,2) as maximum_withdrawal
+      FROM trading_accounts ta
+      `;
+    }
+
+    query += `
+      WHERE ta.user_id = $1
+      ORDER BY ta.created_at DESC
+    `;
+
+    console.log('Accounts query:', query);
+    const result = await pool.query(query, [req.user.id]);
+    
+    // Debug: Log all accounts with their group info and limits
+    console.log('=== ACCOUNTS DEBUG ===');
+    result.rows.forEach((acc, idx) => {
+      console.log(`Account ${idx + 1}:`, {
+        account_number: acc.account_number,
+        account_type: acc.account_type,
+        mt5_group_name: acc.mt5_group_name,
+        mt5_group_id: acc.mt5_group_id,
+        group: acc.group,
+        minimum_deposit: acc.minimum_deposit,
+        maximum_deposit: acc.maximum_deposit,
+        minimum_withdrawal: acc.minimum_withdrawal,
+        maximum_withdrawal: acc.maximum_withdrawal
+      });
+    });
+    console.log('=== END DEBUG ===');
 
     res.json({
       success: true,

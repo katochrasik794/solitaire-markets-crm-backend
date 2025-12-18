@@ -60,14 +60,45 @@ router.post('/', authenticate, async (req, res) => {
             });
         }
 
-        // Check withdrawal limits
-        const MIN_AMOUNT = 10;
-        const MAX_AMOUNT = 20000;
-        if (withdrawalAmount < MIN_AMOUNT || withdrawalAmount > MAX_AMOUNT) {
-            return res.status(400).json({
-                ok: false,
-                error: `Withdrawal amount must be between $${MIN_AMOUNT} and $${MAX_AMOUNT}`
-            });
+        // Validate withdrawal limits if withdrawing from MT5 account
+        if (mt5AccountId) {
+            // Get account's group limits
+            const accountGroupResult = await pool.query(
+                `SELECT 
+                  ta.account_number,
+                  mg.minimum_withdrawal,
+                  mg.maximum_withdrawal
+                FROM trading_accounts ta
+                LEFT JOIN mt5_groups mg ON ta.mt5_group_name = mg.group_name AND mg.is_active = TRUE
+                WHERE ta.account_number = $1 AND ta.user_id = $2 AND ta.platform = 'MT5'`,
+                [mt5AccountId, userId]
+            );
+
+            if (accountGroupResult.rows.length === 0) {
+                return res.status(404).json({
+                    ok: false,
+                    error: 'MT5 account not found or does not belong to you'
+                });
+            }
+
+            const groupLimits = accountGroupResult.rows[0];
+            const minWithdrawal = parseFloat(groupLimits.minimum_withdrawal || 0);
+            const maxWithdrawal = groupLimits.maximum_withdrawal ? parseFloat(groupLimits.maximum_withdrawal) : null;
+
+            // Validate against limits
+            if (withdrawalAmount < minWithdrawal) {
+                return res.status(400).json({
+                    ok: false,
+                    error: `Minimum withdrawal amount is ${currency} ${minWithdrawal.toFixed(2)}`
+                });
+            }
+
+            if (maxWithdrawal !== null && withdrawalAmount > maxWithdrawal) {
+                return res.status(400).json({
+                    ok: false,
+                    error: `Maximum withdrawal amount is ${currency} ${maxWithdrawal.toFixed(2)}`
+                });
+            }
         }
 
         // Verify user password from users table (for confirmation only, not stored in withdrawals)

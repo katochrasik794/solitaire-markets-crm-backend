@@ -6,23 +6,37 @@ import { createAccessToken } from '../services/sumsub.service.js';
 const router = express.Router();
 
 // GET /api/kyc/status
-// Get KYC status and data
+// Get KYC status and data from kyc_verifications table
 router.get('/status', authenticate, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT kyc_status as status, sumsub_applicant_id FROM users WHERE id = $1',
+    // First, get user's sumsub_applicant_id
+    const userResult = await pool.query(
+      'SELECT sumsub_applicant_id FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    const sumsubApplicantId = userResult.rows[0]?.sumsub_applicant_id || null;
+
+    // Get latest KYC status from kyc_verifications table
+    const kycResult = await pool.query(
+      `SELECT status 
+       FROM kyc_verifications 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 1`,
       [req.user.id]
     );
 
-    const data = result.rows[0];
-    // If status is null, default to unverified
-    const status = data?.status || 'unverified';
+    // If no KYC record exists, default to unverified
+    // Normalize to lowercase for consistency
+    const status = kycResult.rows[0]?.status 
+      ? String(kycResult.rows[0].status).toLowerCase() 
+      : 'unverified';
 
     res.json({
       success: true,
       data: {
         status,
-        sumsub_applicant_id: data?.sumsub_applicant_id
+        sumsub_applicant_id: sumsubApplicantId
       }
     });
   } catch (error) {
