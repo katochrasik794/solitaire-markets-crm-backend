@@ -231,25 +231,7 @@ router.get('/', authenticate, async (req, res, next) => {
       ORDER BY ta.created_at DESC
     `;
 
-    console.log('Accounts query:', query);
     const result = await pool.query(query, [req.user.id]);
-    
-    // Debug: Log all accounts with their group info and limits
-    console.log('=== ACCOUNTS DEBUG ===');
-    result.rows.forEach((acc, idx) => {
-      console.log(`Account ${idx + 1}:`, {
-        account_number: acc.account_number,
-        account_type: acc.account_type,
-        mt5_group_name: acc.mt5_group_name,
-        mt5_group_id: acc.mt5_group_id,
-        group: acc.group,
-        minimum_deposit: acc.minimum_deposit,
-        maximum_deposit: acc.maximum_deposit,
-        minimum_withdrawal: acc.minimum_withdrawal,
-        maximum_withdrawal: acc.maximum_withdrawal
-      });
-    });
-    console.log('=== END DEBUG ===');
 
     res.json({
       success: true,
