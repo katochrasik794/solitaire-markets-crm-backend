@@ -1233,5 +1233,298 @@ router.get('/transaction-history/download/excel', authenticate, async (req, res)
   }
 });
 
+/**
+ * GET /api/reports/trading-performance
+ * Get trading performance summary with real-time data
+ */
+router.get('/trading-performance', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { accountNumber, timeframe = '365' } = req.query;
+    
+    // Calculate date range based on timeframe
+    const days = parseInt(timeframe) || 365;
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+    
+    // Get real accounts only (not demo)
+    let accountsQuery = `
+      SELECT account_number, balance, equity, credit, is_demo
+      FROM trading_accounts
+      WHERE user_id = $1 AND platform = 'MT5' AND is_demo = FALSE
+    `;
+    let accountsParams = [userId];
+    
+    if (accountNumber && accountNumber !== 'all') {
+      accountsQuery += ' AND account_number = $2';
+      accountsParams.push(accountNumber);
+    }
+    
+    const accountsResult = await pool.query(accountsQuery, accountsParams);
+    const realAccounts = accountsResult.rows;
+    const accountNumbers = realAccounts.map(acc => acc.account_number);
+    
+    if (accountNumbers.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          summary: {
+            netProfit: 0,
+            profit: 0,
+            loss: 0,
+            unrealisedPL: 0,
+            closedOrders: 0,
+            profitable: 0,
+            unprofitable: 0,
+            tradingVolume: 0,
+            lifetimeVolume: 0,
+            equity: 0
+          },
+          chartData: {
+            netProfit: { labels: [], profit: [], loss: [] },
+            closedOrders: { labels: [], profitable: [], unprofitable: [] },
+            tradingVolume: { labels: [], volumes: [] },
+            equity: { labels: [], values: [] }
+          }
+        }
+      });
+    }
+    
+    // Get approved deposits for MT5 accounts
+    let depositsQuery = `
+      SELECT 
+        amount,
+        currency,
+        mt5_account_id,
+        created_at
+      FROM deposit_requests
+      WHERE user_id = $1 
+        AND status = 'approved'
+        AND deposit_to_type = 'mt5'
+        AND created_at >= $2
+    `;
+    let depositsParams = [userId, startDate];
+    
+    if (accountNumber && accountNumber !== 'all') {
+      depositsQuery += ' AND mt5_account_id = $3';
+      depositsParams.push(accountNumber);
+    }
+    
+    const depositsResult = await pool.query(depositsQuery, depositsParams);
+    
+    // Get approved withdrawals from MT5 accounts
+    let withdrawalsQuery = `
+      SELECT 
+        amount,
+        currency,
+        mt5_account_id,
+        created_at
+      FROM withdrawals
+      WHERE user_id = $1 
+        AND status = 'approved'
+        AND mt5_account_id IS NOT NULL
+        AND created_at >= $2
+    `;
+    let withdrawalsParams = [userId, startDate];
+    
+    if (accountNumber && accountNumber !== 'all') {
+      withdrawalsQuery += ' AND mt5_account_id = $3';
+      withdrawalsParams.push(accountNumber);
+    }
+    
+    const withdrawalsResult = await pool.query(withdrawalsQuery, withdrawalsParams);
+    
+    // Calculate totals
+    const totalDeposits = depositsResult.rows.reduce((sum, d) => sum + parseFloat(d.amount || 0), 0);
+    const totalWithdrawals = withdrawalsResult.rows.reduce((sum, w) => sum + parseFloat(w.amount || 0), 0);
+    
+    // Get current equity from accounts
+    const totalEquity = realAccounts.reduce((sum, acc) => {
+      const equity = parseFloat(acc.equity || 0);
+      const balance = parseFloat(acc.balance || 0);
+      const credit = parseFloat(acc.credit || 0);
+      return sum + equity + balance + credit;
+    }, 0);
+    
+    // Calculate net profit: Current equity - (Total Deposits - Total Withdrawals)
+    // This represents the profit/loss from trading
+    // Example: Deposited $1000, Withdrew $200, Current Equity $900
+    // Net Profit = $900 - ($1000 - $200) = $900 - $800 = $100 (profit)
+    const netProfit = totalEquity - (totalDeposits - totalWithdrawals);
+    
+    // For profit/loss breakdown:
+    // Profit = positive net profit
+    // Loss = negative net profit (as positive number)
+    const profit = netProfit > 0 ? netProfit : 0;
+    const loss = netProfit < 0 ? Math.abs(netProfit) : 0;
+    
+    // Get monthly data for charts
+    const months = [];
+    const monthlyData = {};
+    
+    // Generate month labels (last 12 months or based on timeframe)
+    const numMonths = Math.ceil(days / 30);
+    for (let i = numMonths - 1; i >= 0; i--) {
+      const date = new Date();
+      date.setMonth(date.getMonth() - i);
+      const monthKey = date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+      const monthShort = date.toLocaleDateString('en-US', { month: 'short' });
+      months.push(monthShort);
+      monthlyData[monthKey] = {
+        deposits: 0,
+        withdrawals: 0,
+        net: 0
+      };
+    }
+    
+    // Aggregate deposits by month
+    depositsResult.rows.forEach(deposit => {
+      const date = new Date(deposit.created_at);
+      const monthKey = date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+      if (monthlyData[monthKey]) {
+        monthlyData[monthKey].deposits += parseFloat(deposit.amount || 0);
+      }
+    });
+    
+    // Aggregate withdrawals by month
+    withdrawalsResult.rows.forEach(withdrawal => {
+      const date = new Date(withdrawal.created_at);
+      const monthKey = date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+      if (monthlyData[monthKey]) {
+        monthlyData[monthKey].withdrawals += parseFloat(withdrawal.amount || 0);
+      }
+    });
+    
+    // Calculate net for each month (deposits - withdrawals)
+    Object.keys(monthlyData).forEach(key => {
+      monthlyData[key].net = monthlyData[key].deposits - monthlyData[key].withdrawals;
+    });
+    
+    // Build chart data arrays matching month labels
+    // For net profit chart, we show monthly cash flow (deposits - withdrawals)
+    // Positive = more deposits than withdrawals, Negative = more withdrawals than deposits
+    const monthKeys = Object.keys(monthlyData);
+    const netProfitData = {
+      labels: months,
+      profit: months.map((month) => {
+        // Find matching month key (handle year differences)
+        const matchingKey = monthKeys.find(key => {
+          const keyMonth = key.split(' ')[0];
+          return keyMonth === month;
+        });
+        if (matchingKey && monthlyData[matchingKey]) {
+          const net = monthlyData[matchingKey].net;
+          return net > 0 ? net : 0;
+        }
+        return 0;
+      }),
+      loss: months.map((month) => {
+        const matchingKey = monthKeys.find(key => {
+          const keyMonth = key.split(' ')[0];
+          return keyMonth === month;
+        });
+        if (matchingKey && monthlyData[matchingKey]) {
+          const net = monthlyData[matchingKey].net;
+          return net < 0 ? Math.abs(net) : 0;
+        }
+        return 0;
+      })
+    };
+    
+    // For closed orders, we don't have trade data, so we'll show 0
+    // This would need MT5 API integration to get actual trade history
+    const closedOrdersData = {
+      labels: months,
+      profitable: months.map(() => 0),
+      unprofitable: months.map(() => 0)
+    };
+    
+    // Trading volume - use deposits + withdrawals as proxy
+    const tradingVolumeData = {
+      labels: months,
+      volumes: months.map((month) => {
+        const matchingKey = monthKeys.find(key => {
+          const keyMonth = key.split(' ')[0];
+          return keyMonth === month;
+        });
+        if (matchingKey && monthlyData[matchingKey]) {
+          return monthlyData[matchingKey].deposits + monthlyData[matchingKey].withdrawals;
+        }
+        return 0;
+      })
+    };
+    
+    // Equity data - for now show current equity for all months
+    // In future, could fetch historical equity from MT5 API
+    const equityData = {
+      labels: months,
+      values: months.map(() => totalEquity)
+    };
+    
+    // Get lifetime totals (all time, not just timeframe)
+    let lifetimeDepositsQuery = `
+      SELECT COALESCE(SUM(amount), 0) as total
+      FROM deposit_requests
+      WHERE user_id = $1 AND status = 'approved' AND deposit_to_type = 'mt5'
+    `;
+    let lifetimeDepositsParams = [userId];
+    
+    if (accountNumber && accountNumber !== 'all') {
+      lifetimeDepositsQuery += ' AND mt5_account_id = $2';
+      lifetimeDepositsParams.push(accountNumber);
+    }
+    
+    const lifetimeDepositsResult = await pool.query(lifetimeDepositsQuery, lifetimeDepositsParams);
+    
+    // Get lifetime withdrawals for volume calculation
+    let lifetimeWithdrawalsQuery = `
+      SELECT COALESCE(SUM(amount), 0) as total
+      FROM withdrawals
+      WHERE user_id = $1 AND status = 'approved' AND mt5_account_id IS NOT NULL
+    `;
+    let lifetimeWithdrawalsParams = [userId];
+    
+    if (accountNumber && accountNumber !== 'all') {
+      lifetimeWithdrawalsQuery += ' AND mt5_account_id = $2';
+      lifetimeWithdrawalsParams.push(accountNumber);
+    }
+    
+    const lifetimeWithdrawalsResult = await pool.query(lifetimeWithdrawalsQuery, lifetimeWithdrawalsParams);
+    const lifetimeDeposits = parseFloat(lifetimeDepositsResult.rows[0]?.total || 0);
+    const lifetimeWithdrawals = parseFloat(lifetimeWithdrawalsResult.rows[0]?.total || 0);
+    const lifetimeVolume = lifetimeDeposits + lifetimeWithdrawals;
+    
+    res.json({
+      success: true,
+      data: {
+        summary: {
+          netProfit: parseFloat(netProfit.toFixed(2)),
+          profit: parseFloat(profit.toFixed(2)),
+          loss: parseFloat(loss.toFixed(2)),
+          unrealisedPL: 0, // Would need open positions data
+          closedOrders: 0, // Would need trade history
+          profitable: 0,
+          unprofitable: 0,
+          tradingVolume: parseFloat((totalDeposits + totalWithdrawals).toFixed(2)),
+          lifetimeVolume: parseFloat(lifetimeVolume.toFixed(2)),
+          equity: parseFloat(totalEquity.toFixed(2))
+        },
+        chartData: {
+          netProfit: netProfitData,
+          closedOrders: closedOrdersData,
+          tradingVolume: tradingVolumeData,
+          equity: equityData
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get trading performance error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to fetch trading performance'
+    });
+  }
+});
+
 export default router;
 
