@@ -599,7 +599,7 @@ router.post('/create', authenticate, async (req, res, next) => {
       [newId]
     );
 
-    const accountData = {
+    const responseData = {
       ...accountResult.rows[0],
       // Include non-sensitive account info from MT5 API response
       mt5Response: mt5Login
@@ -609,7 +609,7 @@ router.post('/create', authenticate, async (req, res, next) => {
     res.json({
       success: true,
       message: 'Account created successfully',
-      data: accountData
+      data: responseData
     });
     
     // Log user action
@@ -626,7 +626,7 @@ router.post('/create', authenticate, async (req, res, next) => {
         req,
         res,
         beforeData: null,
-        afterData: accountData
+        afterData: responseData
       });
     });
   } catch (error) {
