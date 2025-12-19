@@ -3,6 +3,7 @@ import pool from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
 import bcrypt from 'bcrypt';
 import * as mt5Service from '../services/mt5.service.js';
+import { logUserAction } from '../services/logging.service.js';
 
 const router = express.Router();
 
@@ -224,10 +225,7 @@ router.post('/', authenticate, async (req, res) => {
 
         const withdrawal = insertResult.rows[0];
 
-        // TODO: Send email notification to user
-        // TODO: Notify admin (optional)
-
-        res.status(201).json({
+        const responseData = {
             ok: true,
             message: 'Withdrawal request submitted successfully',
             withdrawal: {
@@ -238,6 +236,29 @@ router.post('/', authenticate, async (req, res) => {
                 status: withdrawal.status,
                 createdAt: withdrawal.created_at
             }
+        };
+
+        // TODO: Send email notification to user
+        // TODO: Notify admin (optional)
+
+        res.status(201).json(responseData);
+        
+        // Log user action
+        setImmediate(async () => {
+            await logUserAction({
+                userId: req.user.id,
+                userEmail: req.user.email,
+                actionType: 'withdrawal_request',
+                actionCategory: 'withdrawal',
+                targetType: 'withdrawal',
+                targetId: withdrawal.id,
+                targetIdentifier: `Withdrawal #${withdrawal.id}`,
+                description: `Requested withdrawal of $${withdrawal.amount} ${withdrawal.currency} via ${withdrawal.method}`,
+                req,
+                res,
+                beforeData: null,
+                afterData: responseData.withdrawal
+            });
         });
     } catch (error) {
         console.error('Create withdrawal error:', error);

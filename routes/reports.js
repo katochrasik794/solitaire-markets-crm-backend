@@ -3,6 +3,7 @@ import pool from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
 import PDFDocument from 'pdfkit';
 import ExcelJS from 'exceljs';
+import { logUserAction } from '../services/logging.service.js';
 
 const router = express.Router();
 

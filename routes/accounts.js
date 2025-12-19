@@ -4,6 +4,7 @@ import { authenticate } from '../middleware/auth.js';
 import { comparePassword, encryptPassword, generateRandomPassword } from '../utils/helpers.js';
 import * as mt5Service from '../services/mt5.service.js';
 import dotenv from 'dotenv';
+import { logUserAction } from '../services/logging.service.js';
 
 dotenv.config();
 
@@ -598,15 +599,35 @@ router.post('/create', authenticate, async (req, res, next) => {
       [newId]
     );
 
+    const accountData = {
+      ...accountResult.rows[0],
+      // Include non-sensitive account info from MT5 API response
+      mt5Response: mt5Login
+    };
+    
     // Return response with account details (don't include encrypted passwords)
     res.json({
       success: true,
       message: 'Account created successfully',
-      data: {
-        ...accountResult.rows[0],
-        // Include non-sensitive account info from MT5 API response
-        mt5Response: mt5Login
-      }
+      data: accountData
+    });
+    
+    // Log user action
+    setImmediate(async () => {
+      await logUserAction({
+        userId: req.user.id,
+        userEmail: req.user.email,
+        actionType: 'mt5_account_create',
+        actionCategory: 'mt5',
+        targetType: 'mt5_account',
+        targetId: newId,
+        targetIdentifier: accountResult.rows[0].account_number?.toString() || mt5Login?.toString(),
+        description: `Created MT5 account: ${accountResult.rows[0].account_number || mt5Login} (Group: ${mt5Group.group_name}, Leverage: ${finalLeverage})`,
+        req,
+        res,
+        beforeData: null,
+        afterData: accountData
+      });
     });
   } catch (error) {
     console.error('Create account error:', error);

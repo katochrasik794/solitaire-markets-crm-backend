@@ -13,6 +13,8 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import crypto from 'crypto';
 import { sendOperationEmail, sendEmail } from '../services/email.js';
+import { logAdminAction } from '../services/logging.service.js';
+import { captureResponseData, logAdminActionMiddleware } from '../middleware/logging.middleware.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1014,7 +1016,7 @@ router.post('/users', authenticateAdmin, async (req, res, next) => {
       }
     }
 
-    res.status(201).json({
+    const responseData = {
       ok: true,
       user: {
         id: user.id,
@@ -1032,6 +1034,26 @@ router.post('/users', authenticateAdmin, async (req, res, next) => {
         status: user.status || 'active',
         createdAt: user.created_at
       }
+    };
+    
+    res.status(201).json(responseData);
+    
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'user_create',
+        actionCategory: 'user_management',
+        targetType: 'user',
+        targetId: user.id,
+        targetIdentifier: user.email,
+        description: `Created user: ${user.email}`,
+        req,
+        res,
+        beforeData: null,
+        afterData: responseData.user
+      });
     });
   } catch (error) {
     console.error('Admin create user error:', error);
@@ -1416,7 +1438,14 @@ router.patch('/users/:id', authenticateAdmin, async (req, res, next) => {
         ? `${row.phone_code || ''} ${row.phone_number || ''}`.trim()
         : null;
 
-    res.json({
+    // Get before data for logging
+    const beforeResult = await pool.query(
+      'SELECT id, email, first_name, last_name, phone_code, phone_number, country, status, is_email_verified FROM users WHERE id = $1',
+      [userId]
+    );
+    const beforeData = beforeResult.rows[0] || null;
+    
+    const responseData = {
       ok: true,
       user: {
         id: row.id,
@@ -1429,6 +1458,26 @@ router.patch('/users/:id', authenticateAdmin, async (req, res, next) => {
         createdAt: row.created_at,
         updatedAt: row.updated_at
       }
+    };
+    
+    res.json(responseData);
+    
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'user_update',
+        actionCategory: 'user_management',
+        targetType: 'user',
+        targetId: row.id,
+        targetIdentifier: row.email,
+        description: `Updated user: ${row.email}`,
+        req,
+        res,
+        beforeData,
+        afterData: responseData.user
+      });
     });
   } catch (error) {
     console.error('Admin PATCH /users/:id error:', error);
@@ -1456,15 +1505,47 @@ router.patch('/users/:id/email-verify', authenticateAdmin, async (req, res, next
       return res.status(400).json({ ok: false, error: 'verified must be a boolean' });
     }
 
+    // Get before data
+    const beforeResult = await pool.query(
+      'SELECT id, email, is_email_verified FROM users WHERE id = $1',
+      [userId]
+    );
+    const beforeData = beforeResult.rows[0] || null;
+    
     // Update email verification status
     await pool.query(
       'UPDATE users SET is_email_verified = $1 WHERE id = $2',
       [verified, userId]
     );
 
+    // Get after data
+    const afterResult = await pool.query(
+      'SELECT id, email, is_email_verified FROM users WHERE id = $1',
+      [userId]
+    );
+    const afterData = afterResult.rows[0] || null;
+
     res.json({
       ok: true,
       message: `Email ${verified ? 'verified' : 'unverified'} successfully`
+    });
+    
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: verified ? 'user_verify' : 'user_unverify',
+        actionCategory: 'user_management',
+        targetType: 'user',
+        targetId: userId,
+        targetIdentifier: beforeData?.email,
+        description: `${verified ? 'Verified' : 'Unverified'} email for user: ${beforeData?.email || userId}`,
+        req,
+        res,
+        beforeData,
+        afterData
+      });
     });
   } catch (error) {
     console.error('Toggle email verification error:', error);
@@ -1548,9 +1629,44 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
       }
     }
 
+    // Get user email for logging
+    const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [userId]);
+    const userEmail = userResult.rows[0]?.email || null;
+    
+    // Get before/after KYC data
+    const kycBefore = await pool.query(
+      'SELECT status FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [userId]
+    );
+    const beforeData = kycBefore.rows[0] || { status: null };
+    
+    const kycAfter = await pool.query(
+      'SELECT status FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [userId]
+    );
+    const afterData = kycAfter.rows[0] || { status: verified ? 'approved' : 'pending' };
+
     res.json({
       ok: true,
       message: `KYC ${verified ? 'verified' : 'unverified'} successfully`
+    });
+    
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: verified ? 'kyc_approve' : 'kyc_reject',
+        actionCategory: 'kyc_management',
+        targetType: 'user',
+        targetId: userId,
+        targetIdentifier: userEmail,
+        description: `${verified ? 'Approved' : 'Rejected'} KYC for user: ${userEmail || userId}`,
+        req,
+        res,
+        beforeData,
+        afterData
+      });
     });
   } catch (error) {
     console.error('Toggle KYC verification error:', error);
@@ -4124,10 +4240,30 @@ router.post('/mt5/assign', authenticateAdmin, async (req, res, next) => {
       ]
     ).catch(err => console.error('Failed to log activity (non-fatal):', err));
 
-    res.json({
+    const responseData = {
       ok: true,
       message: 'MT5 account assigned successfully',
       account: tradingAccount
+    };
+
+    res.json(responseData);
+    
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'mt5_account_assign',
+        actionCategory: 'mt5_management',
+        targetType: 'mt5_account',
+        targetId: parseInt(accountId),
+        targetIdentifier: accountId.toString(),
+        description: `Assigned MT5 account ${accountId} to user: ${user.email}`,
+        req,
+        res,
+        beforeData: existingAssignment.rows[0] || null,
+        afterData: tradingAccount
+      });
     });
   } catch (error) {
     console.error('Assign MT5 account error:', error);
@@ -5216,9 +5352,46 @@ router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
         });
     }
 
+    // Get user email for logging
+    const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [deposit.user_id]);
+    const userEmail = userResult.rows[0]?.email || null;
+    
+    // Get before data
+    const beforeData = {
+      id: deposit.id,
+      status: 'pending',
+      amount: deposit.amount,
+      currency: deposit.currency
+    };
+    
+    // Get after data
+    const afterResult = await pool.query(
+      'SELECT id, status, amount, currency FROM deposit_requests WHERE id = $1',
+      [id]
+    );
+    const afterData = afterResult.rows[0] || deposit;
+
     res.json({
       ok: true,
       message: 'Deposit approved successfully'
+    });
+    
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'deposit_approve',
+        actionCategory: 'deposit_management',
+        targetType: 'deposit',
+        targetId: parseInt(id),
+        targetIdentifier: `Deposit #${id}`,
+        description: `Approved deposit #${id} of $${deposit.amount} for user: ${userEmail || deposit.user_id}`,
+        req,
+        res,
+        beforeData,
+        afterData
+      });
     });
   } catch (error) {
     console.error('Approve deposit error:', error);
@@ -5238,6 +5411,23 @@ router.post('/deposits/:id/reject', authenticateAdmin, async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
 
+    // Get before data
+    const beforeResult = await pool.query(
+      'SELECT * FROM deposit_requests WHERE id = $1',
+      [id]
+    );
+    if (beforeResult.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Deposit request not found'
+      });
+    }
+    const beforeData = beforeResult.rows[0];
+    
+    // Get user email
+    const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [beforeData.user_id]);
+    const userEmail = userResult.rows[0]?.email || null;
+
     const result = await pool.query(
       `UPDATE deposit_requests 
        SET status = 'rejected', admin_notes = $1, updated_at = NOW()
@@ -5253,9 +5443,29 @@ router.post('/deposits/:id/reject', authenticateAdmin, async (req, res) => {
       });
     }
 
+    const afterData = result.rows[0];
+
     res.json({
       ok: true,
       message: 'Deposit rejected successfully'
+    });
+    
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'deposit_reject',
+        actionCategory: 'deposit_management',
+        targetType: 'deposit',
+        targetId: parseInt(id),
+        targetIdentifier: `Deposit #${id}`,
+        description: `Rejected deposit #${id} of $${beforeData.amount} for user: ${userEmail || beforeData.user_id}. Reason: ${reason || 'No reason provided'}`,
+        req,
+        res,
+        beforeData,
+        afterData
+      });
     });
   } catch (error) {
     console.error('Reject deposit error:', error);
@@ -5814,9 +6024,38 @@ router.post('/withdrawals/:id/approve', authenticateAdmin, async (req, res) => {
 
     // TODO: Send email notification to user
 
+    // Get user email for logging
+    const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [withdrawal.user_id]);
+    const userEmail = userResult.rows[0]?.email || null;
+    
+    // Get after data
+    const afterResult = await pool.query(
+      'SELECT * FROM withdrawals WHERE id = $1',
+      [id]
+    );
+    const afterData = afterResult.rows[0] || withdrawal;
+
     res.json({
       ok: true,
       message: 'Withdrawal approved successfully'
+    });
+    
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'withdrawal_approve',
+        actionCategory: 'withdrawal_management',
+        targetType: 'withdrawal',
+        targetId: parseInt(id),
+        targetIdentifier: `Withdrawal #${id}`,
+        description: `Approved withdrawal #${id} of $${withdrawal.amount} for user: ${userEmail || withdrawal.user_id}. External TX: ${externalTransactionId.trim()}`,
+        req,
+        res,
+        beforeData: withdrawal,
+        afterData
+      });
     });
   } catch (error) {
     console.error('Approve withdrawal error:', error);
@@ -5888,9 +6127,38 @@ router.post('/withdrawals/:id/reject', authenticateAdmin, async (req, res) => {
 
     // TODO: Send email notification to user
 
+    // Get user email for logging
+    const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [withdrawal.user_id]);
+    const userEmail = userResult.rows[0]?.email || null;
+    
+    // Get after data
+    const afterResult = await pool.query(
+      'SELECT * FROM withdrawals WHERE id = $1',
+      [id]
+    );
+    const afterData = afterResult.rows[0] || withdrawal;
+
     res.json({
       ok: true,
       message: 'Withdrawal rejected successfully'
+    });
+    
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'withdrawal_reject',
+        actionCategory: 'withdrawal_management',
+        targetType: 'withdrawal',
+        targetId: parseInt(id),
+        targetIdentifier: `Withdrawal #${id}`,
+        description: `Rejected withdrawal #${id} of $${withdrawal.amount} for user: ${userEmail || withdrawal.user_id}. Reason: ${reason || 'No reason provided'}`,
+        req,
+        res,
+        beforeData: withdrawal,
+        afterData
+      });
     });
   } catch (error) {
     console.error('Reject withdrawal error:', error);
@@ -6646,6 +6914,496 @@ router.post('/email-templates/preview', authenticateAdmin, async (req, res) => {
   } catch (error) {
     console.error('Preview template error:', error);
     res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+/**
+ * ============================================
+ * Admin and User Logs API Endpoints
+ * ============================================
+ */
+
+/**
+ * GET /api/admin/logs/admin
+ * List all admin logs with filters
+ */
+router.get('/logs/admin', authenticateAdmin, async (req, res, next) => {
+  try {
+    const {
+      adminId,
+      adminEmail,
+      actionType,
+      actionCategory,
+      targetType,
+      targetId,
+      startDate,
+      endDate,
+      limit = 100,
+      offset = 0,
+      search
+    } = req.query;
+
+    let whereConditions = [];
+    let params = [];
+    let paramIndex = 1;
+
+    if (adminId) {
+      whereConditions.push(`admin_id = $${paramIndex}`);
+      params.push(parseInt(adminId));
+      paramIndex++;
+    }
+
+    if (adminEmail) {
+      whereConditions.push(`admin_email ILIKE $${paramIndex}`);
+      params.push(`%${adminEmail}%`);
+      paramIndex++;
+    }
+
+    if (actionType) {
+      whereConditions.push(`action_type = $${paramIndex}`);
+      params.push(actionType);
+      paramIndex++;
+    }
+
+    if (actionCategory) {
+      whereConditions.push(`action_category = $${paramIndex}`);
+      params.push(actionCategory);
+      paramIndex++;
+    }
+
+    if (targetType) {
+      whereConditions.push(`target_type = $${paramIndex}`);
+      params.push(targetType);
+      paramIndex++;
+    }
+
+    if (targetId) {
+      whereConditions.push(`target_id = $${paramIndex}`);
+      params.push(parseInt(targetId));
+      paramIndex++;
+    }
+
+    if (startDate) {
+      whereConditions.push(`created_at >= $${paramIndex}`);
+      params.push(startDate);
+      paramIndex++;
+    }
+
+    if (endDate) {
+      whereConditions.push(`created_at <= $${paramIndex}`);
+      params.push(endDate);
+      paramIndex++;
+    }
+
+    if (search) {
+      whereConditions.push(`(description ILIKE $${paramIndex} OR admin_email ILIKE $${paramIndex} OR target_identifier ILIKE $${paramIndex})`);
+      params.push(`%${search}%`);
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.length > 0 
+      ? `WHERE ${whereConditions.join(' AND ')}`
+      : '';
+
+    // Get total count
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM logs_of_admin ${whereClause}`,
+      params
+    );
+    const total = parseInt(countResult.rows[0].total);
+
+    // Get logs
+    const logsResult = await pool.query(
+      `SELECT 
+        id, admin_id, admin_email, action_type, action_category, target_type, 
+        target_id, target_identifier, description, request_method, request_path,
+        response_status, ip_address, user_agent, created_at
+       FROM logs_of_admin
+       ${whereClause}
+       ORDER BY created_at DESC
+       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+      [...params, parseInt(limit), parseInt(offset)]
+    );
+
+    res.json({
+      ok: true,
+      logs: logsResult.rows,
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (error) {
+    console.error('Get admin logs error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch admin logs'
+    });
+  }
+});
+
+/**
+ * GET /api/admin/logs/admin/:adminId
+ * Get logs for specific admin
+ */
+router.get('/logs/admin/:adminId', authenticateAdmin, async (req, res, next) => {
+  try {
+    const adminId = parseInt(req.params.adminId);
+    const { limit = 100, offset = 0 } = req.query;
+
+    if (isNaN(adminId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid admin ID' });
+    }
+
+    const countResult = await pool.query(
+      'SELECT COUNT(*) as total FROM logs_of_admin WHERE admin_id = $1',
+      [adminId]
+    );
+    const total = parseInt(countResult.rows[0].total);
+
+    const logsResult = await pool.query(
+      `SELECT 
+        id, admin_id, admin_email, action_type, action_category, target_type,
+        target_id, target_identifier, description, request_method, request_path,
+        response_status, ip_address, user_agent, created_at
+       FROM logs_of_admin
+       WHERE admin_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [adminId, parseInt(limit), parseInt(offset)]
+    );
+
+    res.json({
+      ok: true,
+      logs: logsResult.rows,
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (error) {
+    console.error('Get admin logs by admin ID error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch admin logs'
+    });
+  }
+});
+
+/**
+ * GET /api/admin/logs/admin/detail/:logId
+ * Get detailed log entry for admin
+ */
+router.get('/logs/admin/detail/:logId', authenticateAdmin, async (req, res, next) => {
+  try {
+    const logId = parseInt(req.params.logId);
+
+    if (isNaN(logId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid log ID' });
+    }
+
+    const result = await pool.query(
+      `SELECT * FROM logs_of_admin WHERE id = $1`,
+      [logId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Log not found' });
+    }
+
+    const log = result.rows[0];
+    
+    // Parse JSONB fields
+    if (log.request_body) {
+      try {
+        log.request_body = typeof log.request_body === 'string' 
+          ? JSON.parse(log.request_body) 
+          : log.request_body;
+      } catch (e) {
+        log.request_body = null;
+      }
+    }
+    
+    if (log.response_body) {
+      try {
+        log.response_body = typeof log.response_body === 'string'
+          ? JSON.parse(log.response_body)
+          : log.response_body;
+      } catch (e) {
+        log.response_body = null;
+      }
+    }
+    
+    if (log.before_data) {
+      try {
+        log.before_data = typeof log.before_data === 'string'
+          ? JSON.parse(log.before_data)
+          : log.before_data;
+      } catch (e) {
+        log.before_data = null;
+      }
+    }
+    
+    if (log.after_data) {
+      try {
+        log.after_data = typeof log.after_data === 'string'
+          ? JSON.parse(log.after_data)
+          : log.after_data;
+      } catch (e) {
+        log.after_data = null;
+      }
+    }
+
+    res.json({
+      ok: true,
+      log
+    });
+  } catch (error) {
+    console.error('Get admin log detail error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch log detail'
+    });
+  }
+});
+
+/**
+ * GET /api/admin/logs/user
+ * List all user logs with filters
+ */
+router.get('/logs/user', authenticateAdmin, async (req, res, next) => {
+  try {
+    const {
+      userId,
+      userEmail,
+      actionType,
+      actionCategory,
+      targetType,
+      targetId,
+      startDate,
+      endDate,
+      limit = 100,
+      offset = 0,
+      search
+    } = req.query;
+
+    let whereConditions = [];
+    let params = [];
+    let paramIndex = 1;
+
+    if (userId) {
+      whereConditions.push(`user_id = $${paramIndex}`);
+      params.push(parseInt(userId));
+      paramIndex++;
+    }
+
+    if (userEmail) {
+      whereConditions.push(`user_email ILIKE $${paramIndex}`);
+      params.push(`%${userEmail}%`);
+      paramIndex++;
+    }
+
+    if (actionType) {
+      whereConditions.push(`action_type = $${paramIndex}`);
+      params.push(actionType);
+      paramIndex++;
+    }
+
+    if (actionCategory) {
+      whereConditions.push(`action_category = $${paramIndex}`);
+      params.push(actionCategory);
+      paramIndex++;
+    }
+
+    if (targetType) {
+      whereConditions.push(`target_type = $${paramIndex}`);
+      params.push(targetType);
+      paramIndex++;
+    }
+
+    if (targetId) {
+      whereConditions.push(`target_id = $${paramIndex}`);
+      params.push(parseInt(targetId));
+      paramIndex++;
+    }
+
+    if (startDate) {
+      whereConditions.push(`created_at >= $${paramIndex}`);
+      params.push(startDate);
+      paramIndex++;
+    }
+
+    if (endDate) {
+      whereConditions.push(`created_at <= $${paramIndex}`);
+      params.push(endDate);
+      paramIndex++;
+    }
+
+    if (search) {
+      whereConditions.push(`(description ILIKE $${paramIndex} OR user_email ILIKE $${paramIndex} OR target_identifier ILIKE $${paramIndex})`);
+      params.push(`%${search}%`);
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.length > 0
+      ? `WHERE ${whereConditions.join(' AND ')}`
+      : '';
+
+    // Get total count
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM logs_of_users ${whereClause}`,
+      params
+    );
+    const total = parseInt(countResult.rows[0].total);
+
+    // Get logs
+    const logsResult = await pool.query(
+      `SELECT 
+        id, user_id, user_email, action_type, action_category, target_type,
+        target_id, target_identifier, description, request_method, request_path,
+        response_status, ip_address, user_agent, created_at
+       FROM logs_of_users
+       ${whereClause}
+       ORDER BY created_at DESC
+       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+      [...params, parseInt(limit), parseInt(offset)]
+    );
+
+    res.json({
+      ok: true,
+      logs: logsResult.rows,
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (error) {
+    console.error('Get user logs error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch user logs'
+    });
+  }
+});
+
+/**
+ * GET /api/admin/logs/user/:userId
+ * Get logs for specific user
+ */
+router.get('/logs/user/:userId', authenticateAdmin, async (req, res, next) => {
+  try {
+    const userId = parseInt(req.params.userId);
+    const { limit = 100, offset = 0 } = req.query;
+
+    if (isNaN(userId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid user ID' });
+    }
+
+    const countResult = await pool.query(
+      'SELECT COUNT(*) as total FROM logs_of_users WHERE user_id = $1',
+      [userId]
+    );
+    const total = parseInt(countResult.rows[0].total);
+
+    const logsResult = await pool.query(
+      `SELECT 
+        id, user_id, user_email, action_type, action_category, target_type,
+        target_id, target_identifier, description, request_method, request_path,
+        response_status, ip_address, user_agent, created_at
+       FROM logs_of_users
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [userId, parseInt(limit), parseInt(offset)]
+    );
+
+    res.json({
+      ok: true,
+      logs: logsResult.rows,
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (error) {
+    console.error('Get user logs by user ID error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch user logs'
+    });
+  }
+});
+
+/**
+ * GET /api/admin/logs/user/detail/:logId
+ * Get detailed log entry for user
+ */
+router.get('/logs/user/detail/:logId', authenticateAdmin, async (req, res, next) => {
+  try {
+    const logId = parseInt(req.params.logId);
+
+    if (isNaN(logId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid log ID' });
+    }
+
+    const result = await pool.query(
+      `SELECT * FROM logs_of_users WHERE id = $1`,
+      [logId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Log not found' });
+    }
+
+    const log = result.rows[0];
+    
+    // Parse JSONB fields
+    if (log.request_body) {
+      try {
+        log.request_body = typeof log.request_body === 'string'
+          ? JSON.parse(log.request_body)
+          : log.request_body;
+      } catch (e) {
+        log.request_body = null;
+      }
+    }
+    
+    if (log.response_body) {
+      try {
+        log.response_body = typeof log.response_body === 'string'
+          ? JSON.parse(log.response_body)
+          : log.response_body;
+      } catch (e) {
+        log.response_body = null;
+      }
+    }
+    
+    if (log.before_data) {
+      try {
+        log.before_data = typeof log.before_data === 'string'
+          ? JSON.parse(log.before_data)
+          : log.before_data;
+      } catch (e) {
+        log.before_data = null;
+      }
+    }
+    
+    if (log.after_data) {
+      try {
+        log.after_data = typeof log.after_data === 'string'
+          ? JSON.parse(log.after_data)
+          : log.after_data;
+      } catch (e) {
+        log.after_data = null;
+      }
+    }
+
+    res.json({
+      ok: true,
+      log
+    });
+  } catch (error) {
+    console.error('Get user log detail error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch log detail'
+    });
   }
 });
 

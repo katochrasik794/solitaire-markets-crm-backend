@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import * as cregisService from '../services/cregis.service.js';
 import * as mt5Service from '../services/mt5.service.js';
+import { logUserAction } from '../services/logging.service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -400,9 +401,30 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       wallet_id: result.rows[0].wallet_id
     });
 
-    res.json({
+    const deposit = result.rows[0];
+    const responseData = {
       success: true,
-      deposit: result.rows[0]
+      deposit: deposit
+    };
+
+    res.json(responseData);
+    
+    // Log user action
+    setImmediate(async () => {
+      await logUserAction({
+        userId: req.user.id,
+        userEmail: req.user.email,
+        actionType: 'deposit_request',
+        actionCategory: 'deposit',
+        targetType: 'deposit',
+        targetId: deposit.id,
+        targetIdentifier: `Deposit #${deposit.id}`,
+        description: `Requested deposit of $${deposit.amount} ${deposit.currency} to ${deposit.deposit_to_type}`,
+        req,
+        res,
+        beforeData: null,
+        afterData: deposit
+      });
     });
   } catch (error) {
     console.error('Create deposit request error:', error);
