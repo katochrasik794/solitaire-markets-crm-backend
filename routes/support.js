@@ -119,17 +119,58 @@ router.get('/admin/all', authenticateAdmin, async (req, res) => {
     try {
         const { status } = req.query;
         let query = `
-      SELECT t.*, u.email as user_email, u.first_name || ' ' || u.last_name as user_name
+      SELECT t.*, u.email as user_email, u.first_name || ' ' || u.last_name as user_name,
+             ar.name as assigned_role_name,
+             a.username as assigned_to_username, a.email as assigned_to_email
       FROM support_tickets t
       JOIN users u ON t.user_id = u.id
+      LEFT JOIN admin_roles ar ON t.assigned_role_id = ar.id
+      LEFT JOIN admin a ON t.assigned_to = a.id
     `;
         const params = [];
+
+        // Get admin info to check role assignment
+        const adminId = req.admin?.adminId;
+        let adminRole = null;
+        let isSuperAdmin = true;
+        
+        if (adminId) {
+            try {
+                const adminResult = await pool.query(
+                    `SELECT role FROM admin WHERE id = $1`,
+                    [adminId]
+                );
+                if (adminResult.rows.length > 0) {
+                    adminRole = adminResult.rows[0].role;
+                    // Super admin if role is 'admin', 'super_admin', or null/empty
+                    isSuperAdmin = !adminRole || adminRole === 'admin' || adminRole === 'super_admin';
+                }
+            } catch (err) {
+                console.error('Error fetching admin role:', err);
+                // Default to super admin on error
+            }
+        }
 
         if (status && status !== 'all') {
             // Handle 'opened' vs 'open' mismatch just in case
             const searchStatus = status === 'opened' ? 'open' : status;
-            query += ` WHERE LOWER(TRIM(t.status)) = LOWER(TRIM($1))`;
-            params.push(searchStatus);
+            
+            // Filter by status AND role assignment
+            // Super admin sees all tickets, others see only assigned tickets
+            if (isSuperAdmin) {
+                query += ` WHERE LOWER(TRIM(t.status)) = LOWER(TRIM($1))`;
+                params.push(searchStatus);
+            } else {
+                query += ` WHERE LOWER(TRIM(t.status)) = LOWER(TRIM($1)) 
+                          AND (t.assigned_role_id IS NULL OR t.assigned_role_id = $2)`;
+                params.push(searchStatus, adminRole);
+            }
+        } else {
+            // No status filter, but still filter by role if not super admin
+            if (!isSuperAdmin) {
+                query += ` WHERE (t.assigned_role_id IS NULL OR t.assigned_role_id = $1)`;
+                params.push(adminRole);
+            }
         }
 
         query += ` ORDER BY t.updated_at DESC`;
@@ -157,13 +198,44 @@ router.get('/admin/:id', authenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
 
-        const ticketResult = await pool.query(
-            `SELECT t.*, u.email as user_email, u.first_name || ' ' || u.last_name as user_name
-       FROM support_tickets t
-       JOIN users u ON t.user_id = u.id
-       WHERE t.id = $1`,
-            [id]
-        );
+        // Check if admin has access (super admin or assigned role)
+        const adminId = req.admin?.adminId;
+        let adminRole = null;
+        let isSuperAdmin = true;
+        
+        if (adminId) {
+            try {
+                const adminResult = await pool.query(
+                    `SELECT role FROM admin WHERE id = $1`,
+                    [adminId]
+                );
+                if (adminResult.rows.length > 0) {
+                    adminRole = adminResult.rows[0].role;
+                    isSuperAdmin = !adminRole || adminRole === 'admin' || adminRole === 'super_admin';
+                }
+            } catch (err) {
+                console.error('Error fetching admin role:', err);
+            }
+        }
+
+        let ticketQuery = `
+            SELECT t.*, u.email as user_email, u.first_name || ' ' || u.last_name as user_name,
+                   ar.name as assigned_role_name,
+                   a.username as assigned_to_username, a.email as assigned_to_email
+            FROM support_tickets t
+            JOIN users u ON t.user_id = u.id
+            LEFT JOIN admin_roles ar ON t.assigned_role_id = ar.id
+            LEFT JOIN admin a ON t.assigned_to = a.id
+            WHERE t.id = $1
+        `;
+        const ticketParams = [id];
+
+        if (!isSuperAdmin) {
+            ticketQuery += ` AND (t.assigned_role_id IS NULL OR t.assigned_role_id = $2)`;
+            ticketParams.push(adminRole);
+        }
+
+        const ticketResult = await pool.query(ticketQuery, ticketParams);
 
         if (ticketResult.rows.length === 0) {
             return res.status(404).json({ success: false, error: 'Ticket not found' });
@@ -224,12 +296,20 @@ router.post('/admin/:id/reply', authenticateAdmin, async (req, res) => {
             [id, req.admin.adminId, message]
         );
 
-        // Update status (e.g. to 'answered')
-        const newStatus = status || 'answered';
-        await pool.query(
-            `UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id = $2`,
-            [newStatus, id]
-        );
+        // Update status only if explicitly provided, otherwise keep current status
+        // Don't auto-change to 'answered' - tickets stay 'open' until explicitly closed
+        if (status && status !== 'open') {
+            await pool.query(
+                `UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id = $2`,
+                [status, id]
+            );
+        } else {
+            // Just update the timestamp
+            await pool.query(
+                `UPDATE support_tickets SET updated_at = NOW() WHERE id = $1`,
+                [id]
+            );
+        }
 
         // Send notification to user
         try {
@@ -275,6 +355,62 @@ router.post('/admin/:id/status', authenticateAdmin, async (req, res) => {
     } catch (error) {
         console.error('Admin update status error:', error);
         res.status(500).json({ success: false, error: 'Failed to update status' });
+    }
+});
+
+/**
+ * POST /api/support/admin/:id/assign
+ * Admin: Assign ticket to a role
+ */
+router.post('/admin/:id/assign', authenticateAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        let { roleId } = req.body;
+
+        // Convert empty string to null
+        if (roleId === '' || roleId === undefined) {
+            roleId = null;
+        } else {
+            // Convert to integer if provided
+            roleId = parseInt(roleId);
+            if (isNaN(roleId)) {
+                return res.status(400).json({ success: false, error: 'Invalid role ID' });
+            }
+            
+            // Verify role exists
+            const roleCheck = await pool.query(
+                `SELECT id FROM admin_roles WHERE id = $1`,
+                [roleId]
+            );
+            if (roleCheck.rows.length === 0) {
+                return res.status(404).json({ success: false, error: 'Role not found' });
+            }
+        }
+
+        // Verify ticket exists
+        const ticketResult = await pool.query(
+            `SELECT id FROM support_tickets WHERE id = $1`,
+            [id]
+        );
+
+        if (ticketResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Ticket not found' });
+        }
+
+        // Update assigned role and open ticket if it was closed (when transferred)
+        await pool.query(
+            `UPDATE support_tickets 
+             SET assigned_role_id = $1, 
+                 status = CASE WHEN status = 'closed' THEN 'open' ELSE status END,
+                 updated_at = NOW() 
+             WHERE id = $2`,
+            [roleId, id]
+        );
+
+        res.json({ success: true, message: 'Ticket assigned successfully' });
+    } catch (error) {
+        console.error('Admin assign ticket error:', error);
+        res.status(500).json({ success: false, error: error.message || 'Failed to assign ticket' });
     }
 });
 

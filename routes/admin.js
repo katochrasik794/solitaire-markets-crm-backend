@@ -849,14 +849,332 @@ router.delete('/roles/:id', authenticateAdmin, async (req, res) => {
 router.get('/admins', authenticateAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, username, email, admin_role, is_active, last_login
+      `SELECT id, username, email, admin_role, features, is_active, last_login
        FROM admin
        ORDER BY id ASC`
     );
-    res.json({ ok: true, admins: result.rows });
+    // Ensure features is always an array
+    const admins = result.rows.map(admin => ({
+      ...admin,
+      features: admin.features || []
+    }));
+    res.json({ ok: true, admins });
   } catch (error) {
     console.error('Get admins error:', error);
     res.status(500).json({ ok: false, error: error.message || 'Failed to fetch admins' });
+  }
+});
+
+/**
+ * POST /api/admin/admins
+ * Create a new admin user
+ */
+router.post('/admins', authenticateAdmin, async (req, res) => {
+  try {
+    const { username, email, password, admin_role } = req.body;
+
+    if (!username || !email || !password) {
+      return res.status(400).json({ ok: false, error: 'Username, email, and password are required' });
+    }
+
+    // Check if admin with this email already exists
+    const existing = await pool.query(
+      'SELECT id FROM admin WHERE email = $1',
+      [email]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ ok: false, error: 'Admin with this email already exists' });
+    }
+
+    // Hash password
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Determine role - use provided role or default to 'admin'
+    const role = admin_role || 'admin';
+    
+    // Get features from request body (optional, defaults to empty array)
+    const features = req.body.features || [];
+    const featuresJson = Array.isArray(features) ? JSON.stringify(features) : '[]';
+
+    // Insert new admin
+    const result = await pool.query(
+      `INSERT INTO admin (username, email, password_hash, admin_role, features, is_active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, TRUE, NOW(), NOW())
+       RETURNING id, username, email, admin_role, features, is_active, last_login, created_at`,
+      [username, email, passwordHash, role, featuresJson]
+    );
+
+    const newAdmin = result.rows[0];
+    
+    // Ensure features is always an array in response
+    const adminResponse = {
+      ...newAdmin,
+      features: newAdmin.features || []
+    };
+
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'admin_create',
+        actionCategory: 'admin_management',
+        targetType: 'admin',
+        targetId: newAdmin.id,
+        targetIdentifier: newAdmin.email,
+        description: `Created new admin user: ${newAdmin.username} (${newAdmin.email}) with role: ${role}`,
+        req,
+        res,
+        beforeData: null,
+        afterData: { admin: adminResponse }
+      });
+    });
+
+    res.status(201).json({ ok: true, admin: adminResponse });
+  } catch (error) {
+    console.error('Create admin error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to create admin' });
+  }
+});
+
+/**
+ * PUT /api/admin/admins/:id/role
+ * Update admin role
+ */
+router.put('/admins/:id/role', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { admin_role } = req.body;
+
+    if (!admin_role) {
+      return res.status(400).json({ ok: false, error: 'Role is required' });
+    }
+
+    // Get current admin data for logging
+    const currentAdmin = await pool.query(
+      'SELECT id, username, email, admin_role, features FROM admin WHERE id = $1',
+      [id]
+    );
+
+    if (currentAdmin.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Admin not found' });
+    }
+
+    const beforeData = { ...currentAdmin.rows[0] };
+
+    // Update admin role
+    const result = await pool.query(
+      `UPDATE admin SET admin_role = $1, updated_at = NOW()
+       WHERE id = $2
+       RETURNING id, username, email, admin_role, features, is_active, last_login, created_at`,
+      [admin_role, id]
+    );
+
+    const updatedAdmin = result.rows[0];
+    
+    // Ensure features is always an array in response
+    const adminResponse = {
+      ...updatedAdmin,
+      features: updatedAdmin.features || []
+    };
+
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'admin_role_update',
+        actionCategory: 'admin_management',
+        targetType: 'admin',
+        targetId: updatedAdmin.id,
+        targetIdentifier: updatedAdmin.email,
+        description: `Updated admin role from "${beforeData.admin_role}" to "${admin_role}" for ${updatedAdmin.username}`,
+        req,
+        res,
+        beforeData: { ...beforeData, features: beforeData.features || [] },
+        afterData: { admin: adminResponse }
+      });
+    });
+
+    res.json({ ok: true, admin: adminResponse });
+  } catch (error) {
+    console.error('Update admin role error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to update admin role' });
+  }
+});
+
+/**
+ * PUT /api/admin/admins/:id/password
+ * Update admin password
+ */
+router.put('/admins/:id/password', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { newPassword } = req.body;
+
+    if (!newPassword) {
+      return res.status(400).json({ ok: false, error: 'New password is required' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
+    }
+
+    // Check if admin exists
+    const adminCheck = await pool.query(
+      'SELECT id FROM admin WHERE id = $1',
+      [id]
+    );
+
+    if (adminCheck.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Admin not found' });
+    }
+
+    // Hash password
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    // Update password
+    await pool.query(
+      `UPDATE admin SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+      [passwordHash, id]
+    );
+
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'admin_password_update',
+        actionCategory: 'admin_management',
+        targetType: 'admin',
+        targetId: parseInt(id),
+        targetIdentifier: null,
+        description: `Updated password for admin ID: ${id}`,
+        req,
+        res,
+        beforeData: null,
+        afterData: { adminId: parseInt(id) }
+      });
+    });
+
+    res.json({ ok: true, message: 'Password updated successfully' });
+  } catch (error) {
+    console.error('Update admin password error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to update password' });
+  }
+});
+
+/**
+ * PUT /api/admin/admins/:id/features
+ * Update admin features (save directly to admin table)
+ */
+router.put('/admins/:id/features', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { features } = req.body;
+
+    if (!Array.isArray(features)) {
+      return res.status(400).json({ ok: false, error: 'Features must be an array' });
+    }
+
+    // Check if admin exists
+    const adminCheck = await pool.query(
+      'SELECT id, username, email, admin_role, features FROM admin WHERE id = $1',
+      [id]
+    );
+
+    if (adminCheck.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Admin not found' });
+    }
+
+    const beforeData = { ...adminCheck.rows[0] };
+
+    // Update features in admin table
+    const featuresJson = JSON.stringify(features);
+    const result = await pool.query(
+      `UPDATE admin SET features = $1::jsonb, updated_at = NOW()
+       WHERE id = $2
+       RETURNING id, username, email, admin_role, features, is_active, last_login, created_at`,
+      [featuresJson, id]
+    );
+
+    const updatedAdmin = result.rows[0];
+
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'admin_features_update',
+        actionCategory: 'admin_management',
+        targetType: 'admin',
+        targetId: updatedAdmin.id,
+        targetIdentifier: updatedAdmin.email,
+        description: `Updated features for admin: ${updatedAdmin.username} (${updatedAdmin.email})`,
+        req,
+        res,
+        beforeData: { features: beforeData.features || [] },
+        afterData: { features: updatedAdmin.features || [] }
+      });
+    });
+
+    res.json({ ok: true, admin: { ...updatedAdmin, features: updatedAdmin.features || [] } });
+  } catch (error) {
+    console.error('Update admin features error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to update admin features' });
+  }
+});
+
+/**
+ * DELETE /api/admin/admins/:id
+ * Delete an admin user
+ */
+router.delete('/admins/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get admin data before deletion for logging
+    const adminCheck = await pool.query(
+      'SELECT id, username, email, admin_role FROM admin WHERE id = $1',
+      [id]
+    );
+
+    if (adminCheck.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Admin not found' });
+    }
+
+    const adminToDelete = adminCheck.rows[0];
+
+    // Prevent deletion of superadmin
+    if (adminToDelete.admin_role === 'superadmin' || adminToDelete.admin_role === 'admin') {
+      return res.status(403).json({ ok: false, error: 'Cannot delete super admin' });
+    }
+
+    // Delete admin
+    await pool.query('DELETE FROM admin WHERE id = $1', [id]);
+
+    // Log admin action
+    setImmediate(async () => {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'admin_delete',
+        actionCategory: 'admin_management',
+        targetType: 'admin',
+        targetId: adminToDelete.id,
+        targetIdentifier: adminToDelete.email,
+        description: `Deleted admin user: ${adminToDelete.username} (${adminToDelete.email})`,
+        req,
+        res,
+        beforeData: { admin: adminToDelete },
+        afterData: null
+      });
+    });
+
+    res.json({ ok: true, message: 'Admin deleted successfully' });
+  } catch (error) {
+    console.error('Delete admin error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to delete admin' });
   }
 });
 
