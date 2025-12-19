@@ -1719,6 +1719,7 @@ router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
 /**
  * DELETE /api/admin/users/:id
  * Delete a user and all related data (cascade deletes)
+ * Only allowed if user has 0 funds (wallet balance = 0 and all trading account balances = 0)
  */
 router.delete('/users/:id', authenticateAdmin, async (req, res, next) => {
   try {
@@ -1731,6 +1732,43 @@ router.delete('/users/:id', authenticateAdmin, async (req, res, next) => {
     const userCheck = await pool.query('SELECT id, email FROM users WHERE id = $1', [userId]);
     if (userCheck.rows.length === 0) {
       return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+
+    // Check wallet balance
+    const walletCheck = await pool.query(
+      'SELECT balance FROM wallets WHERE user_id = $1',
+      [userId]
+    );
+    
+    let walletBalance = 0;
+    if (walletCheck.rows.length > 0) {
+      walletBalance = parseFloat(walletCheck.rows[0].balance || 0);
+    }
+
+    // Check trading account balances (MT5 accounts)
+    const accountsCheck = await pool.query(
+      `SELECT 
+        COALESCE(SUM(balance), 0) as total_balance,
+        COALESCE(SUM(equity), 0) as total_equity,
+        COALESCE(SUM(credit), 0) as total_credit
+       FROM trading_accounts 
+       WHERE user_id = $1 AND platform = 'MT5'`,
+      [userId]
+    );
+
+    const totalBalance = parseFloat(accountsCheck.rows[0]?.total_balance || 0);
+    const totalEquity = parseFloat(accountsCheck.rows[0]?.total_equity || 0);
+    const totalCredit = parseFloat(accountsCheck.rows[0]?.total_credit || 0);
+
+    // Calculate total funds
+    const totalFunds = walletBalance + totalBalance + totalEquity + totalCredit;
+
+    // Only allow deletion if total funds are 0
+    if (totalFunds > 0) {
+      return res.status(400).json({
+        ok: false,
+        error: `Cannot delete user with funds. User has: Wallet: $${walletBalance.toFixed(2)}, Trading Accounts: $${(totalBalance + totalEquity + totalCredit).toFixed(2)}. Total: $${totalFunds.toFixed(2)}. Please ensure all funds are withdrawn before deleting.`
+      });
     }
 
     // Delete user (CASCADE will handle related records: trading_accounts, kyc_verifications, etc.)
@@ -1799,13 +1837,28 @@ router.get('/users/:id', authenticateAdmin, async (req, res, next) => {
       KYC = null;
     }
 
+    // Wallet balance
+    let walletBalance = 0;
+    try {
+      const walletResult = await pool.query(
+        'SELECT balance FROM wallets WHERE user_id = $1',
+        [userId]
+      );
+      if (walletResult.rows.length > 0) {
+        walletBalance = parseFloat(walletResult.rows[0].balance || 0);
+      }
+    } catch (walletError) {
+      console.error('Wallet lookup failed for admin users/:id:', walletError.message);
+      walletBalance = 0;
+    }
+
     // MT5 accounts for this user - fail-safe if trading_accounts is missing
     let MT5Account = [];
     try {
       const mt5Result = await pool.query(
         // Use trading_accounts.account_number as the MT5 account/login.
-        // In current schema, "group" is stored in account_type.
-        `SELECT account_number, account_type, created_at
+        // Include balance, equity, and credit for deletion check
+        `SELECT account_number, account_type, balance, equity, credit, created_at
          FROM trading_accounts
          WHERE user_id = $1 AND platform = 'MT5'
          ORDER BY created_at DESC`,
@@ -1816,6 +1869,9 @@ router.get('/users/:id', authenticateAdmin, async (req, res, next) => {
         // Admin panel should use the trading account number as MT5 login
         accountId: row.account_number || null,
         group: row.account_type || null,
+        balance: parseFloat(row.balance || 0),
+        equity: parseFloat(row.equity || 0),
+        credit: parseFloat(row.credit || 0),
         createdAt: row.created_at
       }));
     } catch (mt5Error) {
@@ -1843,7 +1899,8 @@ router.get('/users/:id', authenticateAdmin, async (req, res, next) => {
       createdAt: u.created_at,
       lastLoginAt: null, // no user login log table in this schema
       KYC,
-      MT5Account
+      MT5Account,
+      walletBalance
     };
 
     // Simple totals (no deposits/withdrawals tables in this schema yet)
@@ -6127,6 +6184,31 @@ const buildUserQuery = (recipientType, specificUsers = [], startParamIndex = 1) 
       } else {
         whereClause = '1=0';
       }
+      break;
+    case 'zero_balance':
+      // Users who have trading accounts but with 0 balance (or no balance > 0)
+      // This means users who either:
+      // 1. Have no trading accounts at all, OR
+      // 2. Have trading accounts but all have balance = 0 or NULL
+      whereClause = `id IN (
+        SELECT DISTINCT u.id
+        FROM users u
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM trading_accounts ta
+          WHERE ta.user_id = u.id
+          AND ta.platform = 'MT5'
+          AND (COALESCE(ta.balance, 0) > 0 OR COALESCE(ta.equity, 0) > 0)
+        )
+      )`;
+      break;
+    case 'no_account':
+      // Users who have no MT5 trading accounts at all
+      whereClause = `id NOT IN (
+        SELECT DISTINCT user_id
+        FROM trading_accounts
+        WHERE platform = 'MT5'
+      )`;
       break;
     default:
       whereClause = '1=0';
