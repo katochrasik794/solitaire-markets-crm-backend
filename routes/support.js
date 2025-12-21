@@ -118,15 +118,54 @@ router.post('/', authenticate, async (req, res) => {
 router.get('/admin/all', authenticateAdmin, async (req, res) => {
     try {
         const { status } = req.query;
+        
+        // Check if assigned_role_id column exists
+        let hasAssignedRoleColumn = false;
+        let hasAssignedToColumn = false;
+        try {
+            const columnCheck = await pool.query(`
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'support_tickets' 
+                AND column_name IN ('assigned_role_id', 'assigned_to')
+            `);
+            hasAssignedRoleColumn = columnCheck.rows.some(r => r.column_name === 'assigned_role_id');
+            hasAssignedToColumn = columnCheck.rows.some(r => r.column_name === 'assigned_to');
+        } catch (err) {
+            console.error('Error checking columns:', err);
+        }
+
         let query = `
-      SELECT t.*, u.email as user_email, u.first_name || ' ' || u.last_name as user_name,
-             ar.name as assigned_role_name,
-             a.username as assigned_to_username, a.email as assigned_to_email
+      SELECT t.*, u.email as user_email, u.first_name || ' ' || u.last_name as user_name
+    `;
+        
+        // Add role and admin joins only if columns exist
+        if (hasAssignedRoleColumn) {
+            query += `, ar.name as assigned_role_name`;
+        }
+        if (hasAssignedToColumn) {
+            query += `, a.username as assigned_to_username, a.email as assigned_to_email`;
+        }
+        
+        // Calculate time taken for closed tickets (in seconds)
+        query += `, CASE 
+            WHEN t.status = 'closed' AND t.created_at IS NOT NULL AND t.updated_at IS NOT NULL 
+            THEN EXTRACT(EPOCH FROM (t.updated_at - t.created_at))
+            ELSE NULL
+        END as time_taken_seconds`;
+        
+        query += `
       FROM support_tickets t
       JOIN users u ON t.user_id = u.id
-      LEFT JOIN admin_roles ar ON t.assigned_role_id = ar.id
-      LEFT JOIN admin a ON t.assigned_to = a.id
     `;
+        
+        if (hasAssignedRoleColumn) {
+            query += ` LEFT JOIN admin_roles ar ON t.assigned_role_id = ar.id`;
+        }
+        if (hasAssignedToColumn) {
+            query += ` LEFT JOIN admin a ON t.assigned_to = a.id`;
+        }
+        
         const params = [];
 
         // Get admin info to check role assignment
@@ -137,13 +176,13 @@ router.get('/admin/all', authenticateAdmin, async (req, res) => {
         if (adminId) {
             try {
                 const adminResult = await pool.query(
-                    `SELECT role FROM admin WHERE id = $1`,
+                    `SELECT admin_role FROM admin WHERE id = $1`,
                     [adminId]
                 );
                 if (adminResult.rows.length > 0) {
-                    adminRole = adminResult.rows[0].role;
-                    // Super admin if role is 'admin', 'super_admin', or null/empty
-                    isSuperAdmin = !adminRole || adminRole === 'admin' || adminRole === 'super_admin';
+                    adminRole = adminResult.rows[0].admin_role;
+                    // Super admin if admin_role is null, 'admin', 'superadmin', 'super_admin', or empty
+                    isSuperAdmin = !adminRole || adminRole === '' || adminRole === 'admin' || adminRole === 'superadmin' || adminRole === 'super_admin';
                 }
             } catch (err) {
                 console.error('Error fetching admin role:', err);
@@ -160,16 +199,50 @@ router.get('/admin/all', authenticateAdmin, async (req, res) => {
             if (isSuperAdmin) {
                 query += ` WHERE LOWER(TRIM(t.status)) = LOWER(TRIM($1))`;
                 params.push(searchStatus);
-            } else {
+            } else if (hasAssignedRoleColumn) {
+                // For non-super admins, we need to find their role ID from admin_roles table
+                // First, get the admin's role ID if they have a role assigned
+                let adminRoleId = null;
+                if (adminRole) {
+                    try {
+                        const roleIdResult = await pool.query(
+                            `SELECT id FROM admin_roles WHERE name = $1`,
+                            [adminRole]
+                        );
+                        if (roleIdResult.rows.length > 0) {
+                            adminRoleId = roleIdResult.rows[0].id;
+                        }
+                    } catch (err) {
+                        console.error('Error fetching role ID:', err);
+                    }
+                }
                 query += ` WHERE LOWER(TRIM(t.status)) = LOWER(TRIM($1)) 
                           AND (t.assigned_role_id IS NULL OR t.assigned_role_id = $2)`;
-                params.push(searchStatus, adminRole);
+                params.push(searchStatus, adminRoleId);
+            } else {
+                query += ` WHERE LOWER(TRIM(t.status)) = LOWER(TRIM($1))`;
+                params.push(searchStatus);
             }
         } else {
             // No status filter, but still filter by role if not super admin
-            if (!isSuperAdmin) {
+            if (!isSuperAdmin && hasAssignedRoleColumn) {
+                // Get the admin's role ID from admin_roles table
+                let adminRoleId = null;
+                if (adminRole) {
+                    try {
+                        const roleIdResult = await pool.query(
+                            `SELECT id FROM admin_roles WHERE name = $1`,
+                            [adminRole]
+                        );
+                        if (roleIdResult.rows.length > 0) {
+                            adminRoleId = roleIdResult.rows[0].id;
+                        }
+                    } catch (err) {
+                        console.error('Error fetching role ID:', err);
+                    }
+                }
                 query += ` WHERE (t.assigned_role_id IS NULL OR t.assigned_role_id = $1)`;
-                params.push(adminRole);
+                params.push(adminRoleId);
             }
         }
 
@@ -177,8 +250,6 @@ router.get('/admin/all', authenticateAdmin, async (req, res) => {
 
         const result = await pool.query(query, params);
         console.log('Admin list tickets result:', result.rows.length, 'rows');
-        console.log('Query:', query);
-        console.log('Params:', params);
 
         res.json({
             success: true,
@@ -206,33 +277,86 @@ router.get('/admin/:id', authenticateAdmin, async (req, res) => {
         if (adminId) {
             try {
                 const adminResult = await pool.query(
-                    `SELECT role FROM admin WHERE id = $1`,
+                    `SELECT admin_role FROM admin WHERE id = $1`,
                     [adminId]
                 );
                 if (adminResult.rows.length > 0) {
-                    adminRole = adminResult.rows[0].role;
-                    isSuperAdmin = !adminRole || adminRole === 'admin' || adminRole === 'super_admin';
+                    adminRole = adminResult.rows[0].admin_role;
+                    // Super admin if admin_role is null, 'admin', 'superadmin', 'super_admin', or empty
+                    isSuperAdmin = !adminRole || adminRole === '' || adminRole === 'admin' || adminRole === 'superadmin' || adminRole === 'super_admin';
                 }
             } catch (err) {
                 console.error('Error fetching admin role:', err);
             }
         }
 
+        // Check if columns exist
+        let hasAssignedRoleColumn = false;
+        let hasAssignedToColumn = false;
+        try {
+            const columnCheck = await pool.query(`
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'support_tickets' 
+                AND column_name IN ('assigned_role_id', 'assigned_to')
+            `);
+            hasAssignedRoleColumn = columnCheck.rows.some(r => r.column_name === 'assigned_role_id');
+            hasAssignedToColumn = columnCheck.rows.some(r => r.column_name === 'assigned_to');
+        } catch (err) {
+            console.error('Error checking columns:', err);
+        }
+
         let ticketQuery = `
-            SELECT t.*, u.email as user_email, u.first_name || ' ' || u.last_name as user_name,
-                   ar.name as assigned_role_name,
-                   a.username as assigned_to_username, a.email as assigned_to_email
+            SELECT t.*, u.email as user_email, u.first_name || ' ' || u.last_name as user_name
+        `;
+        
+        if (hasAssignedRoleColumn) {
+            ticketQuery += `, ar.name as assigned_role_name`;
+        }
+        if (hasAssignedToColumn) {
+            ticketQuery += `, a.username as assigned_to_username, a.email as assigned_to_email`;
+        }
+        
+        // Calculate time taken for closed tickets (in seconds)
+        ticketQuery += `, CASE 
+            WHEN t.status = 'closed' AND t.created_at IS NOT NULL AND t.updated_at IS NOT NULL 
+            THEN EXTRACT(EPOCH FROM (t.updated_at - t.created_at))
+            ELSE NULL
+        END as time_taken_seconds`;
+        
+        ticketQuery += `
             FROM support_tickets t
             JOIN users u ON t.user_id = u.id
-            LEFT JOIN admin_roles ar ON t.assigned_role_id = ar.id
-            LEFT JOIN admin a ON t.assigned_to = a.id
-            WHERE t.id = $1
         `;
+        
+        if (hasAssignedRoleColumn) {
+            ticketQuery += ` LEFT JOIN admin_roles ar ON t.assigned_role_id = ar.id`;
+        }
+        if (hasAssignedToColumn) {
+            ticketQuery += ` LEFT JOIN admin a ON t.assigned_to = a.id`;
+        }
+        
+        ticketQuery += ` WHERE t.id = $1`;
         const ticketParams = [id];
 
-        if (!isSuperAdmin) {
+        if (!isSuperAdmin && hasAssignedRoleColumn) {
+            // Get the admin's role ID from admin_roles table
+            let adminRoleId = null;
+            if (adminRole) {
+                try {
+                    const roleIdResult = await pool.query(
+                        `SELECT id FROM admin_roles WHERE name = $1`,
+                        [adminRole]
+                    );
+                    if (roleIdResult.rows.length > 0) {
+                        adminRoleId = roleIdResult.rows[0].id;
+                    }
+                } catch (err) {
+                    console.error('Error fetching role ID:', err);
+                }
+            }
             ticketQuery += ` AND (t.assigned_role_id IS NULL OR t.assigned_role_id = $2)`;
-            ticketParams.push(adminRole);
+            ticketParams.push(adminRoleId);
         }
 
         const ticketResult = await pool.query(ticketQuery, ticketParams);
@@ -366,6 +490,27 @@ router.post('/admin/:id/assign', authenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         let { roleId } = req.body;
+
+        // Check if assigned_role_id column exists
+        let hasAssignedRoleColumn = false;
+        try {
+            const columnCheck = await pool.query(`
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'support_tickets' 
+                AND column_name = 'assigned_role_id'
+            `);
+            hasAssignedRoleColumn = columnCheck.rows.length > 0;
+        } catch (err) {
+            console.error('Error checking column:', err);
+        }
+
+        if (!hasAssignedRoleColumn) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Assignment feature not available. Please run the database migration: add_assigned_role_to_tickets.sql' 
+            });
+        }
 
         // Convert empty string to null
         if (roleId === '' || roleId === undefined) {
