@@ -4046,6 +4046,59 @@ router.put('/mt5/account/:accountId', authenticateAdmin, async (req, res) => {
 });
 
 /**
+ * PATCH /api/admin/mt5/account/:accountId/status
+ * Update MT5 account status in database
+ */
+router.patch('/mt5/account/:accountId/status', authenticateAdmin, async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const { account_status } = req.body;
+
+    if (!account_status || !['active', 'inactive', 'suspended'].includes(account_status)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valid account_status (active, inactive, suspended) is required'
+      });
+    }
+
+    // Try updating by account_number first (most common)
+    let result = await pool.query(
+      'UPDATE trading_accounts SET account_status = $1, updated_at = NOW() WHERE account_number = $2 RETURNING account_number, account_status, user_id',
+      [account_status, accountId]
+    );
+
+    // If not found by account_number, try by id
+    if (result.rows.length === 0) {
+      result = await pool.query(
+        'UPDATE trading_accounts SET account_status = $1, updated_at = NOW() WHERE id = $2 RETURNING account_number, account_status, user_id',
+        [account_status, accountId]
+      );
+    }
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Account not found'
+      });
+    }
+
+    console.log(`Account ${accountId} status updated to ${account_status} in database`);
+
+    res.json({
+      success: true,
+      message: 'Account status updated successfully',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Update account status error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update account status'
+    });
+  }
+});
+
+/**
  * PUT /api/admin/mt5/account/:accountId/password
  * Change MT5 account password (updates MT5 API first, then database)
  */
