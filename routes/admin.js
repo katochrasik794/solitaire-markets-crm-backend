@@ -2291,8 +2291,8 @@ router.get('/users/:id', authenticateAdmin, async (req, res, next) => {
     try {
       const mt5Result = await pool.query(
         // Use trading_accounts.account_number as the MT5 account/login.
-        // Include balance, equity, and credit for deletion check
-        `SELECT account_number, account_type, balance, equity, credit, created_at
+        // Include balance, equity, credit, and account_status for filtering
+        `SELECT account_number, account_type, balance, equity, credit, account_status, created_at
          FROM trading_accounts
          WHERE user_id = $1 AND platform = 'MT5'
          ORDER BY created_at DESC`,
@@ -2306,6 +2306,7 @@ router.get('/users/:id', authenticateAdmin, async (req, res, next) => {
         balance: parseFloat(row.balance || 0),
         equity: parseFloat(row.equity || 0),
         credit: parseFloat(row.credit || 0),
+        accountStatus: row.account_status || 'active',
         createdAt: row.created_at
       }));
     } catch (mt5Error) {
