@@ -1,9 +1,9 @@
 import express from 'express';
 import pool from '../config/database.js';
 import { createWalletForUser } from '../services/wallet.service.js';
-import { hashPassword, comparePassword, generateResetToken } from '../utils/helpers.js';
+import { hashPassword, comparePassword, generateResetToken, generateOTP, validatePassword } from '../utils/helpers.js';
 import { validateRegister, validateLogin, validateForgotPassword, validateResetPassword } from '../middleware/validate.js';
-import { sendPasswordResetEmail } from '../services/email.js';
+import { sendPasswordResetEmail, sendOTPEmail } from '../services/email.js';
 import jwt from 'jsonwebtoken';
 
 const router = express.Router();
@@ -105,9 +105,9 @@ router.post('/login', validateLogin, async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
-    // Find user by email (include status so we can block banned accounts)
+    // Find user by email (include status and last_login so we can check inactivity)
     const result = await pool.query(
-      'SELECT id, email, password_hash, first_name, last_name, country, referral_code, referred_by, status FROM users WHERE email = $1',
+      'SELECT id, email, password_hash, first_name, last_name, country, referral_code, referred_by, status, last_login FROM users WHERE email = $1',
       [email]
     );
 
@@ -120,15 +120,7 @@ router.post('/login', validateLogin, async (req, res, next) => {
 
     const user = result.rows[0];
 
-    // If user account is banned, block login
-    if (user.status && user.status.toLowerCase() === 'banned') {
-      return res.status(403).json({
-        success: false,
-        message: 'Your account has been blocked. Please contact support.'
-      });
-    }
-
-    // Verify password
+    // Verify password first
     const isPasswordValid = await comparePassword(password, user.password_hash);
 
     if (!isPasswordValid) {
@@ -137,6 +129,51 @@ router.post('/login', validateLogin, async (req, res, next) => {
         message: 'Invalid email or password'
       });
     }
+
+    // Check account status - block banned and inactive users
+    const userStatus = user.status ? user.status.toLowerCase() : 'active';
+    
+    if (userStatus === 'banned') {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been blocked. Please contact support.'
+      });
+    }
+
+    if (userStatus === 'inactive') {
+      // Generate activation token
+      const activationToken = generateResetToken();
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + 24); // Token expires in 24 hours
+
+      // Invalidate any existing unused tokens for this user
+      await pool.query(
+        'UPDATE password_reset_tokens SET used = TRUE WHERE user_id = $1 AND used = FALSE',
+        [user.id]
+      );
+
+      // Store activation token in password_reset_tokens table (reusing the table)
+      await pool.query(
+        'INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+        [user.id, activationToken, expiresAt]
+      );
+
+      const activationLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/activate-account?token=${activationToken}`;
+
+      return res.status(403).json({
+        success: false,
+        requiresActivation: true,
+        message: 'Your account has been inactive due to inactivity. Click here to activate your account.',
+        activationLink: activationLink,
+        email: user.email
+      });
+    }
+
+    // Update last_login timestamp
+    await pool.query(
+      'UPDATE users SET last_login = NOW() WHERE id = $1',
+      [user.id]
+    );
 
     // Generate JWT token
     const token = jwt.sign(
@@ -172,7 +209,7 @@ router.post('/login', validateLogin, async (req, res, next) => {
 
 /**
  * POST /api/auth/forgot-password
- * Request password reset
+ * Request password reset - sends OTP
  */
 router.post('/forgot-password', validateForgotPassword, async (req, res, next) => {
   try {
@@ -181,47 +218,46 @@ router.post('/forgot-password', validateForgotPassword, async (req, res, next) =
     // Find user by email
     const result = await pool.query(
       'SELECT id, email FROM users WHERE email = $1',
-      [email]
+      [email.trim().toLowerCase()]
     );
 
     // Don't reveal if user exists or not (security best practice)
     if (result.rows.length === 0) {
       return res.json({
         success: true,
-        message: 'If an account with that email exists, a password reset link has been sent.'
+        message: 'If an account with that email exists, an OTP has been sent to your email.'
       });
     }
 
     const user = result.rows[0];
 
-    // Generate reset token
-    const resetToken = generateResetToken();
+    // Generate OTP
+    const otp = generateOTP();
     const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + 1); // Token expires in 1 hour
+    expiresAt.setMinutes(expiresAt.getMinutes() + 10); // OTP expires in 10 minutes
 
-    // Invalidate any existing unused tokens for this user
-    await pool.query(
-      'UPDATE password_reset_tokens SET used = TRUE WHERE user_id = $1 AND used = FALSE',
-      [user.id]
-    );
+    // Store OTP with user ID
+    passwordResetOtpStore.set(email.trim().toLowerCase(), {
+      otp,
+      expiresAt,
+      userId: user.id
+    });
 
-    // Insert new reset token
-    await pool.query(
-      'INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
-      [user.id, resetToken, expiresAt]
-    );
-
-    // Send password reset email
+    // Send OTP email
     try {
-      await sendPasswordResetEmail(user.email, resetToken);
+      await sendOTPEmail(user.email, otp);
     } catch (emailError) {
       console.error('Email sending error:', emailError);
-      // Still return success to not reveal email issues
+      passwordResetOtpStore.delete(email.trim().toLowerCase());
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send OTP email. Please try again.'
+      });
     }
 
     res.json({
       success: true,
-      message: 'If an account with that email exists, a password reset link has been sent.'
+      message: 'If an account with that email exists, an OTP has been sent to your email.'
     });
   } catch (error) {
     console.error('Forgot password error:', error);
@@ -230,35 +266,106 @@ router.post('/forgot-password', validateForgotPassword, async (req, res, next) =
 });
 
 /**
- * POST /api/auth/reset-password
- * Reset password with token
+ * POST /api/auth/verify-password-reset-otp
+ * Verify OTP for password reset
  */
-router.post('/reset-password', validateResetPassword, async (req, res, next) => {
+router.post('/verify-password-reset-otp', async (req, res, next) => {
   try {
-    const { token, password } = req.body;
+    const { email, otp } = req.body;
 
-    // Find valid reset token
-    const tokenResult = await pool.query(
-      `SELECT prt.id, prt.user_id, prt.expires_at, prt.used
-       FROM password_reset_tokens prt
-       WHERE prt.token = $1 AND prt.used = FALSE`,
-      [token]
-    );
-
-    if (tokenResult.rows.length === 0) {
+    if (!email || !otp) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid or expired reset token'
+        message: 'Email and OTP are required'
       });
     }
 
-    const resetToken = tokenResult.rows[0];
+    const emailKey = email.trim().toLowerCase();
+    const storedData = passwordResetOtpStore.get(emailKey);
 
-    // Check if token has expired
-    if (new Date() > new Date(resetToken.expires_at)) {
+    if (!storedData) {
       return res.status(400).json({
         success: false,
-        message: 'Reset token has expired'
+        message: 'OTP not found or expired. Please request a new OTP.'
+      });
+    }
+
+    // Check if OTP has expired
+    if (new Date() > new Date(storedData.expiresAt)) {
+      passwordResetOtpStore.delete(emailKey);
+      return res.status(400).json({
+        success: false,
+        message: 'OTP has expired. Please request a new OTP.'
+      });
+    }
+
+    // Verify OTP
+    if (storedData.otp !== otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP. Please try again.'
+      });
+    }
+
+    // OTP verified - return success (keep data in store for password reset)
+    res.json({
+      success: true,
+      message: 'OTP verified successfully'
+    });
+  } catch (error) {
+    console.error('Verify password reset OTP error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/auth/reset-password-with-otp
+ * Reset password with verified OTP
+ */
+router.post('/reset-password-with-otp', async (req, res, next) => {
+  try {
+    const { email, otp, password } = req.body;
+
+    if (!email || !otp || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, OTP, and password are required'
+      });
+    }
+
+    // Validate password
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        message: passwordValidation.message
+      });
+    }
+
+    const emailKey = email.trim().toLowerCase();
+    const storedData = passwordResetOtpStore.get(emailKey);
+
+    if (!storedData) {
+      return res.status(400).json({
+        success: false,
+        message: 'OTP session expired. Please request a new password reset.'
+      });
+    }
+
+    // Check if OTP has expired
+    if (new Date() > new Date(storedData.expiresAt)) {
+      passwordResetOtpStore.delete(emailKey);
+      return res.status(400).json({
+        success: false,
+        message: 'OTP has expired. Please request a new password reset.'
+      });
+    }
+
+    // Verify OTP again
+    if (storedData.otp !== otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP. Please try again.'
       });
     }
 
@@ -268,21 +375,18 @@ router.post('/reset-password', validateResetPassword, async (req, res, next) => 
     // Update user password
     await pool.query(
       'UPDATE users SET password_hash = $1 WHERE id = $2',
-      [passwordHash, resetToken.user_id]
+      [passwordHash, storedData.userId]
     );
 
-    // Mark token as used
-    await pool.query(
-      'UPDATE password_reset_tokens SET used = TRUE WHERE id = $1',
-      [resetToken.id]
-    );
+    // Remove OTP from store
+    passwordResetOtpStore.delete(emailKey);
 
     res.json({
       success: true,
       message: 'Password has been reset successfully'
     });
   } catch (error) {
-    console.error('Reset password error:', error);
+    console.error('Reset password with OTP error:', error);
     next(error);
   }
 });
@@ -347,6 +451,557 @@ router.get('/verify-token', async (req, res, next) => {
     }
   } catch (error) {
     console.error('Verify token error:', error);
+    next(error);
+  }
+});
+
+// In-memory OTP storage (for production, use Redis or database)
+const otpStore = new Map(); // email -> { otp, expiresAt, registrationData }
+const passwordResetOtpStore = new Map(); // email -> { otp, expiresAt, userId }
+
+/**
+ * POST /api/auth/send-registration-otp
+ * Send OTP for email verification during registration
+ */
+router.post('/send-registration-otp', async (req, res, next) => {
+  try {
+    const { email, password, firstName, lastName, phoneCode, phoneNumber, country, referredBy } = req.body;
+
+    // Validate required fields
+    if (!email || !password || !firstName || !lastName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, password, first name, and last name are required'
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await pool.query(
+      'SELECT id FROM users WHERE email = $1',
+      [email.trim().toLowerCase()]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'User with this email already exists'
+      });
+    }
+
+    // Validate referral code if provided
+    if (referredBy) {
+      const referrerResult = await pool.query(
+        'SELECT id FROM users WHERE referral_code = $1',
+        [referredBy]
+      );
+      
+      if (referrerResult.rows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid referral code'
+        });
+      }
+    }
+
+    // Generate OTP
+    const otp = generateOTP();
+    const expiresAt = new Date();
+    expiresAt.setMinutes(expiresAt.getMinutes() + 10); // OTP expires in 10 minutes
+
+    // Store OTP with registration data
+    otpStore.set(email.trim().toLowerCase(), {
+      otp,
+      expiresAt,
+      registrationData: {
+        email: email.trim().toLowerCase(),
+        password,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        phoneCode: phoneCode || null,
+        phoneNumber: phoneNumber?.trim() || null,
+        country: country || null,
+        referredBy: referredBy || null
+      }
+    });
+
+    // Send OTP email
+    try {
+      await sendOTPEmail(email.trim().toLowerCase(), otp);
+    } catch (emailError) {
+      console.error('Email sending error:', emailError);
+      otpStore.delete(email.trim().toLowerCase());
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send OTP email. Please try again.'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'OTP has been sent to your email address'
+    });
+  } catch (error) {
+    console.error('Send registration OTP error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/auth/verify-registration-otp
+ * Verify OTP and complete registration
+ */
+router.post('/verify-registration-otp', async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and OTP are required'
+      });
+    }
+
+    const emailKey = email.trim().toLowerCase();
+    const storedData = otpStore.get(emailKey);
+
+    if (!storedData) {
+      return res.status(400).json({
+        success: false,
+        message: 'OTP not found or expired. Please request a new OTP.'
+      });
+    }
+
+    // Check if OTP has expired
+    if (new Date() > new Date(storedData.expiresAt)) {
+      otpStore.delete(emailKey);
+      return res.status(400).json({
+        success: false,
+        message: 'OTP has expired. Please request a new OTP.'
+      });
+    }
+
+    // Verify OTP
+    if (storedData.otp !== otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP. Please try again.'
+      });
+    }
+
+    // OTP verified, proceed with registration
+    const { registrationData } = storedData;
+
+    // Double-check user doesn't exist (race condition protection)
+    const existingUser = await pool.query(
+      'SELECT id FROM users WHERE email = $1',
+      [emailKey]
+    );
+
+    if (existingUser.rows.length > 0) {
+      otpStore.delete(emailKey);
+      return res.status(400).json({
+        success: false,
+        message: 'User with this email already exists'
+      });
+    }
+
+    // Hash password
+    const passwordHash = await hashPassword(registrationData.password);
+
+    // Insert new user
+    const result = await pool.query(
+      `INSERT INTO users (email, password_hash, first_name, last_name, phone_code, phone_number, country, referred_by, is_email_verified)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, email, first_name, last_name, country, referral_code, referred_by, created_at`,
+      [
+        registrationData.email,
+        passwordHash,
+        registrationData.firstName,
+        registrationData.lastName,
+        registrationData.phoneCode,
+        registrationData.phoneNumber,
+        registrationData.country,
+        registrationData.referredBy,
+        true // Email is verified
+      ]
+    );
+
+    const user = result.rows[0];
+
+    // Automatically create wallet for this user
+    try {
+      await createWalletForUser(user.id);
+    } catch (walletError) {
+      console.error('Create wallet error (register):', walletError.message);
+      // Do not fail registration if wallet creation fails; user can retry later
+    }
+
+    // Remove OTP from store
+    otpStore.delete(emailKey);
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Registration successful and email verified',
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          firstName: user.first_name,
+          lastName: user.last_name,
+          country: user.country,
+          referralCode: user.referral_code,
+          referredBy: user.referred_by
+        },
+        token
+      }
+    });
+  } catch (error) {
+    console.error('Verify registration OTP error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/auth/verify-reactivation-otp
+ * Verify OTP and reactivate inactive account
+ */
+router.post('/verify-reactivation-otp', async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and OTP are required'
+      });
+    }
+
+    const emailKey = email.trim().toLowerCase();
+    const storedData = passwordResetOtpStore.get(emailKey);
+
+    if (!storedData || storedData.type !== 'reactivation') {
+      return res.status(400).json({
+        success: false,
+        message: 'OTP not found or expired. Please try logging in again.'
+      });
+    }
+
+    // Check if OTP has expired
+    if (new Date() > new Date(storedData.expiresAt)) {
+      passwordResetOtpStore.delete(emailKey);
+      return res.status(400).json({
+        success: false,
+        message: 'OTP has expired. Please try logging in again.'
+      });
+    }
+
+    // Verify OTP
+    if (storedData.otp !== otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP. Please try again.'
+      });
+    }
+
+    // Reactivate account and update last_login
+    await pool.query(
+      'UPDATE users SET status = $1, last_login = NOW() WHERE id = $2',
+      ['active', storedData.userId]
+    );
+
+    // Remove OTP from store
+    passwordResetOtpStore.delete(emailKey);
+
+    // Get updated user data
+    const userResult = await pool.query(
+      'SELECT id, email, first_name, last_name, country, referral_code, referred_by FROM users WHERE id = $1',
+      [storedData.userId]
+    );
+
+    const user = userResult.rows[0];
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Account reactivated successfully',
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          firstName: user.first_name,
+          lastName: user.last_name,
+          country: user.country,
+          referralCode: user.referral_code,
+          referredBy: user.referred_by
+        },
+        token
+      }
+    });
+  } catch (error) {
+    console.error('Verify reactivation OTP error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/auth/activate-account/:token
+ * Send OTP when user clicks activation link
+ */
+router.get('/activate-account/:token', async (req, res, next) => {
+  try {
+    const { token } = req.params;
+
+    // First, ensure status column exists (auto-migration)
+    try {
+      await pool.query(`
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_name = 'users' AND column_name = 'status'
+          ) THEN
+            ALTER TABLE users 
+            ADD COLUMN status VARCHAR(20) DEFAULT 'active' 
+            CHECK (status IN ('active', 'banned', 'inactive'));
+            
+            UPDATE users SET status = 'active' WHERE status IS NULL;
+            
+            CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+          END IF;
+        END $$;
+      `);
+    } catch (migrationError) {
+      console.error('Auto-migration check error (non-critical):', migrationError);
+      // Continue anyway - column might already exist or migration might have failed
+    }
+
+    // Find valid activation token
+    const tokenResult = await pool.query(
+      `SELECT prt.id, prt.user_id, prt.expires_at, prt.used, u.email, COALESCE(u.status, 'active') as status
+       FROM password_reset_tokens prt
+       JOIN users u ON prt.user_id = u.id
+       WHERE prt.token = $1 AND prt.used = FALSE`,
+      [token]
+    );
+
+    if (tokenResult.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired activation link'
+      });
+    }
+
+    const tokenData = tokenResult.rows[0];
+
+    // Check if token has expired
+    if (new Date() > new Date(tokenData.expires_at)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Activation link has expired. Please request a new one by trying to login again.'
+      });
+    }
+
+    // Check if user is already active
+    if (tokenData.status && tokenData.status.toLowerCase() === 'active') {
+      return res.status(400).json({
+        success: false,
+        message: 'Your account is already active. You can login now.'
+      });
+    }
+
+    // Generate OTP
+    const otp = generateOTP();
+    const otpExpiresAt = new Date();
+    otpExpiresAt.setMinutes(otpExpiresAt.getMinutes() + 10); // OTP expires in 10 minutes
+
+    // Store OTP with user ID for activation
+    passwordResetOtpStore.set(tokenData.email.trim().toLowerCase(), {
+      otp,
+      expiresAt: otpExpiresAt,
+      userId: tokenData.user_id,
+      type: 'activation',
+      activationToken: token
+    });
+
+    // Send OTP email
+    try {
+      await sendOTPEmail(tokenData.email, otp);
+    } catch (emailError) {
+      console.error('Email sending error:', emailError);
+      passwordResetOtpStore.delete(tokenData.email.trim().toLowerCase());
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send OTP email. Please try again.'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'OTP has been sent to your email address',
+      email: tokenData.email
+    });
+  } catch (error) {
+    console.error('Activate account error:', error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      detail: error.detail
+    });
+    
+    // Check if it's a column doesn't exist error
+    if (error.code === '42703' || error.message?.includes('column') && error.message?.includes('does not exist')) {
+      return res.status(500).json({
+        success: false,
+        message: 'Database migration required. Please run the migration to add status column to users table.'
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to process activation request. Please try again.'
+    });
+  }
+});
+
+/**
+ * POST /api/auth/verify-activation-otp
+ * Verify OTP and activate account
+ */
+router.post('/verify-activation-otp', async (req, res, next) => {
+  try {
+    const { email, otp, token } = req.body;
+
+    if (!email || !otp || !token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, OTP, and activation token are required'
+      });
+    }
+
+    // Verify activation token
+    const tokenResult = await pool.query(
+      `SELECT prt.id, prt.user_id, prt.expires_at, prt.used, u.email, u.status
+       FROM password_reset_tokens prt
+       JOIN users u ON prt.user_id = u.id
+       WHERE prt.token = $1 AND prt.used = FALSE`,
+      [token]
+    );
+
+    if (tokenResult.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired activation token'
+      });
+    }
+
+    const tokenData = tokenResult.rows[0];
+
+    // Check if token has expired
+    if (new Date() > new Date(tokenData.expires_at)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Activation token has expired. Please request a new one by trying to login again.'
+      });
+    }
+
+    // Verify OTP
+    const emailKey = email.trim().toLowerCase();
+    const storedData = passwordResetOtpStore.get(emailKey);
+
+    if (!storedData || storedData.type !== 'activation' || storedData.activationToken !== token) {
+      return res.status(400).json({
+        success: false,
+        message: 'OTP not found or expired. Please request a new OTP.'
+      });
+    }
+
+    // Check if OTP has expired
+    if (new Date() > new Date(storedData.expiresAt)) {
+      passwordResetOtpStore.delete(emailKey);
+      return res.status(400).json({
+        success: false,
+        message: 'OTP has expired. Please request a new OTP.'
+      });
+    }
+
+    // Verify OTP
+    if (storedData.otp !== otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP. Please try again.'
+      });
+    }
+
+    // Activate account and update last_login
+    await pool.query(
+      'UPDATE users SET status = $1, last_login = NOW() WHERE id = $2',
+      ['active', tokenData.user_id]
+    );
+
+    // Mark activation token as used
+    await pool.query(
+      'UPDATE password_reset_tokens SET used = TRUE WHERE id = $1',
+      [tokenResult.rows[0].id]
+    );
+
+    // Remove OTP from store
+    passwordResetOtpStore.delete(emailKey);
+
+    // Get updated user data
+    const userResult = await pool.query(
+      'SELECT id, email, first_name, last_name, country, referral_code, referred_by FROM users WHERE id = $1',
+      [tokenData.user_id]
+    );
+
+    const user = userResult.rows[0];
+
+    // Generate JWT token
+    const jwtToken = jwt.sign(
+      {
+        id: user.id,
+        email: user.email
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Account activated successfully',
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          firstName: user.first_name,
+          lastName: user.last_name,
+          country: user.country,
+          referralCode: user.referral_code,
+          referredBy: user.referred_by
+        },
+        token: jwtToken
+      }
+    });
+  } catch (error) {
+    console.error('Verify activation OTP error:', error);
     next(error);
   }
 });

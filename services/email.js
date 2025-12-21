@@ -193,3 +193,69 @@ export const sendEmail = async ({ to, subject, html, text, attachments }) => {
     throw error;
   }
 };
+
+/**
+ * Send OTP verification email
+ * @param {string} email - Recipient email
+ * @param {string} otp - 6-digit OTP code
+ * @returns {Promise<object>} - Email send result
+ */
+export const sendOTPEmail = async (email, otp) => {
+  const mailOptions = {
+    from: `"${process.env.EMAIL_FROM_NAME || 'Solitaire Markets'}" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+    to: email,
+    subject: 'Verify Your Email - Solitaire Markets',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Email Verification</title>
+      </head>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background-color: #f4f4f4; padding: 30px; border-radius: 10px;">
+          <h2 style="color: #333; text-align: center; margin-bottom: 20px;">Email Verification</h2>
+          <p>Hello,</p>
+          <p>Thank you for registering with Solitaire Markets. Please verify your email address by entering the OTP code below:</p>
+          <div style="text-align: center; margin: 30px 0;">
+            <div style="background-color: #e6c200; color: #333; padding: 20px; border-radius: 8px; display: inline-block; font-size: 32px; font-weight: bold; letter-spacing: 8px; font-family: 'Courier New', monospace;">
+              ${otp}
+            </div>
+          </div>
+          <p style="text-align: center; color: #666; font-size: 14px;">This OTP will expire in 10 minutes.</p>
+          <p>If you didn't create an account with us, please ignore this email.</p>
+          <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
+          <p style="font-size: 12px; color: #666; text-align: center;">
+            This is an automated message, please do not reply to this email.
+          </p>
+        </div>
+      </body>
+      </html>
+    `,
+    text: `
+      Email Verification
+      
+      Hello,
+      
+      Thank you for registering with Solitaire Markets. Please verify your email address by entering the OTP code below:
+      
+      ${otp}
+      
+      This OTP will expire in 10 minutes.
+      
+      If you didn't create an account with us, please ignore this email.
+      
+      This is an automated message, please do not reply to this email.
+    `,
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log('OTP email sent:', info.messageId);
+    return { success: true, messageId: info.messageId };
+  } catch (error) {
+    console.error('Error sending OTP email:', error);
+    throw new Error('Failed to send OTP email');
+  }
+};

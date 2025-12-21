@@ -1829,7 +1829,7 @@ router.patch('/users/:id/email-verify', authenticateAdmin, async (req, res, next
       [userId]
     );
     const beforeData = beforeResult.rows[0] || null;
-    
+
     // Update email verification status
     await pool.query(
       'UPDATE users SET is_email_verified = $1 WHERE id = $2',
@@ -1915,11 +1915,11 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
         );
       } else {
         // Insert new record
-        await pool.query(
-          `INSERT INTO kyc_verifications (user_id, status, reviewed_at)
+      await pool.query(
+        `INSERT INTO kyc_verifications (user_id, status, reviewed_at)
            VALUES ($1, 'approved', NOW())`,
-          [userId]
-        );
+        [userId]
+      );
       }
     } else {
       // Set KYC as pending or remove approval
@@ -1931,12 +1931,12 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
       
       if (existingCheck.rows.length > 0) {
         // Update existing record to pending
-        await pool.query(
-          `UPDATE kyc_verifications 
-           SET status = 'pending', reviewed_at = NULL
-           WHERE user_id = $1`,
-          [userId]
-        );
+      await pool.query(
+        `UPDATE kyc_verifications 
+         SET status = 'pending', reviewed_at = NULL
+         WHERE user_id = $1`,
+        [userId]
+      );
       } else {
         // Insert new pending record
         await pool.query(
