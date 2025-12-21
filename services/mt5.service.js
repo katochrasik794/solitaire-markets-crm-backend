@@ -385,3 +385,69 @@ export const changePassword = async (login, newPassword, passwordType = 'master'
   }
   return { success: true, data };
 };
+
+/**
+ * POST /users/{login}/enable
+ * Enable MT5 account
+ */
+export const enableAccount = async (login) => {
+  const res = await fetch(`${MT5_BASE_URL}/users/${login}/enable`, {
+    method: 'POST',
+    headers: getMT5Headers()
+  });
+
+  const text = await res.text();
+  let data = {};
+  try {
+    if (text && text.trim()) {
+      data = JSON.parse(text);
+    }
+  } catch (e) {
+    console.warn('MT5 Response was not JSON:', text);
+    // If response is not JSON but status is OK, consider it success
+    if (res.ok) {
+      return { success: true, data: { message: 'Account enabled successfully' } };
+    }
+    data = { error: text, message: text };
+  }
+
+  if (!res.ok) {
+    throw new Error(
+      data.Message || data.error || data.message || `Failed to enable account: ${res.status}`
+    );
+  }
+  return { success: true, data };
+};
+
+/**
+ * POST /users/{login}/disable
+ * Disable MT5 account
+ */
+export const disableAccount = async (login) => {
+  const res = await fetch(`${MT5_BASE_URL}/users/${login}/disable`, {
+    method: 'POST',
+    headers: getMT5Headers()
+  });
+
+  const text = await res.text();
+  let data = {};
+  try {
+    if (text && text.trim()) {
+      data = JSON.parse(text);
+    }
+  } catch (e) {
+    console.warn('MT5 Response was not JSON:', text);
+    // If response is not JSON but status is OK, consider it success
+    if (res.ok) {
+      return { success: true, data: { message: 'Account disabled successfully' } };
+    }
+    data = { error: text, message: text };
+  }
+
+  if (!res.ok) {
+    throw new Error(
+      data.Message || data.error || data.message || `Failed to disable account: ${res.status}`
+    );
+  }
+  return { success: true, data };
+};

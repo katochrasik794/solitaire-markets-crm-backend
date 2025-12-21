@@ -4366,6 +4366,86 @@ router.post('/mt5/withdraw', authenticateAdmin, async (req, res, next) => {
 });
 
 /**
+ * POST /api/admin/mt5/account/:accountId/enable
+ * Enable MT5 account
+ */
+router.post('/mt5/account/:accountId/enable', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { accountId } = req.params;
+
+    if (!accountId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Account ID is required'
+      });
+    }
+
+    const login = parseInt(accountId);
+    if (isNaN(login)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid account ID'
+      });
+    }
+
+    const result = await mt5Service.enableAccount(login);
+
+    res.json({
+      success: true,
+      message: 'Account enabled successfully',
+      data: result.data
+    });
+  } catch (error) {
+    console.error('MT5 enable account error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to enable account',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * POST /api/admin/mt5/account/:accountId/disable
+ * Disable MT5 account
+ */
+router.post('/mt5/account/:accountId/disable', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { accountId } = req.params;
+
+    if (!accountId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Account ID is required'
+      });
+    }
+
+    const login = parseInt(accountId);
+    if (isNaN(login)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid account ID'
+      });
+    }
+
+    const result = await mt5Service.disableAccount(login);
+
+    res.json({
+      success: true,
+      message: 'Account disabled successfully',
+      data: result.data
+    });
+  } catch (error) {
+    console.error('MT5 disable account error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to disable account',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
  * POST /api/admin/mt5/credit
  * Add credit/bonus to MT5 account (alias for deposit)
  */
