@@ -3,16 +3,85 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Create transporter
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: parseInt(process.env.EMAIL_PORT || '587'),
-  secure: false, // true for 465, false for other ports
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+// Validate required email environment variables
+const requiredEmailVars = ['EMAIL_HOST', 'EMAIL_USER', 'EMAIL_PASS'];
+const missingVars = requiredEmailVars.filter(varName => !process.env[varName]);
+
+if (missingVars.length > 0) {
+  console.error('[EMAIL CONFIG] Missing required environment variables:', missingVars.join(', '));
+  console.error('[EMAIL CONFIG] Email functionality will not work until these are set.');
+}
+
+// Function to create transporter with current env vars
+const createTransporter = () => {
+  const emailHost = process.env.EMAIL_HOST;
+  const emailPort = parseInt(process.env.EMAIL_PORT || '587');
+  const emailUser = process.env.EMAIL_USER;
+  const emailPass = process.env.EMAIL_PASS;
+  
+  // Validate required variables
+  if (!emailHost || !emailUser || !emailPass) {
+    throw new Error(`Missing email configuration: EMAIL_HOST=${!!emailHost}, EMAIL_USER=${!!emailUser}, EMAIL_PASS=${!!emailPass}`);
+  }
+  
+  // Trim whitespace from API key (common issue)
+  const cleanApiKey = emailPass.trim();
+  
+  // Validate SendGrid API key format if using SendGrid
+  if (emailHost.includes('sendgrid') && emailUser === 'apikey') {
+    if (!cleanApiKey.startsWith('SG.')) {
+      console.warn('[EMAIL CONFIG] ⚠️  WARNING: SendGrid API key should start with "SG." but yours starts with:', cleanApiKey.substring(0, 3));
+      console.warn('[EMAIL CONFIG] Make sure you copied the full API key from SendGrid dashboard.');
+    }
+    if (cleanApiKey.length < 50) {
+      console.warn('[EMAIL CONFIG] ⚠️  WARNING: SendGrid API key seems too short. Full keys are usually 69+ characters.');
+    }
+  }
+  
+  console.log('[EMAIL CONFIG] Creating transporter:', {
+    host: emailHost,
+    port: emailPort,
+    secure: emailPort === 465,
+    user: emailUser,
+    passLength: cleanApiKey.length,
+    passStartsWith: cleanApiKey.substring(0, 3) + '...',
+    passEndsWith: '...' + cleanApiKey.substring(cleanApiKey.length - 3),
+    from: process.env.EMAIL_FROM || 'no_reply@solitairemarkets.me'
+  });
+  
+  return nodemailer.createTransport({
+    host: emailHost,
+    port: emailPort,
+    secure: emailPort === 465, // true for 465, false for other ports
+    auth: {
+      user: emailUser.trim(),
+      pass: cleanApiKey,
+    },
+    // Add connection timeout
+    connectionTimeout: 10000, // 10 seconds
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
+    // Add debug option in development
+    debug: process.env.NODE_ENV === 'development',
+    logger: process.env.NODE_ENV === 'development'
+  });
+};
+
+// Create transporter on module load
+let transporter = null;
+try {
+  transporter = createTransporter();
+  console.log('[EMAIL CONFIG] ✅ Transporter initialized successfully');
+  
+  // Warn if EMAIL_FROM doesn't match verified sender
+  const verifiedSender = 'no_reply@solitairemarkets.me';
+  if (process.env.EMAIL_FROM && process.env.EMAIL_FROM !== verifiedSender) {
+    console.warn(`[EMAIL CONFIG] ⚠️  WARNING: EMAIL_FROM (${process.env.EMAIL_FROM}) does not match verified sender (${verifiedSender}). Emails may fail.`);
+  }
+} catch (error) {
+  console.error('[EMAIL CONFIG] ❌ Failed to create transporter:', error.message);
+  console.error('[EMAIL CONFIG] Please check your .env file and ensure EMAIL_HOST, EMAIL_USER, and EMAIL_PASS are set correctly.');
+}
 
 /**
  * Send password reset email
@@ -201,8 +270,28 @@ export const sendEmail = async ({ to, subject, html, text, attachments }) => {
  * @returns {Promise<object>} - Email send result
  */
 export const sendOTPEmail = async (email, otp) => {
+  // Use verified sender email - must match the verified sender in email service
+  // IMPORTANT: The verified sender is no_reply@solitairemarkets.me (with underscore, not hyphen)
+  const verifiedSender = 'no_reply@solitairemarkets.me';
+  const fromEmail = process.env.EMAIL_FROM || verifiedSender;
+  const fromName = process.env.EMAIL_FROM_NAME || 'Solitaire Markets';
+  
+  // Validate that fromEmail matches verified sender
+  if (fromEmail !== verifiedSender) {
+    console.warn(`[EMAIL WARNING] From email (${fromEmail}) does not match verified sender (${verifiedSender}). Email may be rejected.`);
+  }
+  
+  // Log configuration for debugging
+  console.log('[EMAIL DEBUG] Sending OTP email:', {
+    to: email,
+    from: `${fromName} <${fromEmail}>`,
+    host: process.env.EMAIL_HOST,
+    port: process.env.EMAIL_PORT,
+    user: process.env.EMAIL_USER ? '***set***' : 'NOT SET'
+  });
+
   const mailOptions = {
-    from: `"${process.env.EMAIL_FROM_NAME || 'Solitaire Markets'}" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+    from: `"${fromName}" <${fromEmail}>`,
     to: email,
     subject: 'Verify Your Email - Solitaire Markets',
     html: `
@@ -251,11 +340,117 @@ export const sendOTPEmail = async (email, otp) => {
   };
 
   try {
-    const info = await transporter.sendMail(mailOptions);
-    console.log('OTP email sent:', info.messageId);
+    // Recreate transporter if it doesn't exist (in case env vars were updated)
+    if (!transporter) {
+      console.log('[EMAIL DEBUG] Transporter not initialized, creating new one...');
+      try {
+        transporter = createTransporter();
+        console.log('[EMAIL DEBUG] ✅ Transporter created successfully');
+      } catch (createError) {
+        console.error('[EMAIL DEBUG] ❌ Failed to create transporter:', createError.message);
+        throw new Error(`Email transporter not initialized: ${createError.message}. Check EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS environment variables.`);
+      }
+    }
+    
+    // Double-check transporter is valid
+    if (!transporter || typeof transporter.sendMail !== 'function') {
+      console.error('[EMAIL DEBUG] ❌ Transporter is invalid, attempting to recreate...');
+      try {
+        transporter = createTransporter();
+      } catch (recreateError) {
+        throw new Error(`Email transporter is invalid and cannot be recreated: ${recreateError.message}`);
+      }
+    }
+
+    // Test connection before sending (but don't fail if verify fails, just log it)
+    try {
+      await transporter.verify();
+      console.log('[EMAIL DEBUG] ✅ SMTP connection verified successfully');
+    } catch (verifyError) {
+      console.error('[EMAIL DEBUG] ⚠️  SMTP verification failed, but attempting to send anyway:', {
+        message: verifyError.message,
+        code: verifyError.code,
+        command: verifyError.command,
+        response: verifyError.response,
+        responseCode: verifyError.responseCode
+      });
+      
+      // If it's an auth error, recreate transporter and try again
+      if (verifyError.code === 'EAUTH' || verifyError.responseCode === 535) {
+        console.log('[EMAIL DEBUG] Auth error detected, recreating transporter with fresh credentials...');
+        try {
+          transporter = createTransporter();
+          // Try verify again
+          await transporter.verify();
+          console.log('[EMAIL DEBUG] ✅ SMTP connection verified after recreation');
+        } catch (retryError) {
+          console.error('[EMAIL DEBUG] ❌ Still failing after recreation:', retryError.message);
+          throw new Error(`SMTP authentication failed: ${verifyError.message}. Please check EMAIL_USER (should be "apikey" for SendGrid) and EMAIL_PASS (your SendGrid API key).`);
+        }
+      } else {
+        // For non-auth errors, continue anyway (some servers don't support verify)
+        console.log('[EMAIL DEBUG] Non-auth error, continuing with send attempt...');
+      }
+    }
+
+    // Send the email
+    let info;
+    try {
+      info = await transporter.sendMail(mailOptions);
+    } catch (sendError) {
+      console.error('[EMAIL DEBUG] Error during sendMail:', {
+        message: sendError.message,
+        code: sendError.code,
+        response: sendError.response,
+        responseCode: sendError.responseCode
+      });
+      
+      // If send fails with auth error, try recreating transporter once more
+      if (sendError.code === 'EAUTH' || sendError.responseCode === 535) {
+        console.log('[EMAIL DEBUG] Auth error during send, recreating transporter one more time...');
+        try {
+          transporter = createTransporter();
+          info = await transporter.sendMail(mailOptions);
+          console.log('[EMAIL DEBUG] ✅ Email sent successfully after transporter recreation');
+        } catch (retrySendError) {
+          throw new Error(`SMTP authentication failed: ${sendError.message}. Please check EMAIL_USER (should be "apikey" for SendGrid) and EMAIL_PASS (your SendGrid API key).`);
+        }
+      } else {
+        throw sendError;
+      }
+    }
+    console.log('[EMAIL DEBUG] OTP email sent successfully:', {
+      messageId: info.messageId,
+      response: info.response,
+      accepted: info.accepted,
+      rejected: info.rejected
+    });
     return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error('Error sending OTP email:', error);
-    throw new Error('Failed to send OTP email');
+    console.error('[EMAIL DEBUG] Error sending OTP email:', {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      response: error.response,
+      responseCode: error.responseCode,
+      stack: error.stack
+    });
+    
+    // Provide more specific error messages
+    if (error.code === 'EAUTH' || error.responseCode === 535) {
+      const errorMsg = error.response || error.message || '';
+      if (errorMsg.includes('Invalid login') || errorMsg.includes('Authentication failed')) {
+        throw new Error('Email authentication failed. Your SendGrid API key may be invalid, expired, or revoked. Please check EMAIL_PASS (should be your SendGrid API key) and EMAIL_USER (should be "apikey" for SendGrid).');
+      }
+      throw new Error('Email authentication failed. Please check EMAIL_USER and EMAIL_PASS. For SendGrid, EMAIL_USER should be "apikey" and EMAIL_PASS should be your API key.');
+    } else if (error.code === 'ECONNECTION') {
+      throw new Error('Cannot connect to email server. Please check EMAIL_HOST and EMAIL_PORT.');
+    } else if (error.code === 'ETIMEDOUT') {
+      throw new Error('Email server connection timed out. Please check your network and email server settings.');
+    } else if (error.response) {
+      throw new Error(`Email server rejected the request: ${error.response}`);
+    } else {
+      throw new Error(`Failed to send OTP email: ${error.message}`);
+    }
   }
 };

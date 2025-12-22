@@ -528,11 +528,15 @@ router.post('/send-registration-otp', async (req, res, next) => {
     try {
       await sendOTPEmail(email.trim().toLowerCase(), otp);
     } catch (emailError) {
-      console.error('Email sending error:', emailError);
+      console.error('[REGISTER OTP] Email sending error:', {
+        message: emailError.message,
+        stack: emailError.stack,
+        email: email.trim().toLowerCase()
+      });
       otpStore.delete(email.trim().toLowerCase());
       return res.status(500).json({
         success: false,
-        message: 'Failed to send OTP email. Please try again.'
+        message: emailError.message || 'Failed to send OTP email. Please check your email configuration and try again.'
       });
     }
 
@@ -541,8 +545,15 @@ router.post('/send-registration-otp', async (req, res, next) => {
       message: 'OTP has been sent to your email address'
     });
   } catch (error) {
-    console.error('Send registration OTP error:', error);
-    next(error);
+    console.error('[REGISTER OTP] Unexpected error:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+    res.status(500).json({
+      success: false,
+      message: error.message || 'An unexpected error occurred. Please try again.'
+    });
   }
 });
 
