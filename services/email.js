@@ -27,8 +27,14 @@ const createTransporter = () => {
   // Trim whitespace from API key (common issue)
   const cleanApiKey = emailPass.trim();
   
-  // Validate SendGrid API key format if using SendGrid
-  if (emailHost.includes('sendgrid') && emailUser === 'apikey') {
+  // Validate SendGrid configuration
+  if (emailHost.includes('sendgrid')) {
+    // CRITICAL: SendGrid requires EMAIL_USER to be "apikey", not the API key name
+    if (emailUser !== 'apikey') {
+      const errorMsg = `[EMAIL CONFIG] ❌ CRITICAL ERROR: For SendGrid, EMAIL_USER must be "apikey", but it's currently set to "${emailUser}". This will cause authentication failures. Please update your environment variable EMAIL_USER to "apikey".`;
+      console.error(errorMsg);
+      throw new Error(errorMsg);
+    }
     if (!cleanApiKey.startsWith('SG.')) {
       console.warn('[EMAIL CONFIG] ⚠️  WARNING: SendGrid API key should start with "SG." but yours starts with:', cleanApiKey.substring(0, 3));
       console.warn('[EMAIL CONFIG] Make sure you copied the full API key from SendGrid dashboard.');
