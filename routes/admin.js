@@ -8143,5 +8143,164 @@ router.get('/logs/user/detail/:logId', authenticateAdmin, async (req, res, next)
   }
 });
 
+/**
+ * ============================================
+ * IB Requests Integration
+ * ============================================
+ */
+
+/**
+ * GET /api/admin/ib-requests/pending
+ * Fetch pending IB requests from IB database
+ */
+router.get('/ib-requests/pending', authenticateAdmin, async (req, res) => {
+  try {
+    // Try to connect to IB database using IB_DATABASE_URL or same database
+    const ibDatabaseUrl = process.env.IB_DATABASE_URL || process.env.DATABASE_URL;
+    
+    if (!ibDatabaseUrl) {
+      return res.status(500).json({
+        ok: false,
+        error: 'IB database connection not configured'
+      });
+    }
+
+    // Create a temporary pool for IB database connection
+    const { Pool } = await import('pg');
+    const ibPool = new Pool({
+      connectionString: ibDatabaseUrl,
+      ssl: process.env.NODE_ENV === 'production' || ibDatabaseUrl.includes('render.com') 
+        ? { rejectUnauthorized: false } 
+        : false
+    });
+
+    try {
+      // Query pending IB requests
+      const result = await ibPool.query(
+        `SELECT 
+          id,
+          full_name,
+          email,
+          status,
+          ib_type,
+          country,
+          referral_code,
+          submitted_at,
+          created_at,
+          admin_comments
+        FROM ib_requests
+        WHERE status = 'pending'
+        ORDER BY submitted_at DESC, created_at DESC
+        LIMIT 100`
+      );
+
+      await ibPool.end();
+
+      res.json({
+        ok: true,
+        requests: result.rows || []
+      });
+    } catch (dbError) {
+      await ibPool.end();
+      throw dbError;
+    }
+  } catch (error) {
+    console.error('Error fetching pending IB requests:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch pending IB requests'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/ib-requests/cross-login
+ * Generate a cross-login token for IB admin if credentials match
+ */
+router.post('/ib-requests/cross-login', authenticateAdmin, async (req, res) => {
+  try {
+    const { email } = req.body;
+    const adminEmail = req.admin?.email || email;
+
+    if (!adminEmail) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Email is required'
+      });
+    }
+
+    // Try to connect to IB database to find matching admin
+    const ibDatabaseUrl = process.env.IB_DATABASE_URL || process.env.DATABASE_URL;
+    
+    if (!ibDatabaseUrl) {
+      return res.status(500).json({
+        ok: false,
+        error: 'IB database connection not configured'
+      });
+    }
+
+    const { Pool } = await import('pg');
+    const ibPool = new Pool({
+      connectionString: ibDatabaseUrl,
+      ssl: process.env.NODE_ENV === 'production' || ibDatabaseUrl.includes('render.com') 
+        ? { rejectUnauthorized: false } 
+        : false
+    });
+
+    try {
+      // Check if admin exists in IB admin table
+      const adminResult = await ibPool.query(
+        `SELECT id, email, full_name, is_active 
+         FROM ib_admins 
+         WHERE email = $1 AND is_active = true`,
+        [adminEmail.toLowerCase()]
+      );
+
+      await ibPool.end();
+
+      if (adminResult.rows.length === 0) {
+        return res.json({
+          ok: false,
+          error: 'No matching IB admin found with the same email'
+        });
+      }
+
+      // Generate a JWT token for IB admin (using IB's JWT secret if available)
+      const jwt = await import('jsonwebtoken');
+      const ibJwtSecret = process.env.IB_JWT_SECRET || process.env.JWT_SECRET || 'dev-secret';
+      
+      const ibAdmin = adminResult.rows[0];
+      const ibToken = jwt.default.sign(
+        {
+          id: ibAdmin.id,
+          email: ibAdmin.email,
+          role: 'admin'
+        },
+        ibJwtSecret,
+        { expiresIn: '1h' }
+      );
+
+      res.json({
+        ok: true,
+        ibToken,
+        admin: {
+          id: ibAdmin.id,
+          email: ibAdmin.email,
+          full_name: ibAdmin.full_name
+        }
+      });
+    } catch (dbError) {
+      await ibPool.end();
+      throw dbError;
+    }
+  } catch (error) {
+    console.error('Error generating cross-login token:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to generate cross-login token'
+    });
+  }
+});
+
 export default router;
 
