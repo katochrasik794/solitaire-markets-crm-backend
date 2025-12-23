@@ -12,7 +12,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import crypto from 'crypto';
-import { sendOperationEmail, sendEmail } from '../services/email.js';
+import { sendOperationEmail, sendEmail, getLogoUrl } from '../services/email.js';
 import { logAdminAction } from '../services/logging.service.js';
 import { captureResponseData, logAdminActionMiddleware } from '../middleware/logging.middleware.js';
 
@@ -76,7 +76,8 @@ const authenticateAdmin = (req, res, next) => {
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({
-        success: false,
+        ok: false,
+        error: 'No token provided or invalid format',
         message: 'No token provided or invalid format'
       });
     }
@@ -85,7 +86,8 @@ const authenticateAdmin = (req, res, next) => {
 
     if (!token) {
       return res.status(401).json({
-        success: false,
+        ok: false,
+        error: 'Access token is required',
         message: 'Access token is required'
       });
     }
@@ -95,7 +97,8 @@ const authenticateAdmin = (req, res, next) => {
     // Check if it's an admin token
     if (!decoded.adminId) {
       return res.status(403).json({
-        success: false,
+        ok: false,
+        error: 'Admin access required',
         message: 'Admin access required'
       });
     }
@@ -105,19 +108,22 @@ const authenticateAdmin = (req, res, next) => {
   } catch (error) {
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
-        success: false,
+        ok: false,
+        error: 'Token has expired',
         message: 'Token has expired'
       });
     }
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({
-        success: false,
+        ok: false,
+        error: 'Invalid token',
         message: 'Invalid token'
       });
     }
     return res.status(500).json({
-      success: false,
-      message: 'Token verification failed'
+      ok: false,
+      error: 'Token verification failed',
+      message: error.message || 'Token verification failed'
     });
   }
 };
@@ -7043,6 +7049,9 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
           htmlContent = selectedTemplate.html_code;
 
           // Replace standard variables
+          // Get logo URL - use base64 embedded logo for email compatibility
+          const logoUrl = getLogoUrl();
+          
           const vars = {
             ...templateVariables,
             recipientName,
@@ -7052,20 +7061,55 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
             currentYear: new Date().getFullYear(),
             companyName: 'Solitaire Markets',
             companyEmail: 'support@solitairemarkets.me',
-            logoUrl: 'https://solitairemarkets.me/assets/images/logo.png'
+            logoUrl: logoUrl
           };
 
+          // Replace all variables (handle both {{key}} and {{ key }} formats, case-insensitive)
           Object.keys(vars).forEach(key => {
-            const regex = new RegExp(`{{${key}}}`, 'g');
-            htmlContent = htmlContent.replace(regex, vars[key]);
+            // Match {{key}} or {{ key }} with optional spaces, case-insensitive
+            const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'gi');
+            htmlContent = htmlContent.replace(regex, String(vars[key] || ''));
           });
+          
+          // Force replace any remaining logoUrl variables (case-insensitive, handle all variations)
+          htmlContent = htmlContent.replace(/\{\{\s*logoUrl\s*\}\}/gi, logoUrl);
+          htmlContent = htmlContent.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
+          htmlContent = htmlContent.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
+          
+          // Ensure logo is always present - check if logo image exists in HTML
+          const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) && 
+                            (htmlContent.includes('logo') || htmlContent.includes('Logo') || htmlContent.includes(logoUrl));
+          
+          if (!hasLogoImg) {
+            console.log('📧 Adding logo to template that doesn\'t have one:', selectedTemplate.name);
+            // Try to inject logo after <body> tag or at the beginning
+            const bodyMatch = htmlContent.match(/<body[^>]*>/i);
+            if (bodyMatch) {
+              const logoHtml = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
+                <img src="${logoUrl}" alt="Solitaire Markets" style="height: 50px; max-width: 200px; display: block; margin: 0 auto;" />
+              </div>`;
+              htmlContent = htmlContent.replace(bodyMatch[0], bodyMatch[0] + logoHtml);
+            } else {
+              // If no body tag, add at the very beginning
+              htmlContent = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
+                <img src="${logoUrl}" alt="Solitaire Markets" style="height: 50px; max-width: 200px; display: block; margin: 0 auto;" />
+              </div>` + htmlContent;
+            }
+          }
         } else {
-          // Wrap body in basic template if no template selected?
-          // For now, just use body as is or wrap in simple div
+          // Wrap body in basic template if no template selected
+          const logoUrl = getLogoUrl();
           if (isHtml && !body.includes('<html')) {
             htmlContent = `
-                        <div style="font-family: Arial, sans-serif; padding: 20px;">
+                        <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto;">
+                            <div style="text-align: center; margin-bottom: 20px;">
+                              <img src="${logoUrl}" alt="Solitaire Markets" style="height: 50px; margin-bottom: 10px;" />
+                            </div>
                             ${body}
+                            <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
+                            <p style="font-size: 12px; color: #666; text-align: center;">
+                              © ${new Date().getFullYear()} Solitaire Markets. All rights reserved.
+                            </p>
                         </div>
                     `;
           }
@@ -7129,13 +7173,73 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
 // GET /api/admin/email-templates
 router.get('/email-templates', authenticateAdmin, async (req, res) => {
   try {
+    // Check if table exists first
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'email_templates'
+      );
+    `);
+    
+    if (!tableCheck.rows[0].exists) {
+      // Table doesn't exist, create it
+      console.log('email_templates table not found, creating...');
+      
+      // Create the update function first (if it doesn't exist)
+      await pool.query(`
+        CREATE OR REPLACE FUNCTION update_updated_at_column()
+        RETURNS TRIGGER AS $$
+        BEGIN
+          NEW.updated_at = NOW();
+          RETURN NEW;
+        END;
+        $$ language 'plpgsql';
+      `);
+      
+      // Create the table
+      await pool.query(`
+        CREATE TABLE email_templates (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          description TEXT,
+          html_code TEXT NOT NULL,
+          variables JSONB DEFAULT '[]'::jsonb,
+          is_default BOOLEAN DEFAULT FALSE,
+          from_email VARCHAR(255),
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW(),
+          created_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+        );
+      `);
+      
+      // Create index
+      await pool.query(`
+        CREATE INDEX idx_email_templates_name ON email_templates(name);
+      `);
+      
+      // Create trigger
+      await pool.query(`
+        CREATE TRIGGER update_email_templates_updated_at 
+          BEFORE UPDATE ON email_templates
+          FOR EACH ROW 
+          EXECUTE FUNCTION update_updated_at_column();
+      `);
+      
+      console.log('email_templates table created successfully');
+    }
+    
     const result = await pool.query(
       'SELECT * FROM email_templates ORDER BY created_at DESC'
     );
     res.json({ ok: true, templates: result.rows });
   } catch (error) {
     console.error('Get email templates error:', error);
-    res.status(500).json({ ok: false, error: error.message });
+    res.status(500).json({ 
+      ok: false, 
+      error: error.message || 'Failed to load templates',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
@@ -7260,8 +7364,10 @@ router.post('/email-templates/:id/send-test', authenticateAdmin, async (req, res
     }
 
     // Also replace standard variables if not provided
+    const logoUrl = getLogoUrl();
+    
     const standardVars = {
-      logoUrl: 'https://solitairemarkets.me/assets/images/logo.png', // Placeholder
+      logoUrl: logoUrl,
       companyEmail: 'support@solitairemarkets.me',
       currentYear: new Date().getFullYear(),
       recipientName: 'Test User'
@@ -7269,10 +7375,30 @@ router.post('/email-templates/:id/send-test', authenticateAdmin, async (req, res
 
     Object.keys(standardVars).forEach(key => {
       if (!variables || !variables[key]) {
-        const regex = new RegExp(`{{${key}}}`, 'g');
-        htmlContent = htmlContent.replace(regex, standardVars[key]);
+        // Match {{key}} or {{ key }} with optional spaces, case-insensitive
+        const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'gi');
+        htmlContent = htmlContent.replace(regex, String(standardVars[key] || ''));
       }
     });
+    
+    // Force replace any remaining logoUrl variables (case-insensitive)
+    htmlContent = htmlContent.replace(/\{\{\s*logoUrl\s*\}\}/gi, logoUrl);
+    htmlContent = htmlContent.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
+    htmlContent = htmlContent.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
+    
+    // Ensure logo is always present in test emails
+    const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) && 
+                      (htmlContent.includes('logo') || htmlContent.includes('Logo') || htmlContent.includes(logoUrl));
+    
+    if (!hasLogoImg) {
+      const bodyMatch = htmlContent.match(/<body[^>]*>/i);
+      if (bodyMatch) {
+        const logoHtml = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
+          <img src="${logoUrl}" alt="Solitaire Markets" style="height: 50px; max-width: 200px; display: block; margin: 0 auto;" />
+        </div>`;
+        htmlContent = htmlContent.replace(bodyMatch[0], bodyMatch[0] + logoHtml);
+      }
+    }
 
     await sendEmail({
       to: email,
@@ -7326,6 +7452,8 @@ router.post('/email-templates/preview', authenticateAdmin, async (req, res) => {
     let previewHtml = html_code;
 
     // Default variables for preview
+    const logoUrl = getLogoUrl();
+    
     const defaultVars = {
       recipientName: 'John Doe',
       recipientEmail: 'john@example.com',
@@ -7334,7 +7462,7 @@ router.post('/email-templates/preview', authenticateAdmin, async (req, res) => {
       currentYear: new Date().getFullYear(),
       companyName: 'Solitaire Markets',
       companyEmail: 'support@solitairemarkets.me',
-      logoUrl: 'https://solitairemarkets.me/assets/images/logo.png',
+      logoUrl: logoUrl,
       login: '123456',
       accountLogin: '123456',
       password: 'password123',
@@ -7355,12 +7483,32 @@ router.post('/email-templates/preview', authenticateAdmin, async (req, res) => {
       defaultVarsKeys: Object.keys(defaultVars)
     });
 
-    // Replace variables
+    // Replace variables (handle both {{key}} and {{ key }} formats, case-insensitive)
     Object.keys(defaultVars).forEach(key => {
-      // Handle {{key}} and {{ key }}
-      const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
-      previewHtml = previewHtml.replace(regex, defaultVars[key]);
+      // Match {{key}} or {{ key }} with optional spaces, case-insensitive
+      const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'gi');
+      previewHtml = previewHtml.replace(regex, String(defaultVars[key] || ''));
     });
+    
+    // Force replace any remaining logoUrl variables (case-insensitive)
+    previewHtml = previewHtml.replace(/\{\{\s*logoUrl\s*\}\}/gi, logoUrl);
+    previewHtml = previewHtml.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
+    previewHtml = previewHtml.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
+    
+    // Ensure logo is always present in preview
+    const hasLogoImg = /<img[^>]*src[^>]*>/i.test(previewHtml) && 
+                      (previewHtml.includes('logo') || previewHtml.includes('Logo') || previewHtml.includes(logoUrl));
+    
+    if (!hasLogoImg) {
+      // Try to inject logo after <body> tag
+      const bodyMatch = previewHtml.match(/<body[^>]*>/i);
+      if (bodyMatch) {
+        const logoHtml = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
+          <img src="${logoUrl}" alt="Solitaire Markets" style="height: 50px; max-width: 200px; display: block; margin: 0 auto;" />
+        </div>`;
+        previewHtml = previewHtml.replace(bodyMatch[0], bodyMatch[0] + logoHtml);
+      }
+    }
 
     res.json({ ok: true, preview_html: previewHtml });
   } catch (error) {
