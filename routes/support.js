@@ -95,7 +95,7 @@ router.post('/', authenticate, async (req, res) => {
             if (userEmail) {
                 setImmediate(async () => {
                     try {
-                        await sendTicketCreatedEmail(userEmail, userName, ticketId, subject);
+                        await sendTicketCreatedEmail(userEmail, userName, ticketId, subject, category || 'General', priority || 'medium');
                         console.log(`Ticket created email sent to ${userEmail}`);
                     } catch (emailErr) {
                         console.error('Failed to send ticket created email:', emailErr);
@@ -453,7 +453,8 @@ router.post('/admin/:id/reply', authenticateAdmin, async (req, res) => {
         // Send notification to user using template
         try {
             const userName = ticket.first_name ? `${ticket.first_name} ${ticket.last_name || ''}`.trim() : 'Valued Customer';
-            await sendTicketResponseEmail(ticket.user_email, userName, id, ticket.subject, message);
+            const currentStatus = status && status !== 'open' ? status : ticket.status || 'open';
+            await sendTicketResponseEmail(ticket.user_email, userName, id, ticket.subject, message, currentStatus);
             console.log(`Ticket response email sent to ${ticket.user_email}`);
         } catch (emailErr) {
             console.error('Failed to send user notification email:', emailErr);

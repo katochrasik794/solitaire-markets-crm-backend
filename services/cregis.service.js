@@ -175,8 +175,8 @@ export const createPayment = async ({
       order_currency: currency.toUpperCase(),
       payer_id: String(payerId),
       valid_time: validTime,
-      success_url: successUrl || `${process.env.FRONTEND_URL || 'http://localhost:3000'}/user/deposits/cregis-usdt-trc20`,
-      cancel_url: cancelUrl || `${process.env.FRONTEND_URL || 'http://localhost:3000'}/user/deposits`,
+      success_url: successUrl || `${process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com'}/user/deposits/cregis-usdt-trc20`,
+      cancel_url: cancelUrl || `${process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com'}/user/deposits`,
       tokens: JSON.stringify(tokens)
     };
 

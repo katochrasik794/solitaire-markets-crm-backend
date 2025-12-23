@@ -7177,8 +7177,12 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
           htmlContent = selectedTemplate.html_code;
 
           // Replace standard variables
-          // Get logo URL - use base64 embedded logo for email compatibility
-          const logoUrl = getLogoUrl();
+          // Get logo URL - use actual URL for email templates
+          const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
+          
+          // Get frontend URL - use live URL as default
+          const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+          const dashboardUrl = `${frontendUrl}/user/dashboard`;
           
           const vars = {
             ...templateVariables,
@@ -7189,7 +7193,9 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
             currentYear: new Date().getFullYear(),
             companyName: 'Solitaire Markets',
             companyEmail: 'support@solitairemarkets.me',
-            logoUrl: logoUrl
+            dashboardUrl: dashboardUrl,
+            frontendUrl: frontendUrl,
+            logoUrl: logoUrl // Use actual URL: https://portal.solitairemarkets.com/logo.svg
           };
 
           // Replace all variables (handle both {{key}} and {{ key }} formats, case-insensitive)
@@ -7200,13 +7206,45 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
           });
           
           // Force replace any remaining logoUrl variables (case-insensitive, handle all variations)
+          // Use actual URL
           htmlContent = htmlContent.replace(/\{\{\s*logoUrl\s*\}\}/gi, logoUrl);
           htmlContent = htmlContent.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
           htmlContent = htmlContent.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
           
+          // Replace any CID references with actual URL
+          htmlContent = htmlContent.replace(/cid:solitaire-logo/gi, logoUrl);
+          
+          // Replace any base64 logo URLs with actual URL
+          const base64Pattern = /data:image\/svg\+xml;base64,[^"'\s>]+/gi;
+          htmlContent = htmlContent.replace(base64Pattern, logoUrl);
+          
+          // Fix common issue: replace companyEmail in href attributes with dashboardUrl
+          htmlContent = htmlContent.replace(/href=["']\{\{\s*companyEmail\s*\}\}["']/gi, `href="${dashboardUrl}"`);
+          htmlContent = htmlContent.replace(/href=["']\{\{companyEmail\}\}["']/gi, `href="${dashboardUrl}"`);
+          
+          // Also replace dashboardUrl variations
+          htmlContent = htmlContent.replace(/\{\{\s*dashboardUrl\s*\}\}/gi, dashboardUrl);
+          htmlContent = htmlContent.replace(/\{\{\s*dashboard_url\s*\}\}/gi, dashboardUrl);
+          htmlContent = htmlContent.replace(/\{\{\s*DASHBOARD_URL\s*\}\}/gi, dashboardUrl);
+          
+          // CRITICAL: Replace all hardcoded wrong URLs with correct dashboard URL
+          // Replace any solitairemarkets.me URLs (wrong domain) with correct dashboard URL
+          htmlContent = htmlContent.replace(/https?:\/\/solitairemarkets\.me\/[^"'\s>]*/gi, dashboardUrl);
+          htmlContent = htmlContent.replace(/https?:\/\/www\.solitairemarkets\.me\/[^"'\s>]*/gi, dashboardUrl);
+          
+          // Replace any "View Dashboard" or similar links that might have wrong URLs
+          htmlContent = htmlContent.replace(/href=["']https?:\/\/solitairemarkets\.me[^"']*["']/gi, `href="${dashboardUrl}"`);
+          htmlContent = htmlContent.replace(/href=["']https?:\/\/www\.solitairemarkets\.me[^"']*["']/gi, `href="${dashboardUrl}"`);
+          
+          // Also replace any localhost URLs that might be in templates
+          htmlContent = htmlContent.replace(/href=["']https?:\/\/localhost[^"']*["']/gi, `href="${dashboardUrl}"`);
+          
+          // Replace any href attributes that contain "dashboard" but have wrong domain
+          htmlContent = htmlContent.replace(/href=["']([^"']*solitairemarkets\.me[^"']*dashboard[^"']*)["']/gi, `href="${dashboardUrl}"`);
+          
           // Ensure logo is always present - check if logo image exists in HTML
           const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) && 
-                            (htmlContent.includes('logo') || htmlContent.includes('Logo') || htmlContent.includes(logoUrl));
+                            (htmlContent.toLowerCase().includes('logo') || htmlContent.toLowerCase().includes('solitaire') || htmlContent.includes(logoUrl));
           
           if (!hasLogoImg) {
             console.log('📧 Adding logo to template that doesn\'t have one:', selectedTemplate.name);
@@ -7493,11 +7531,15 @@ router.post('/email-templates/:id/send-test', authenticateAdmin, async (req, res
     }
 
     // Also replace standard variables if not provided
-    const logoUrl = getLogoUrl();
+    const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
+    const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+    const dashboardUrl = `${frontendUrl}/user/dashboard`;
     
     const standardVars = {
-      logoUrl: logoUrl,
+      logoUrl: logoUrl, // Use actual URL: https://portal.solitairemarkets.com/logo.svg
       companyEmail: 'support@solitairemarkets.me',
+      dashboardUrl: dashboardUrl,
+      frontendUrl: frontendUrl,
       currentYear: new Date().getFullYear(),
       recipientName: 'Test User'
     };
@@ -7510,26 +7552,33 @@ router.post('/email-templates/:id/send-test', authenticateAdmin, async (req, res
       }
     });
     
-    // Force replace any remaining logoUrl variables (case-insensitive)
+    // Force replace any remaining logoUrl variables (case-insensitive) - use actual URL
     htmlContent = htmlContent.replace(/\{\{\s*logoUrl\s*\}\}/gi, logoUrl);
     htmlContent = htmlContent.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
     htmlContent = htmlContent.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
     
-    // Replace base64 logo with CID reference for better email client support
-    if (htmlContent.includes(logoUrl)) {
-      htmlContent = htmlContent.replace(new RegExp(logoUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), 'cid:solitaire-logo');
-      console.log('📧 Replaced base64 logo with CID reference in test email');
-    }
+    // Replace any CID references with actual URL
+    htmlContent = htmlContent.replace(/cid:solitaire-logo/gi, logoUrl);
+    
+    // Replace any base64 logo URLs with actual URL
+    const base64Pattern = /data:image\/svg\+xml;base64,[^"'\s>]+/gi;
+    htmlContent = htmlContent.replace(base64Pattern, logoUrl);
+    console.log('📧 Replaced base64/CID logos with actual URL in test email');
+    
+    // Also replace dashboardUrl variations
+    htmlContent = htmlContent.replace(/\{\{\s*dashboardUrl\s*\}\}/gi, dashboardUrl);
+    htmlContent = htmlContent.replace(/\{\{\s*dashboard_url\s*\}\}/gi, dashboardUrl);
+    htmlContent = htmlContent.replace(/\{\{\s*DASHBOARD_URL\s*\}\}/gi, dashboardUrl);
     
     // Ensure logo is always present in test emails
     const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) && 
-                      (htmlContent.includes('logo') || htmlContent.includes('Logo') || htmlContent.includes(logoUrl) || htmlContent.includes('cid:solitaire-logo'));
+                      (htmlContent.toLowerCase().includes('logo') || htmlContent.toLowerCase().includes('solitaire') || htmlContent.includes(logoUrl));
     
     if (!hasLogoImg) {
       const bodyMatch = htmlContent.match(/<body[^>]*>/i);
       if (bodyMatch) {
         const logoHtml = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
-          <img src="cid:solitaire-logo" alt="Solitaire Markets" style="height: 50px; max-width: 200px; display: block; margin: 0 auto;" />
+          <img src="${logoUrl}" alt="Solitaire Markets" style="height: 50px; max-width: 200px; display: block; margin: 0 auto;" />
         </div>`;
         htmlContent = htmlContent.replace(bodyMatch[0], bodyMatch[0] + logoHtml);
       }

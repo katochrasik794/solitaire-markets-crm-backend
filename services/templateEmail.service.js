@@ -7,19 +7,39 @@ import pool from '../config/database.js';
 import { sendEmail, getLogoUrl } from './email.js';
 
 /**
- * Get template by name from database
- * @param {string} templateName - Name of the template
+ * Get template by key from database
+ * First tries by name, then by email_type so admins can rename templates
+ * @param {string} templateKey - Template name or email_type
  * @returns {Promise<object|null>} - Template object or null
  */
-async function getTemplateByName(templateName) {
+async function getTemplateByName(templateKey) {
   try {
-    const result = await pool.query(
+    // 1) Try by exact name
+    let result = await pool.query(
       'SELECT * FROM email_templates WHERE name = $1 LIMIT 1',
-      [templateName]
+      [templateKey]
     );
-    return result.rows.length > 0 ? result.rows[0] : null;
+    if (result.rows.length > 0) {
+      return result.rows[0];
+    }
+
+    // 2) Fallback: try by email_type so templates can be renamed in UI
+    try {
+      result = await pool.query(
+        'SELECT * FROM email_templates WHERE email_type = $1 LIMIT 1',
+        [templateKey]
+      );
+      if (result.rows.length > 0) {
+        return result.rows[0];
+      }
+    } catch (typeErr) {
+      // email_type column may not exist on older databases – ignore
+      console.warn('email_templates.email_type not available yet:', typeErr.message);
+    }
+
+    return null;
   } catch (error) {
-    console.error(`Error fetching template "${templateName}":`, error);
+    console.error(`Error fetching template "${templateKey}":`, error);
     return null;
   }
 }
@@ -34,13 +54,19 @@ function replaceTemplateVariables(html, variables) {
   if (!html) return '';
   
   let result = html;
-  const logoUrl = getLogoUrl();
+  const logoUrl = getLogoUrl(); // This now returns the actual URL: https://portal.solitairemarkets.com/logo.svg
   
-  // Default variables
+  // Get frontend URL - use live URL as default
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  const dashboardUrl = `${frontendUrl}/user/dashboard`;
+  
+  // Default variables - use actual logo URL
   const defaultVars = {
-    logoUrl: logoUrl,
+    logoUrl: logoUrl, // Use actual URL: https://portal.solitairemarkets.com/logo.svg
     companyName: 'Solitaire Markets',
     companyEmail: 'support@solitairemarkets.me',
+    dashboardUrl: dashboardUrl,
+    frontendUrl: frontendUrl,
     currentYear: new Date().getFullYear(),
     ...variables
   };
@@ -52,6 +78,7 @@ function replaceTemplateVariables(html, variables) {
   });
   
   // Force replace any remaining logoUrl variations (multiple passes to catch all)
+  // Replace with actual URL
   result = result.replace(/\{\{\s*logoUrl\s*\}\}/gi, logoUrl);
   result = result.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
   result = result.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
@@ -59,22 +86,62 @@ function replaceTemplateVariables(html, variables) {
   result = result.replace(/\{\{logo_url\}\}/gi, logoUrl);
   result = result.replace(/\{\{LOGO_URL\}\}/gi, logoUrl);
   
+  // Replace any CID references with actual URL
+  result = result.replace(/cid:solitaire-logo/gi, logoUrl);
+  
+  // Also replace any base64 logo URLs that might already be in the template
+  const LOGO_SVG_BASE64 = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzE2IiBoZWlnaHQ9IjExMCIgdmlld0JveD0iMCAwIDMxNiAxMTAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+';
+  if (result.includes(LOGO_SVG_BASE64.substring(0, 50))) {
+    // Find and replace base64 logo patterns
+    const base64Pattern = /data:image\/svg\+xml;base64,[^"'\s>]+/gi;
+    result = result.replace(base64Pattern, logoUrl);
+  }
+  
+  // Fix common issue: replace companyEmail in href attributes with dashboardUrl
+  // This handles cases where templates incorrectly use {{companyEmail}} as a URL
+  result = result.replace(/href=["']\{\{\s*companyEmail\s*\}\}["']/gi, `href="${dashboardUrl}"`);
+  result = result.replace(/href=["']\{\{companyEmail\}\}["']/gi, `href="${dashboardUrl}"`);
+  
+  // Also replace dashboardUrl variations
+  result = result.replace(/\{\{\s*dashboardUrl\s*\}\}/gi, dashboardUrl);
+  result = result.replace(/\{\{\s*dashboard_url\s*\}\}/gi, dashboardUrl);
+  result = result.replace(/\{\{\s*DASHBOARD_URL\s*\}\}/gi, dashboardUrl);
+  result = result.replace(/\{\{dashboardUrl\}\}/gi, dashboardUrl);
+  result = result.replace(/\{\{dashboard_url\}\}/gi, dashboardUrl);
+  result = result.replace(/\{\{DASHBOARD_URL\}\}/gi, dashboardUrl);
+  
+  // CRITICAL: Replace all hardcoded wrong URLs with correct dashboard URL
+  // Replace any solitairemarkets.me URLs (wrong domain) with correct dashboard URL
+  result = result.replace(/https?:\/\/solitairemarkets\.me\/[^"'\s>]*/gi, dashboardUrl);
+  result = result.replace(/https?:\/\/www\.solitairemarkets\.me\/[^"'\s>]*/gi, dashboardUrl);
+  
+  // Replace any "View Dashboard" or similar links that might have wrong URLs
+  // Look for common link patterns with wrong domains
+  result = result.replace(/href=["']https?:\/\/solitairemarkets\.me[^"']*["']/gi, `href="${dashboardUrl}"`);
+  result = result.replace(/href=["']https?:\/\/www\.solitairemarkets\.me[^"']*["']/gi, `href="${dashboardUrl}"`);
+  
+  // Also replace any localhost URLs that might be in templates
+  result = result.replace(/href=["']https?:\/\/localhost[^"']*["']/gi, `href="${dashboardUrl}"`);
+  
+  // Replace any href attributes that contain "dashboard" but have wrong domain
+  result = result.replace(/href=["']([^"']*solitairemarkets\.me[^"']*dashboard[^"']*)["']/gi, `href="${dashboardUrl}"`);
+  
   // Ensure logo is always present - check if logo image exists in HTML
   const hasLogoImg = /<img[^>]*src[^>]*>/i.test(result) && 
-                    (result.includes('logo') || result.includes('Logo') || result.includes(logoUrl) || result.includes('data:image'));
+                    (result.toLowerCase().includes('logo') || result.toLowerCase().includes('solitaire') || result.includes(logoUrl));
   
   if (!hasLogoImg) {
-    console.log('📧 No logo detected in template, injecting logo...');
+    console.log('📧 No logo detected in template, injecting logo with URL...');
     // Try to inject logo after <body> tag or at the beginning
     const bodyMatch = result.match(/<body[^>]*>/i);
     if (bodyMatch) {
-      const logoHtml = `<div style="text-align: center; margin: 20px 0; padding: 20px 0; background-color: #f5f7fa;">
+      const logoHtml = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
         <img src="${logoUrl}" alt="Solitaire Markets" style="height: 60px; max-width: 250px; display: block; margin: 0 auto;" />
       </div>`;
       result = result.replace(bodyMatch[0], bodyMatch[0] + logoHtml);
     } else {
       // If no body tag, add at the very beginning
-      result = `<div style="text-align: center; margin: 20px 0; padding: 20px 0; background-color: #f5f7fa;">
+      result = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
         <img src="${logoUrl}" alt="Solitaire Markets" style="height: 60px; max-width: 250px; display: block; margin: 0 auto;" />
       </div>` + result;
     }
@@ -85,6 +152,8 @@ function replaceTemplateVariables(html, variables) {
       console.warn('⚠️ Logo placeholder still found after replacement, forcing replacement...');
       result = result.replace(/\{\{.*logo.*\}\}/gi, logoUrl);
     }
+    // Replace any CID references with actual URL
+    result = result.replace(/cid:solitaire-logo/gi, logoUrl);
   }
   
   return result;
@@ -141,27 +210,28 @@ export async function sendTemplateEmail(templateName, recipientEmail, variables 
     // Replace variables in template
     let htmlContent = replaceTemplateVariables(template.html_code, variables);
     
-    // Final check: ensure logo is present and properly replaced
-    const logoUrl = getLogoUrl();
+    // Final check: ensure logo is present and properly replaced with actual URL
+    const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
     const logoPlaceholderRegex = /\{\{.*logo.*\}\}/i;
     if (logoPlaceholderRegex.test(htmlContent)) {
       console.warn(`⚠️ Logo placeholder still found in template "${templateName}", forcing replacement...`);
-      // Use CID reference instead of base64 for better email client support
-      htmlContent = htmlContent.replace(/\{\{.*logo.*\}\}/gi, 'cid:solitaire-logo');
+      htmlContent = htmlContent.replace(/\{\{.*logo.*\}\}/gi, logoUrl);
     }
     
-    // Replace any base64 logo URLs with CID reference for better compatibility
-    if (htmlContent.includes(logoUrl)) {
-      htmlContent = htmlContent.replace(new RegExp(logoUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), 'cid:solitaire-logo');
-      console.log(`📧 Replaced base64 logo with CID reference in template "${templateName}"`);
-    }
+    // Replace any CID references with actual URL
+    htmlContent = htmlContent.replace(/cid:solitaire-logo/gi, logoUrl);
     
-    // Verify logo is actually in the HTML (either as CID, base64, or URL)
-    const hasActualLogo = htmlContent.includes('cid:solitaire-logo') || htmlContent.includes(logoUrl) || htmlContent.includes('data:image/svg+xml') || htmlContent.includes('data:image/png');
+    // Replace any base64 logo URLs with actual URL
+    const base64Pattern = /data:image\/svg\+xml;base64,[^"'\s>]+/gi;
+    htmlContent = htmlContent.replace(base64Pattern, logoUrl);
+    
+    // Verify logo is actually in the HTML (check for URL or logo image tag)
+    const hasActualLogo = htmlContent.includes(logoUrl) || 
+                         (/<img[^>]*src[^>]*>/i.test(htmlContent) && (htmlContent.toLowerCase().includes('logo') || htmlContent.toLowerCase().includes('solitaire')));
     if (!hasActualLogo) {
-      console.warn(`⚠️ Logo not found in final HTML for template "${templateName}", injecting...`);
+      console.warn(`⚠️ Logo not found in final HTML for template "${templateName}", injecting with URL...`);
       const logoHtml = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
-        <img src="cid:solitaire-logo" alt="Solitaire Markets" style="height: 60px; max-width: 250px; display: block; margin: 0 auto;" />
+        <img src="${logoUrl}" alt="Solitaire Markets" style="height: 60px; max-width: 250px; display: block; margin: 0 auto;" />
       </div>`;
       const bodyMatch = htmlContent.match(/<body[^>]*>/i);
       if (bodyMatch) {
@@ -176,15 +246,14 @@ export async function sendTemplateEmail(templateName, recipientEmail, variables 
     
     // Debug: Log logo status for troubleshooting
     console.log(`📧 Sending email "${templateName}" to ${recipientEmail}`);
-    const usesCid = htmlContent.includes('cid:solitaire-logo');
-    console.log(`📧 Logo method: ${usesCid ? 'CID attachment (recommended)' : 'Base64 data URI'}`);
+    console.log(`📧 Logo URL: ${logoUrl}`);
     
-    // Send email with logo attachment
+    // Send email with logo URL
     return await sendEmail({
       to: recipientEmail,
       subject,
       html: htmlContent,
-      includeLogo: true // This will attach the logo file and use CID reference
+      includeLogo: true // This will ensure logo is present
     });
     
   } catch (error) {
@@ -327,17 +396,26 @@ export async function sendKYCCompletionEmail(userEmail, userName) {
 /**
  * Send Ticket Created Email
  */
-export async function sendTicketCreatedEmail(userEmail, userName, ticketId, subject) {
+/**
+ * Send Ticket Created Email (when user creates a ticket)
+ * Uses ticket template from DB:
+ *  - Prefer template with email_type = 'ticket_created'
+ *  - Fallback to template with name = 'Ticket Created'
+ */
+export async function sendTicketCreatedEmail(userEmail, userName, ticketId, subject, category = 'General', priority = 'medium') {
   return await sendTemplateEmail(
-    'Transaction Completed',
+    'ticket_created', // key: matches email_type in DB
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
-      transactionType: 'Support Ticket',
-      accountLogin: `Ticket #${ticketId}`,
-      amount: 'N/A',
-      date: new Date().toLocaleDateString(),
-      content: `You have opened a support ticket: "${subject}". Our support team will respond to you shortly.`
+      ticketId,
+      ticketSubject: subject,
+      ticketCategory: category,
+      ticketPriority: priority ? priority.charAt(0).toUpperCase() + priority.slice(1) : 'Medium',
+      ticketDate: new Date().toLocaleDateString(),
+      logoUrl: getLogoUrl(),
+      dashboardUrl: `${process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com'}/user/dashboard`,
+      currentYear: new Date().getFullYear()
     },
     `Support Ticket #${ticketId} Created`
   );
@@ -345,18 +423,23 @@ export async function sendTicketCreatedEmail(userEmail, userName, ticketId, subj
 
 /**
  * Send Ticket Response Email (when admin replies)
+ * Uses ticket template from DB:
+ *  - Prefer template with email_type = 'ticket_response'
+ *  - Fallback to template with name = 'Ticket Response'
  */
-export async function sendTicketResponseEmail(userEmail, userName, ticketId, subject, adminMessage) {
+export async function sendTicketResponseEmail(userEmail, userName, ticketId, subject, adminMessage, ticketStatus = 'Open') {
   return await sendTemplateEmail(
-    'Transaction Completed',
+    'ticket_response', // key: matches email_type in DB
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
-      transactionType: 'Support Response',
-      accountLogin: `Ticket #${ticketId}`,
-      amount: 'N/A',
-      date: new Date().toLocaleDateString(),
-      content: `You have received a response on your support ticket #${ticketId}: "${subject}".<br><br><strong>Response:</strong><br>${adminMessage || 'Please check your dashboard for the full response.'}`
+      ticketId,
+      ticketSubject: subject,
+      ticketStatus: ticketStatus ? ticketStatus.charAt(0).toUpperCase() + ticketStatus.slice(1) : 'Open',
+      adminMessage: adminMessage || 'Please check your dashboard for the full response.',
+      logoUrl: getLogoUrl(),
+      dashboardUrl: `${process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com'}/user/dashboard`,
+      currentYear: new Date().getFullYear()
     },
     `Response on Support Ticket #${ticketId}`
   );
