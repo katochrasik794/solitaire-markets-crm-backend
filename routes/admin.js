@@ -3088,6 +3088,67 @@ router.patch('/payment-details/:id/reject', authenticateAdmin, async (req, res, 
 });
 
 /**
+ * PATCH /api/admin/payment-details/:id/unapprove
+ * Unapprove a payment detail (set back to pending)
+ */
+router.patch('/payment-details/:id/unapprove', authenticateAdmin, async (req, res, next) => {
+  try {
+    const paymentDetailId = parseInt(req.params.id);
+    const adminId = req.admin.id;
+
+    if (isNaN(paymentDetailId)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid payment detail ID'
+      });
+    }
+
+    // Check if payment detail exists
+    const check = await pool.query(
+      'SELECT id, status FROM payment_details WHERE id = $1',
+      [paymentDetailId]
+    );
+
+    if (check.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Payment detail not found'
+      });
+    }
+
+    // Update status to pending
+    await pool.query(
+      `UPDATE payment_details 
+       SET status = 'pending', 
+           reviewed_by = NULL, 
+           reviewed_at = NULL,
+           rejection_reason = NULL,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [paymentDetailId]
+    );
+
+    // Log activity
+    await pool.query(
+      `INSERT INTO activity_logs (admin_id, action, details, created_at)
+       VALUES ($1, 'PAYMENT_DETAIL_UNAPPROVED', $2, NOW())`,
+      [adminId, JSON.stringify({ paymentDetailId })]
+    ).catch(err => console.error('Failed to log activity:', err));
+
+    res.json({
+      ok: true,
+      message: 'Payment detail unapproved successfully'
+    });
+  } catch (error) {
+    console.error('Unapprove payment detail error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to unapprove payment detail'
+    });
+  }
+});
+
+/**
  * GET /api/admin/users/:id/payment-methods
  * Placeholder payment methods list for user
  */
