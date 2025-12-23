@@ -2,6 +2,7 @@ import express from 'express';
 import pool from '../config/database.js';
 import { authenticate, authenticateAdmin } from '../middleware/auth.js';
 import { sendEmail } from '../services/email.js';
+import { sendTicketCreatedEmail, sendTicketResponseEmail } from '../services/templateEmail.service.js';
 
 const router = express.Router();
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@solitairemarkets.me';
@@ -35,6 +36,8 @@ router.get('/', authenticate, async (req, res) => {
  */
 router.post('/', authenticate, async (req, res) => {
     try {
+        console.log('📧 POST /api/support - Creating ticket');
+        console.log('📧 Request body:', req.body);
         const { subject, category, message, priority } = req.body;
 
         if (!subject || !message) {
@@ -63,14 +66,14 @@ router.post('/', authenticate, async (req, res) => {
 
             await client.query('COMMIT');
 
+            // Get user details for email
+            const userResult = await client.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [req.user.id]);
+            const user = userResult.rows[0];
+            const userName = user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer' : 'Valued Customer';
+            const userEmail = user?.email;
+
             // Send notification to support
             try {
-                const userEmail = req.user.email; // Assuming req.user has email from auth middleware
-                // If req.user doesn't have email, we might need to fetch it. 
-                // authenticate middleware usually decodes token. Token might have email.
-                // Let's assume it does or fetch it if needed.
-                // Actually, let's fetch user details to be safe or use what's available.
-
                 await sendEmail({
                     to: SUPPORT_EMAIL,
                     subject: `[New Ticket #${ticketId}] ${subject}`,
@@ -86,6 +89,18 @@ router.post('/', authenticate, async (req, res) => {
                 });
             } catch (emailErr) {
                 console.error('Failed to send support notification email:', emailErr);
+            }
+
+            // Send ticket created email to user
+            if (userEmail) {
+                setImmediate(async () => {
+                    try {
+                        await sendTicketCreatedEmail(userEmail, userName, ticketId, subject);
+                        console.log(`Ticket created email sent to ${userEmail}`);
+                    } catch (emailErr) {
+                        console.error('Failed to send ticket created email:', emailErr);
+                    }
+                });
             }
 
             res.json({
@@ -435,21 +450,11 @@ router.post('/admin/:id/reply', authenticateAdmin, async (req, res) => {
             );
         }
 
-        // Send notification to user
+        // Send notification to user using template
         try {
-            await sendEmail({
-                to: ticket.user_email,
-                subject: `[Support Reply] ${ticket.subject}`,
-                html: `
-                    <h3>Support Team Replied</h3>
-                    <p>Hi ${ticket.first_name || 'User'},</p>
-                    <p>You have a new reply on your support ticket <strong>#${id}</strong>.</p>
-                    <hr />
-                    <p>${message}</p>
-                    <hr />
-                    <p>You can view the full conversation in your dashboard.</p>
-                `
-            });
+            const userName = ticket.first_name ? `${ticket.first_name} ${ticket.last_name || ''}`.trim() : 'Valued Customer';
+            await sendTicketResponseEmail(ticket.user_email, userName, id, ticket.subject, message);
+            console.log(`Ticket response email sent to ${ticket.user_email}`);
         } catch (emailErr) {
             console.error('Failed to send user notification email:', emailErr);
         }

@@ -1,6 +1,7 @@
 import express from 'express';
 import pool from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
+import { sendDepositRequestEmail } from '../services/templateEmail.service.js';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -409,7 +410,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
 
     res.json(responseData);
     
-    // Log user action
+    // Log user action and send email
     setImmediate(async () => {
       await logUserAction({
         userId: req.user.id,
@@ -425,6 +426,25 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
         beforeData: null,
         afterData: deposit
       });
+
+      // Send deposit request email
+      try {
+        const userResult = await pool.query('SELECT first_name, last_name FROM users WHERE id = $1', [req.user.id]);
+        const userName = userResult.rows.length > 0 
+          ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
+          : 'Valued Customer';
+        const accountLogin = deposit.mt5_account_id || deposit.wallet_number || 'N/A';
+        await sendDepositRequestEmail(
+          req.user.email,
+          userName,
+          accountLogin,
+          `${deposit.amount} ${deposit.currency || 'USD'}`,
+          new Date().toLocaleDateString()
+        );
+        console.log(`Deposit request email sent to ${req.user.email}`);
+      } catch (emailError) {
+        console.error('Failed to send deposit request email:', emailError);
+      }
     });
   } catch (error) {
     console.error('Create deposit request error:', error);

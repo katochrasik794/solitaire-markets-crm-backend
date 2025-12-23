@@ -13,6 +13,14 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import crypto from 'crypto';
 import { sendOperationEmail, sendEmail, getLogoUrl } from '../services/email.js';
+import { 
+  sendTransactionCompletedEmail, 
+  sendInternalTransferEmail,
+  sendKYCCompletionEmail,
+  sendTicketCreatedEmail,
+  sendTicketResponseEmail,
+  sendMT5AccountCreatedEmail
+} from '../services/templateEmail.service.js';
 import { logAdminAction } from '../services/logging.service.js';
 import { captureResponseData, logAdminActionMiddleware } from '../middleware/logging.middleware.js';
 
@@ -307,6 +315,52 @@ router.post('/login', validateLogin, async (req, res, next) => {
       success: false,
       message: error.message || 'Login failed. Please try again.',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * ============================================
+ * Support / Tickets Dashboard Summary
+ * ============================================
+ */
+
+/**
+ * GET /api/admin/support/summary
+ * Return a lightweight summary of support tickets for the admin dashboard
+ */
+router.get('/support/summary', authenticateAdmin, async (req, res) => {
+  try {
+    // Count open tickets (status = 'open' or 'opened' – normalized)
+    const countResult = await pool.query(
+      `SELECT COUNT(*) AS open_count
+       FROM support_tickets
+       WHERE LOWER(TRIM(status)) = 'open'`
+    );
+
+    const openCount = parseInt(countResult.rows[0]?.open_count || '0', 10);
+
+    // Fetch a few latest open tickets with user information
+    const latestResult = await pool.query(
+      `SELECT t.id, t.subject, t.priority, t.status, t.created_at,
+              u.email as user_email, u.first_name || ' ' || u.last_name as user_name
+       FROM support_tickets t
+       JOIN users u ON t.user_id = u.id
+       WHERE LOWER(TRIM(t.status)) = 'open'
+       ORDER BY t.created_at DESC
+       LIMIT 5`
+    );
+
+    res.json({
+      ok: true,
+      openTickets: openCount,
+      latestTickets: latestResult.rows || []
+    });
+  } catch (error) {
+    console.error('Support summary error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to load support summary'
     });
   }
 });
@@ -1953,9 +2007,12 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
       }
     }
 
-    // Get user email for logging
-    const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [userId]);
+    // Get user email and name for logging and email
+    const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [userId]);
     const userEmail = userResult.rows[0]?.email || null;
+    const userName = userResult.rows.length > 0 
+      ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
+      : 'Valued Customer';
     
     // Get before/after KYC data
     const kycBefore = await pool.query(
@@ -1974,6 +2031,18 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
       ok: true,
       message: `KYC ${verified ? 'verified' : 'unverified'} successfully`
     });
+
+    // Send KYC completion email if approved
+    if (verified && userEmail) {
+      setImmediate(async () => {
+        try {
+          await sendKYCCompletionEmail(userEmail, userName);
+          console.log(`KYC completion email sent to ${userEmail}`);
+        } catch (emailError) {
+          console.error('Failed to send KYC completion email:', emailError);
+        }
+      });
+    }
     
     // Log admin action
     setImmediate(async () => {
@@ -2617,6 +2686,23 @@ router.post('/users/:id/accounts/create', authenticateAdmin, async (req, res, ne
     if (existingCols.has('mt5_group_name')) {
       selectCols.push('mt5_group_name');
     }
+
+    // Send MT5 account created email
+    setImmediate(async () => {
+      try {
+        const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+        await sendMT5AccountCreatedEmail(
+          user.email,
+          userName,
+          accountType,
+          accountNumber,
+          'Please check your account dashboard for password details'
+        );
+        console.log(`MT5 account created email sent to ${user.email} (admin created)`);
+      } catch (emailError) {
+        console.error('Failed to send MT5 account created email:', emailError);
+      }
+    });
 
     const accountResult = await pool.query(
       `SELECT ${selectCols.join(', ')} FROM trading_accounts WHERE id = $1`,
@@ -5810,9 +5896,12 @@ router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
         });
     }
 
-    // Get user email for logging
-    const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [deposit.user_id]);
+    // Get user email and name for logging and email
+    const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [deposit.user_id]);
     const userEmail = userResult.rows[0]?.email || null;
+    const userName = userResult.rows.length > 0 
+      ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
+      : 'Valued Customer';
     
     // Get before data
     const beforeData = {
@@ -5832,6 +5921,26 @@ router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
     res.json({
       ok: true,
       message: 'Deposit approved successfully'
+    });
+
+    // Send transaction completed email
+    setImmediate(async () => {
+      try {
+        if (userEmail) {
+          const accountLogin = deposit.mt5_account_id || deposit.wallet_id || 'N/A';
+          await sendTransactionCompletedEmail(
+            userEmail,
+            userName,
+            'Deposit',
+            accountLogin,
+            `${deposit.amount} ${deposit.currency || 'USD'}`,
+            new Date().toLocaleDateString()
+          );
+          console.log(`Deposit approved email sent to ${userEmail}`);
+        }
+      } catch (emailError) {
+        console.error('Failed to send deposit approved email:', emailError);
+      }
     });
     
     // Log admin action
@@ -6497,6 +6606,25 @@ router.post('/withdrawals/:id/approve', authenticateAdmin, async (req, res) => {
       ok: true,
       message: 'Withdrawal approved successfully'
     });
+
+    // Send transaction completed email
+    setImmediate(async () => {
+      try {
+        if (userEmail) {
+          await sendTransactionCompletedEmail(
+            userEmail,
+            userName,
+            'Withdrawal',
+            withdrawal.mt5_account_id || 'N/A',
+            `${withdrawal.amount} ${withdrawal.currency || 'USD'}`,
+            new Date().toLocaleDateString()
+          );
+          console.log(`Withdrawal approved email sent to ${userEmail}`);
+        }
+      } catch (emailError) {
+        console.error('Failed to send withdrawal approved email:', emailError);
+      }
+    });
     
     // Log admin action
     setImmediate(async () => {
@@ -7115,12 +7243,13 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
           }
         }
 
-        // Send
+        // Send email with logo attachment
         await sendEmail({
           to: user.email,
           subject: finalSubject,
           html: htmlContent,
-          attachments: attachments // Pass attachments if any
+          attachments: attachments, // Pass attachments if any
+          includeLogo: true // Include logo as CID attachment
         });
 
         // Log success
@@ -7386,15 +7515,21 @@ router.post('/email-templates/:id/send-test', authenticateAdmin, async (req, res
     htmlContent = htmlContent.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
     htmlContent = htmlContent.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
     
+    // Replace base64 logo with CID reference for better email client support
+    if (htmlContent.includes(logoUrl)) {
+      htmlContent = htmlContent.replace(new RegExp(logoUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), 'cid:solitaire-logo');
+      console.log('📧 Replaced base64 logo with CID reference in test email');
+    }
+    
     // Ensure logo is always present in test emails
     const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) && 
-                      (htmlContent.includes('logo') || htmlContent.includes('Logo') || htmlContent.includes(logoUrl));
+                      (htmlContent.includes('logo') || htmlContent.includes('Logo') || htmlContent.includes(logoUrl) || htmlContent.includes('cid:solitaire-logo'));
     
     if (!hasLogoImg) {
       const bodyMatch = htmlContent.match(/<body[^>]*>/i);
       if (bodyMatch) {
         const logoHtml = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
-          <img src="${logoUrl}" alt="Solitaire Markets" style="height: 50px; max-width: 200px; display: block; margin: 0 auto;" />
+          <img src="cid:solitaire-logo" alt="Solitaire Markets" style="height: 50px; max-width: 200px; display: block; margin: 0 auto;" />
         </div>`;
         htmlContent = htmlContent.replace(bodyMatch[0], bodyMatch[0] + logoHtml);
       }
@@ -7403,7 +7538,8 @@ router.post('/email-templates/:id/send-test', authenticateAdmin, async (req, res
     await sendEmail({
       to: email,
       subject: `Test: ${template.name}`,
-      html: htmlContent
+      html: htmlContent,
+      includeLogo: true
     });
 
     // Log to sent_emails

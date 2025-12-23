@@ -4,6 +4,7 @@ import { createWalletForUser } from '../services/wallet.service.js';
 import { hashPassword, comparePassword, generateResetToken, generateOTP, validatePassword } from '../utils/helpers.js';
 import { validateRegister, validateLogin, validateForgotPassword, validateResetPassword } from '../middleware/validate.js';
 import { sendPasswordResetEmail, sendOTPEmail } from '../services/email.js';
+import { sendWelcomeEmail, sendOTPVerificationEmail } from '../services/templateEmail.service.js';
 import jwt from 'jsonwebtoken';
 
 const router = express.Router();
@@ -243,16 +244,25 @@ router.post('/forgot-password', validateForgotPassword, async (req, res, next) =
       userId: user.id
     });
 
-    // Send OTP email
+    // Send OTP email using template
     try {
-      await sendOTPEmail(user.email, otp);
+      const userResult = await pool.query('SELECT first_name, last_name FROM users WHERE id = $1', [user.id]);
+      const userName = userResult.rows.length > 0 
+        ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'User'
+        : 'User';
+      await sendOTPVerificationEmail(user.email, userName, otp, 'Please use this code to reset your password.');
     } catch (emailError) {
       console.error('Email sending error:', emailError);
-      passwordResetOtpStore.delete(email.trim().toLowerCase());
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to send OTP email. Please try again.'
-      });
+      // Fallback to old method
+      try {
+        await sendOTPEmail(user.email, otp);
+      } catch (fallbackError) {
+        passwordResetOtpStore.delete(email.trim().toLowerCase());
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to send OTP email. Please try again.'
+        });
+      }
     }
 
     res.json({
@@ -524,20 +534,26 @@ router.post('/send-registration-otp', async (req, res, next) => {
       }
     });
 
-    // Send OTP email
+    // Send OTP email using template
     try {
-      await sendOTPEmail(email.trim().toLowerCase(), otp);
+      const userName = `${firstName.trim()} ${lastName.trim()}`.trim();
+      await sendOTPVerificationEmail(email.trim().toLowerCase(), userName, otp, 'Please use this code to verify your registration.');
     } catch (emailError) {
       console.error('[REGISTER OTP] Email sending error:', {
         message: emailError.message,
         stack: emailError.stack,
         email: email.trim().toLowerCase()
       });
-      otpStore.delete(email.trim().toLowerCase());
-      return res.status(500).json({
-        success: false,
-        message: emailError.message || 'Failed to send OTP email. Please check your email configuration and try again.'
-      });
+      // Fallback to old method
+      try {
+        await sendOTPEmail(email.trim().toLowerCase(), otp);
+      } catch (fallbackError) {
+        otpStore.delete(email.trim().toLowerCase());
+        return res.status(500).json({
+          success: false,
+          message: fallbackError.message || 'Failed to send OTP email. Please check your email configuration and try again.'
+        });
+      }
     }
 
     res.json({
@@ -649,6 +665,18 @@ router.post('/verify-registration-otp', async (req, res, next) => {
 
     // Remove OTP from store
     otpStore.delete(emailKey);
+
+    // Send welcome email using template
+    setImmediate(async () => {
+      try {
+        const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+        await sendWelcomeEmail(user.email, userName);
+        console.log(`Welcome email sent to ${user.email}`);
+      } catch (emailError) {
+        console.error('Failed to send welcome email:', emailError);
+        // Don't fail registration if email fails
+      }
+    });
 
     // Generate JWT token
     const token = jwt.sign(

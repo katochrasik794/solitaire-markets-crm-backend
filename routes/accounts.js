@@ -612,7 +612,7 @@ router.post('/create', authenticate, async (req, res, next) => {
       data: responseData
     });
     
-    // Log user action
+    // Log user action and send email
     setImmediate(async () => {
       await logUserAction({
         userId: req.user.id,
@@ -628,6 +628,22 @@ router.post('/create', authenticate, async (req, res, next) => {
         beforeData: null,
         afterData: responseData
       });
+
+      // Send MT5 account created email
+      try {
+        const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+        await sendMT5AccountCreatedEmail(
+          user.email,
+          userName,
+          accountType,
+          accountNumber,
+          'Please check your account dashboard for password details'
+        );
+        console.log(`MT5 account created email sent to ${user.email}`);
+      } catch (emailError) {
+        console.error('Failed to send MT5 account created email:', emailError);
+        // Don't fail account creation if email fails
+      }
     });
   } catch (error) {
     console.error('Create account error:', error);

@@ -7,6 +7,7 @@ import {
   adjustWalletBalance
 } from '../services/wallet.service.js';
 import { addBalance, deductBalance } from '../services/mt5.service.js';
+import { sendInternalTransferEmail } from '../services/templateEmail.service.js';
 
 const router = express.Router();
 
@@ -239,6 +240,28 @@ router.post('/transfer-to-mt5', authenticate, async (req, res, next) => {
       message: 'Transfer to MT5 successful',
       data: result
     });
+
+    // Send internal transfer email
+    setImmediate(async () => {
+      try {
+        const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [req.user.id]);
+        if (userResult.rows.length > 0) {
+          const user = userResult.rows[0];
+          const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+          await sendInternalTransferEmail(
+            user.email,
+            userName,
+            wallet.wallet_number,
+            String(mt5Account),
+            `${numericAmount} ${wallet.currency || 'USD'}`,
+            new Date().toLocaleDateString()
+          );
+          console.log(`Internal transfer email sent to ${user.email}`);
+        }
+      } catch (emailError) {
+        console.error('Failed to send internal transfer email:', emailError);
+      }
+    });
   } catch (error) {
     console.error('Wallet transfer-to-mt5 error:', error);
     next(error);
@@ -330,6 +353,28 @@ router.post('/transfer-from-mt5', authenticate, async (req, res, next) => {
       success: true,
       message: 'Transfer from MT5 successful',
       data: result
+    });
+
+    // Send internal transfer email
+    setImmediate(async () => {
+      try {
+        const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [req.user.id]);
+        if (userResult.rows.length > 0) {
+          const user = userResult.rows[0];
+          const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+          await sendInternalTransferEmail(
+            user.email,
+            userName,
+            String(mt5Account),
+            wallet.wallet_number,
+            `${numericAmount} ${wallet.currency || 'USD'}`,
+            new Date().toLocaleDateString()
+          );
+          console.log(`Internal transfer email sent to ${user.email}`);
+        }
+      } catch (emailError) {
+        console.error('Failed to send internal transfer email:', emailError);
+      }
     });
   } catch (error) {
     console.error('Wallet transfer-from-mt5 error:', error);

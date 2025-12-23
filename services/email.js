@@ -260,6 +260,7 @@ export const sendOperationEmail = async (type, payload) => {
   }
 };
 
+
 /**
  * Send a generic email
  * @param {object} options - Email options
@@ -267,21 +268,105 @@ export const sendOperationEmail = async (type, payload) => {
  * @param {string} options.subject - Email subject
  * @param {string} options.html - HTML content
  * @param {string} options.text - Text content (optional)
+ * @param {array} options.attachments - Attachments array (optional)
+ * @param {boolean} options.includeLogo - Whether to include logo as attachment (default: true)
  * @returns {Promise<object>} - Email send result
  */
-export const sendEmail = async ({ to, subject, html, text, attachments }) => {
+export const sendEmail = async ({ to, subject, html, text, attachments = [], includeLogo = true }) => {
   try {
+    // Prepare attachments
+    let finalAttachments = [...(attachments || [])];
+    let finalHtml = html;
+    
+    // Add logo as attachment if requested and not already included
+    if (includeLogo && !finalAttachments.some(att => att && (att.cid === 'solitaire-logo' || att.contentId === 'solitaire-logo'))) {
+      // Replace base64 data URI or {{logoUrl}} with CID reference in HTML
+      const logoUrl = getLogoUrl();
+      
+      // Replace any base64 logo URLs with CID reference
+      if (finalHtml && (finalHtml.includes(logoUrl) || finalHtml.includes('cid:solitaire-logo'))) {
+        // Replace base64 data URI with CID reference
+        if (finalHtml.includes(logoUrl)) {
+          finalHtml = finalHtml.replace(new RegExp(logoUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), 'cid:solitaire-logo');
+        }
+        
+        // Try to add logo as attachment
+        try {
+          const fs = await import('fs');
+          const path = await import('path');
+          const { fileURLToPath } = await import('url');
+          const { dirname } = await import('path');
+          
+          const __filename = fileURLToPath(import.meta.url);
+          const __dirname = dirname(__filename);
+          const logoPath = path.join(__dirname, '../../solitaire-markets-crm/public/logo.svg');
+          
+          if (fs.existsSync(logoPath)) {
+            finalAttachments.push({
+              filename: 'logo.svg',
+              path: logoPath,
+              cid: 'solitaire-logo', // Content-ID for inline images
+              contentDisposition: 'inline'
+            });
+            console.log('📧 Logo attached as CID: solitaire-logo');
+          } else {
+            console.warn('⚠️ Logo file not found at:', logoPath, '- using base64 fallback');
+          }
+        } catch (attachError) {
+          console.warn('⚠️ Could not attach logo, using base64 fallback:', attachError.message);
+        }
+      } else if (finalHtml && !finalHtml.includes('cid:solitaire-logo') && !finalHtml.includes(logoUrl)) {
+        // No logo found at all - inject it with CID reference
+        const logoHtml = `<div style="text-align: center; margin: 20px 0; padding: 20px 0;">
+          <img src="cid:solitaire-logo" alt="Solitaire Markets" style="height: 60px; max-width: 250px; display: block; margin: 0 auto;" />
+        </div>`;
+        const bodyMatch = finalHtml.match(/<body[^>]*>/i);
+        if (bodyMatch) {
+          finalHtml = finalHtml.replace(bodyMatch[0], bodyMatch[0] + logoHtml);
+        } else {
+          finalHtml = logoHtml + finalHtml;
+        }
+        
+        // Add logo attachment
+        try {
+          const fs = await import('fs');
+          const path = await import('path');
+          const { fileURLToPath } = await import('url');
+          const { dirname } = await import('path');
+          
+          const __filename = fileURLToPath(import.meta.url);
+          const __dirname = dirname(__filename);
+          const logoPath = path.join(__dirname, '../../solitaire-markets-crm/public/logo.svg');
+          
+          if (fs.existsSync(logoPath)) {
+            finalAttachments.push({
+              filename: 'logo.svg',
+              path: logoPath,
+              cid: 'solitaire-logo',
+              contentDisposition: 'inline'
+            });
+            console.log('📧 Logo injected and attached as CID: solitaire-logo');
+          }
+        } catch (attachError) {
+          console.warn('⚠️ Could not attach logo:', attachError.message);
+        }
+      }
+    }
+    
     const mailOptions = {
       from: `"${process.env.EMAIL_FROM_NAME || 'Solitaire Markets'}" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
       to,
       subject,
-      html,
-      text: text || html.replace(/<[^>]*>/g, ''), // Fallback text generation
-      attachments,
+      html: finalHtml,
+      text: text || finalHtml.replace(/<[^>]*>/g, ''), // Fallback text generation
+      attachments: finalAttachments.length > 0 ? finalAttachments : undefined,
     };
 
     const info = await transporter.sendMail(mailOptions);
     console.log('Generic email sent:', info.messageId);
+    if (finalAttachments.length > 0) {
+      console.log(`📧 Email sent with ${finalAttachments.length} attachment(s)`);
+    }
     return { ok: true, messageId: info.messageId };
   } catch (error) {
     console.error('Error sending generic email:', error);
