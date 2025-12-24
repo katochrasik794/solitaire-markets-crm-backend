@@ -201,14 +201,39 @@ router.get('/', authenticate, async (req, res, next) => {
     }
 
     // Build query with LEFT JOIN to mt5_groups to get limits
+    // Use DISTINCT ON (account_number) to prevent duplicates when multiple JOIN conditions match
+    // account_number is UNIQUE, so this ensures one row per account
     let query = `
-      SELECT 
+      SELECT DISTINCT ON (ta.account_number)
         ${selectCols.map(col => `ta.${col}`).join(', ')},
     `;
 
     // Only add JOIN if we have a way to join, otherwise use NULL for limits
     if (joinConditions.length > 0) {
-      const joinCondition = joinConditions.join(' OR ');
+      // Prioritize JOIN conditions: ID first, then exact matches, then case-insensitive
+      const prioritizedConditions = [];
+      if (hasMt5GroupId) {
+        prioritizedConditions.push('ta.mt5_group_id = mg.id');
+      }
+      if (hasMt5GroupName) {
+        prioritizedConditions.push('ta.mt5_group_name = mg.group_name');
+      }
+      if (hasGroup) {
+        prioritizedConditions.push('ta.group = mg.group_name');
+      }
+      // Add case-insensitive matches as fallback
+      if (hasMt5GroupName) {
+        prioritizedConditions.push('LOWER(ta.mt5_group_name) = LOWER(mg.group_name)');
+      }
+      if (hasGroup) {
+        prioritizedConditions.push('LOWER(ta.group) = LOWER(mg.group_name)');
+      }
+      if (existingCols.has('account_type')) {
+        prioritizedConditions.push(`LOWER(ta.account_type) = LOWER(mg.dedicated_name)`);
+        prioritizedConditions.push(`LOWER(ta.account_type) = LOWER(SUBSTRING(mg.group_name FROM '[^\\\\]+$'))`);
+      }
+      
+      const joinCondition = prioritizedConditions.join(' OR ');
       query += `
         COALESCE(mg.minimum_deposit, 0) as minimum_deposit,
         mg.maximum_deposit,
@@ -229,7 +254,7 @@ router.get('/', authenticate, async (req, res, next) => {
 
     query += `
       WHERE ta.user_id = $1
-      ORDER BY ta.created_at DESC
+      ORDER BY ta.account_number, ta.created_at DESC
     `;
 
     const result = await pool.query(query, [req.user.id]);
