@@ -7471,6 +7471,137 @@ router.get('/email-templates', authenticateAdmin, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/email-templates/actions
+ * Get list of available actions from unified_actions that can be assigned templates
+ * IMPORTANT: This route must come BEFORE /email-templates/:id to avoid route conflicts
+ */
+router.get('/email-templates/actions', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        ua.id,
+        ua.action_name,
+        ua.system_type,
+        ua.template_id,
+        et.name as assigned_template_name
+      FROM unified_actions ua
+      LEFT JOIN email_templates et ON ua.template_id = et.id
+      ORDER BY ua.system_type, ua.action_name
+    `);
+
+    res.json({
+      ok: true,
+      actions: result.rows
+    });
+  } catch (error) {
+    console.error('Get email template actions error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch actions'
+    });
+  }
+});
+
+/**
+ * PUT /api/admin/email-templates/assign-action
+ * Assign a template to an action in unified_actions
+ * IMPORTANT: This route must come BEFORE /email-templates/:id to avoid route conflicts
+ * Accepts either action_id (preferred) or action_type (for backward compatibility)
+ */
+router.put('/email-templates/assign-action', authenticateAdmin, async (req, res) => {
+  try {
+    console.log('📧 Assign-action route hit!', { 
+      body: req.body, 
+      hasAuth: !!req.headers.authorization,
+      action_id: req.body?.action_id,
+      template_id: req.body?.template_id
+    });
+    const { action_id, action_type, template_id } = req.body;
+
+    let finalActionId = action_id;
+
+    // If action_type is provided instead of action_id, look it up
+    if (!finalActionId && action_type) {
+      // Map common action_types to action_names for backward compatibility
+      const actionTypeMap = {
+        'account_creation': 'Welcome Email - Create Account',
+        'mt5_account_created': 'MT5 Account Creation Email - on New MT5 Account',
+        'deposit_request': 'Deposit Request Email - on Deposit Request',
+        'withdrawal_request': 'Withdrawal Request Email - on Withdrawal Request',
+        'transaction_completed': 'Transaction Completed Email',
+        'internal_transfer': 'Internal Transfer Email - on Internal Transfer',
+        'otp_verification': 'OTP Verification Email - on OTP Request',
+        'kyc_completed': 'KYC Completion Email - on KYC Approval',
+        'ticket_created': 'Ticket Email - on Ticket Creation',
+        'ticket_response': 'Ticket Response Email - on Ticket Response',
+        'password_reset': 'Forgot Password Email - on Forgot Password'
+      };
+
+      const mappedName = actionTypeMap[action_type];
+      if (mappedName) {
+        const mappedLookup = await pool.query(
+          'SELECT id FROM unified_actions WHERE action_name = $1 LIMIT 1',
+          [mappedName]
+        );
+        if (mappedLookup.rows.length > 0) {
+          finalActionId = mappedLookup.rows[0].id;
+        }
+      }
+    }
+
+    if (!finalActionId) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'action_id or action_type is required' 
+      });
+    }
+
+    // Verify action exists
+    const actionCheck = await pool.query(
+      'SELECT id, action_name FROM unified_actions WHERE id = $1',
+      [finalActionId]
+    );
+    if (actionCheck.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Action not found' });
+    }
+
+    // Verify template exists if provided
+    if (template_id) {
+      const templateCheck = await pool.query(
+        'SELECT id FROM email_templates WHERE id = $1',
+        [template_id]
+      );
+      if (templateCheck.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: 'Template not found' });
+      }
+    }
+
+    // Update unified_actions with template
+    const result = await pool.query(
+      `UPDATE unified_actions 
+       SET template_id = $1, updated_at = NOW()
+       WHERE id = $2
+       RETURNING id, action_name, system_type, template_id`,
+      [template_id || null, finalActionId]
+    );
+
+    res.json({
+      ok: true,
+      message: template_id ? 'Template assigned successfully' : 'Template unassigned successfully',
+      action: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Assign template to action error:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      ok: false, 
+      error: error.message || 'Failed to assign template',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
 // GET /api/admin/email-templates/:id
 router.get('/email-templates/:id', authenticateAdmin, async (req, res) => {
   try {
@@ -7520,6 +7651,15 @@ router.post('/email-templates', authenticateAdmin, async (req, res) => {
 // PUT /api/admin/email-templates/:id
 router.put('/email-templates/:id', authenticateAdmin, async (req, res) => {
   try {
+    // Check if this is actually the assign-action route being matched incorrectly
+    if (req.params.id === 'assign-action') {
+      console.error('⚠️ Route conflict detected: /email-templates/:id matched "assign-action"');
+      return res.status(500).json({ 
+        ok: false, 
+        error: 'Route conflict: assign-action route should be defined before :id route' 
+      });
+    }
+    
     const { id } = req.params;
     const { name, description, html_code, variables, is_default, from_email, action_type } = req.body;
 
@@ -7567,151 +7707,6 @@ router.delete('/email-templates/:id', authenticateAdmin, async (req, res) => {
   } catch (error) {
     console.error('Delete email template error:', error);
     res.status(500).json({ ok: false, error: error.message });
-  }
-});
-
-/**
- * GET /api/admin/email-templates/actions
- * Get list of available CRM actions that can be assigned templates
- */
-router.get('/email-templates/actions', authenticateAdmin, async (req, res) => {
-  try {
-    const actions = [
-      {
-        action_type: 'account_creation',
-        name: 'Account Creation',
-        description: 'Welcome email sent when a new user account is created',
-        category: 'User Management'
-      },
-      {
-        action_type: 'mt5_account_created',
-        name: 'MT5 Account Created',
-        description: 'Email sent when an MT5 trading account is created for a user',
-        category: 'Trading Accounts'
-      },
-      {
-        action_type: 'deposit_request',
-        name: 'Deposit Request',
-        description: 'Email sent when a user creates a deposit request',
-        category: 'Transactions'
-      },
-      {
-        action_type: 'withdrawal_request',
-        name: 'Withdrawal Request',
-        description: 'Email sent when a user creates a withdrawal request',
-        category: 'Transactions'
-      },
-      {
-        action_type: 'transaction_completed',
-        name: 'Transaction Completed',
-        description: 'Email sent when a deposit or withdrawal is approved/completed',
-        category: 'Transactions'
-      },
-      {
-        action_type: 'internal_transfer',
-        name: 'Internal Transfer',
-        description: 'Email sent when an internal transfer between accounts is completed',
-        category: 'Transactions'
-      },
-      {
-        action_type: 'otp_verification',
-        name: 'OTP Verification',
-        description: 'Email sent with OTP code for account verification or password reset',
-        category: 'Security'
-      },
-      {
-        action_type: 'kyc_completed',
-        name: 'KYC Completed',
-        description: 'Email sent when KYC verification is completed and approved',
-        category: 'Compliance'
-      },
-      {
-        action_type: 'ticket_created',
-        name: 'Ticket Created',
-        description: 'Email sent when a user creates a support ticket',
-        category: 'Support'
-      },
-      {
-        action_type: 'ticket_response',
-        name: 'Ticket Response',
-        description: 'Email sent when an admin responds to a support ticket',
-        category: 'Support'
-      }
-    ];
-
-    // Get current template assignments
-    const templatesResult = await pool.query(
-      'SELECT id, name, action_type FROM email_templates WHERE action_type IS NOT NULL'
-    );
-
-    const assignments = {};
-    templatesResult.rows.forEach(template => {
-      if (template.action_type) {
-        assignments[template.action_type] = {
-          template_id: template.id,
-          template_name: template.name
-        };
-      }
-    });
-
-    res.json({
-      ok: true,
-      actions: actions.map(action => ({
-        ...action,
-        assigned_template: assignments[action.action_type] || null
-      }))
-    });
-  } catch (error) {
-    console.error('Get email template actions error:', error);
-    res.status(500).json({ ok: false, error: error.message || 'Failed to get actions' });
-  }
-});
-
-/**
- * PUT /api/admin/email-templates/assign-action
- * Assign a template to a CRM action
- */
-router.put('/email-templates/assign-action', authenticateAdmin, async (req, res) => {
-  try {
-    const { action_type, template_id } = req.body;
-
-    if (!action_type) {
-      return res.status(400).json({ ok: false, error: 'action_type is required' });
-    }
-
-    if (!template_id) {
-      // Unassign template from action
-      await pool.query(
-        'UPDATE email_templates SET action_type = NULL WHERE action_type = $1',
-        [action_type]
-      );
-      return res.json({ ok: true, message: 'Template unassigned from action' });
-    }
-
-    // First, unassign any existing template for this action
-    await pool.query(
-      'UPDATE email_templates SET action_type = NULL WHERE action_type = $1',
-      [action_type]
-    );
-
-    // Assign the new template
-    const result = await pool.query(
-      'UPDATE email_templates SET action_type = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
-      [action_type, template_id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ ok: false, error: 'Template not found' });
-    }
-
-    res.json({
-      ok: true,
-      message: 'Template assigned to action successfully',
-      template: result.rows[0]
-    });
-  } catch (error) {
-    console.error('Assign template to action error:', error);
-    res.status(500).json({ ok: false, error: error.message || 'Failed to assign template' });
   }
 });
 

@@ -1,6 +1,7 @@
 /**
  * Unified Actions Routes
- * Fetches all actions from CRM Admin, IB Client, and IB Admin systems
+ * Fetches the list of all email-triggering actions in the system
+ * This is a simple reference list of all email actions
  */
 
 import express from 'express';
@@ -11,29 +12,15 @@ const router = express.Router();
 
 /**
  * GET /api/admin/unified-actions
- * Get all actions from all systems (CRM Admin, IB Client, IB Admin)
- * Supports filtering, pagination, and sorting
+ * Get all email-triggering actions (simple list)
+ * Supports filtering by system_type
  */
 router.get('/', authenticateAdmin, async (req, res) => {
   try {
     const {
       system_type, // Filter by system: 'crm_admin', 'crm_user', 'ib_client', 'ib_admin', or 'all'
-      action_type, // Filter by action type
-      action_category, // Filter by category
-      actor_email, // Filter by actor email
-      target_type, // Filter by target type
-      start_date, // Filter by start date (ISO format)
-      end_date, // Filter by end date (ISO format)
-      page = 1,
-      limit = 50,
-      sort_by = 'created_at',
-      sort_order = 'DESC'
+      search // Search in action_name
     } = req.query;
-
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const validSortColumns = ['created_at', 'action_type', 'action_category', 'actor_email', 'system_type'];
-    const sortColumn = validSortColumns.includes(sort_by) ? sort_by : 'created_at';
-    const sortDirection = sort_order.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
     // Build WHERE conditions
     const whereConditions = [];
@@ -47,43 +34,10 @@ router.get('/', authenticateAdmin, async (req, res) => {
       paramIndex++;
     }
 
-    // Action type filter
-    if (action_type) {
-      whereConditions.push(`action_type = $${paramIndex}`);
-      queryParams.push(action_type);
-      paramIndex++;
-    }
-
-    // Action category filter
-    if (action_category) {
-      whereConditions.push(`action_category = $${paramIndex}`);
-      queryParams.push(action_category);
-      paramIndex++;
-    }
-
-    // Actor email filter
-    if (actor_email) {
-      whereConditions.push(`actor_email ILIKE $${paramIndex}`);
-      queryParams.push(`%${actor_email}%`);
-      paramIndex++;
-    }
-
-    // Target type filter
-    if (target_type) {
-      whereConditions.push(`target_type = $${paramIndex}`);
-      queryParams.push(target_type);
-      paramIndex++;
-    }
-
-    // Date range filter
-    if (start_date) {
-      whereConditions.push(`created_at >= $${paramIndex}`);
-      queryParams.push(start_date);
-      paramIndex++;
-    }
-    if (end_date) {
-      whereConditions.push(`created_at <= $${paramIndex}`);
-      queryParams.push(end_date);
+    // Search filter
+    if (search) {
+      whereConditions.push(`action_name ILIKE $${paramIndex}`);
+      queryParams.push(`%${search}%`);
       paramIndex++;
     }
 
@@ -91,52 +45,28 @@ router.get('/', authenticateAdmin, async (req, res) => {
       ? `WHERE ${whereConditions.join(' AND ')}`
       : '';
 
-    // Get total count
-    const countQuery = `SELECT COUNT(*) as total FROM unified_actions ${whereClause}`;
-    const countResult = await pool.query(countQuery, queryParams);
-    const total = parseInt(countResult.rows[0].total);
-
-    // Get actions
+    // Get actions with template info
     const dataQuery = `
       SELECT 
-        id,
-        system_type,
-        actor_id,
-        actor_email,
-        actor_name,
-        actor_type,
-        action_type,
-        action_category,
-        action_name,
-        target_type,
-        target_id,
-        target_identifier,
-        description,
-        details,
-        request_method,
-        request_path,
-        response_status,
-        ip_address,
-        user_agent,
-        created_at
-      FROM unified_actions
+        ua.id,
+        ua.action_name,
+        ua.system_type,
+        ua.template_id,
+        ua.created_at,
+        ua.updated_at,
+        et.name as template_name
+      FROM unified_actions ua
+      LEFT JOIN email_templates et ON ua.template_id = et.id
       ${whereClause}
-      ORDER BY ${sortColumn} ${sortDirection}
-      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+      ORDER BY system_type, action_name
     `;
-    queryParams.push(parseInt(limit), offset);
 
     const result = await pool.query(dataQuery, queryParams);
 
     res.json({
       ok: true,
       actions: result.rows,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        total_pages: Math.ceil(total / parseInt(limit))
-      }
+      total: result.rows.length
     });
   } catch (error) {
     console.error('Get unified actions error:', error);
@@ -149,61 +79,36 @@ router.get('/', authenticateAdmin, async (req, res) => {
 
 /**
  * GET /api/admin/unified-actions/stats
- * Get statistics about actions across all systems
+ * Get statistics about email-triggering actions by system type
  */
 router.get('/stats', authenticateAdmin, async (req, res) => {
   try {
-    const { start_date, end_date } = req.query;
-
-    let dateFilter = '';
-    const params = [];
-    if (start_date && end_date) {
-      dateFilter = 'WHERE created_at >= $1 AND created_at <= $2';
-      params.push(start_date, end_date);
-    }
-
     // Get counts by system type
     const systemStatsQuery = `
       SELECT 
         system_type,
         COUNT(*) as count
       FROM unified_actions
-      ${dateFilter}
       GROUP BY system_type
-      ORDER BY count DESC
+      ORDER BY system_type
     `;
 
-    // Get counts by action category
-    const categoryStatsQuery = `
-      SELECT 
-        action_category,
-        COUNT(*) as count
-      FROM unified_actions
-      ${dateFilter}
-      GROUP BY action_category
-      ORDER BY count DESC
-      LIMIT 10
-    `;
-
-    // Get recent actions count
-    const recentActionsQuery = `
+    // Get total count
+    const totalQuery = `
       SELECT COUNT(*) as count
       FROM unified_actions
-      WHERE created_at >= NOW() - INTERVAL '24 hours'
     `;
 
-    const [systemStats, categoryStats, recentActions] = await Promise.all([
-      pool.query(systemStatsQuery, params),
-      pool.query(categoryStatsQuery, params),
-      pool.query(recentActionsQuery)
+    const [systemStats, totalResult] = await Promise.all([
+      pool.query(systemStatsQuery),
+      pool.query(totalQuery)
     ]);
 
     res.json({
       ok: true,
       stats: {
         by_system: systemStats.rows,
-        by_category: categoryStats.rows,
-        recent_24h: parseInt(recentActions.rows[0].count)
+        total: parseInt(totalResult.rows[0].count)
       }
     });
   } catch (error) {
@@ -216,58 +121,73 @@ router.get('/stats', authenticateAdmin, async (req, res) => {
 });
 
 /**
- * GET /api/admin/unified-actions/action-types
- * Get list of all available action types across all systems
+ * GET /api/admin/unified-actions/by-system
+ * Get actions grouped by system type with template info
  */
-router.get('/action-types', authenticateAdmin, async (req, res) => {
+router.get('/by-system', authenticateAdmin, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT DISTINCT 
-        system_type,
-        action_type,
-        action_category,
-        COUNT(*) as count
-      FROM unified_actions
-      GROUP BY system_type, action_type, action_category
-      ORDER BY system_type, action_category, action_type
+      SELECT 
+        ua.system_type,
+        ua.action_name,
+        ua.id,
+        ua.template_id,
+        ua.created_at,
+        et.name as template_name
+      FROM unified_actions ua
+      LEFT JOIN email_templates et ON ua.template_id = et.id
+      ORDER BY system_type, action_name
     `);
 
     // Group by system type
-    const actionTypes = {};
+    const actionsBySystem = {};
     result.rows.forEach(row => {
-      if (!actionTypes[row.system_type]) {
-        actionTypes[row.system_type] = [];
+      if (!actionsBySystem[row.system_type]) {
+        actionsBySystem[row.system_type] = [];
       }
-      actionTypes[row.system_type].push({
-        action_type: row.action_type,
-        action_category: row.action_category,
-        count: parseInt(row.count)
+      actionsBySystem[row.system_type].push({
+        id: row.id,
+        action_name: row.action_name,
+        template_id: row.template_id,
+        template_name: row.template_name,
+        created_at: row.created_at
       });
     });
 
     res.json({
       ok: true,
-      action_types: actionTypes
+      actions_by_system: actionsBySystem
     });
   } catch (error) {
-    console.error('Get action types error:', error);
+    console.error('Get actions by system error:', error);
     res.status(500).json({
       ok: false,
-      error: error.message || 'Failed to fetch action types'
+      error: error.message || 'Failed to fetch actions by system'
     });
   }
 });
 
 /**
  * GET /api/admin/unified-actions/:id
- * Get details of a specific action
+ * Get details of a specific action with template info
  */
 router.get('/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
     const result = await pool.query(
-      'SELECT * FROM unified_actions WHERE id = $1',
+      `SELECT 
+        ua.id, 
+        ua.action_name, 
+        ua.system_type, 
+        ua.template_id,
+        ua.created_at, 
+        ua.updated_at,
+        et.name as template_name,
+        et.description as template_description
+      FROM unified_actions ua
+      LEFT JOIN email_templates et ON ua.template_id = et.id
+      WHERE ua.id = $1`,
       [id]
     );
 
@@ -287,6 +207,228 @@ router.get('/:id', authenticateAdmin, async (req, res) => {
     res.status(500).json({
       ok: false,
       error: error.message || 'Failed to fetch action details'
+    });
+  }
+});
+
+/**
+ * PUT /api/admin/unified-actions/:id/assign-template
+ * Assign a template to an action
+ */
+router.put('/:id/assign-template', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { template_id } = req.body;
+
+    if (template_id === undefined || template_id === null) {
+      return res.status(400).json({
+        ok: false,
+        error: 'template_id is required'
+      });
+    }
+
+    // Verify template exists if provided
+    if (template_id) {
+      const templateCheck = await pool.query(
+        'SELECT id FROM email_templates WHERE id = $1',
+        [template_id]
+      );
+      if (templateCheck.rows.length === 0) {
+        return res.status(404).json({
+          ok: false,
+          error: 'Template not found'
+        });
+      }
+    }
+
+    // Update action with template
+    const result = await pool.query(
+      `UPDATE unified_actions 
+       SET template_id = $1, updated_at = NOW()
+       WHERE id = $2
+       RETURNING id, action_name, system_type, template_id`,
+      [template_id || null, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Action not found'
+      });
+    }
+
+    res.json({
+      ok: true,
+      action: result.rows[0],
+      message: template_id ? 'Template assigned successfully' : 'Template unassigned successfully'
+    });
+  } catch (error) {
+    console.error('Assign template error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to assign template'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/unified-actions
+ * Add a new email action
+ */
+router.post('/', authenticateAdmin, async (req, res) => {
+  try {
+    const { action_name, system_type, template_id } = req.body;
+
+    if (!action_name || !system_type) {
+      return res.status(400).json({
+        ok: false,
+        error: 'action_name and system_type are required'
+      });
+    }
+
+    // Validate system_type
+    const validSystemTypes = ['crm_admin', 'crm_user', 'ib_client', 'ib_admin'];
+    if (!validSystemTypes.includes(system_type)) {
+      return res.status(400).json({
+        ok: false,
+        error: `system_type must be one of: ${validSystemTypes.join(', ')}`
+      });
+    }
+
+    // Verify template exists if provided
+    if (template_id) {
+      const templateCheck = await pool.query(
+        'SELECT id FROM email_templates WHERE id = $1',
+        [template_id]
+      );
+      if (templateCheck.rows.length === 0) {
+        return res.status(404).json({
+          ok: false,
+          error: 'Template not found'
+        });
+      }
+    }
+
+    const result = await pool.query(
+      `INSERT INTO unified_actions (action_name, system_type, template_id, created_at, updated_at)
+       VALUES ($1, $2, $3, NOW(), NOW())
+       RETURNING id, action_name, system_type, template_id, created_at, updated_at`,
+      [action_name, system_type, template_id || null]
+    );
+
+    res.json({
+      ok: true,
+      action: result.rows[0],
+      message: 'Action created successfully'
+    });
+  } catch (error) {
+    if (error.code === '23505') { // Unique constraint violation
+      return res.status(400).json({
+        ok: false,
+        error: 'An action with this name already exists'
+      });
+    }
+    console.error('Create action error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to create action'
+    });
+  }
+});
+
+/**
+ * PUT /api/admin/unified-actions/:id
+ * Update an action
+ */
+router.put('/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { action_name, system_type, template_id } = req.body;
+
+    // Build update query dynamically
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+
+    if (action_name !== undefined) {
+      updates.push(`action_name = $${paramIndex}`);
+      values.push(action_name);
+      paramIndex++;
+    }
+
+    if (system_type !== undefined) {
+      const validSystemTypes = ['crm_admin', 'crm_user', 'ib_client', 'ib_admin'];
+      if (!validSystemTypes.includes(system_type)) {
+        return res.status(400).json({
+          ok: false,
+          error: `system_type must be one of: ${validSystemTypes.join(', ')}`
+        });
+      }
+      updates.push(`system_type = $${paramIndex}`);
+      values.push(system_type);
+      paramIndex++;
+    }
+
+    if (template_id !== undefined) {
+      // Verify template exists if provided
+      if (template_id) {
+        const templateCheck = await pool.query(
+          'SELECT id FROM email_templates WHERE id = $1',
+          [template_id]
+        );
+        if (templateCheck.rows.length === 0) {
+          return res.status(404).json({
+            ok: false,
+            error: 'Template not found'
+          });
+        }
+      }
+      updates.push(`template_id = $${paramIndex}`);
+      values.push(template_id || null);
+      paramIndex++;
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No fields to update'
+      });
+    }
+
+    updates.push(`updated_at = NOW()`);
+    values.push(id);
+
+    const result = await pool.query(
+      `UPDATE unified_actions 
+       SET ${updates.join(', ')}
+       WHERE id = $${paramIndex}
+       RETURNING id, action_name, system_type, template_id, created_at, updated_at`,
+      values
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Action not found'
+      });
+    }
+
+    res.json({
+      ok: true,
+      action: result.rows[0],
+      message: 'Action updated successfully'
+    });
+  } catch (error) {
+    if (error.code === '23505') { // Unique constraint violation
+      return res.status(400).json({
+        ok: false,
+        error: 'An action with this name already exists'
+      });
+    }
+    console.error('Update action error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to update action'
     });
   }
 });

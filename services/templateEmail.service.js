@@ -7,15 +7,48 @@ import pool from '../config/database.js';
 import { sendEmail, getLogoUrl } from './email.js';
 
 /**
+ * Get template by action name from unified_actions
+ * First checks unified_actions for assigned template, then falls back to name lookup
+ * @param {string} actionName - Action name (e.g., 'Welcome Email - Create Account')
+ * @returns {Promise<object|null>} - Template object or null
+ */
+async function getTemplateByActionName(actionName) {
+  try {
+    // 1) Check unified_actions for assigned template (highest priority)
+    const actionResult = await pool.query(
+      `SELECT ua.template_id, et.* 
+       FROM unified_actions ua
+       LEFT JOIN email_templates et ON ua.template_id = et.id
+       WHERE ua.action_name = $1 AND ua.template_id IS NOT NULL
+       LIMIT 1`,
+      [actionName]
+    );
+    if (actionResult.rows.length > 0 && actionResult.rows[0].id) {
+      return actionResult.rows[0];
+    }
+
+    return null;
+  } catch (error) {
+    console.warn(`Error fetching template by action name "${actionName}":`, error.message);
+    return null;
+  }
+}
+
+/**
  * Get template by key from database
- * Priority: 1) action_type, 2) email_type, 3) name
- * This allows admins to assign templates to specific CRM actions
- * @param {string} templateKey - Template name, email_type, or action_type
+ * Priority: 1) unified_actions assignment, 2) action_type, 3) email_type, 4) name
+ * @param {string} templateKey - Template name, email_type, action_type, or action name
  * @returns {Promise<object|null>} - Template object or null
  */
 async function getTemplateByName(templateKey) {
   try {
-    // 1) Try by action_type first (highest priority - for CRM action assignments)
+    // 1) Try by unified_actions assignment first (highest priority)
+    const actionTemplate = await getTemplateByActionName(templateKey);
+    if (actionTemplate) {
+      return actionTemplate;
+    }
+
+    // 2) Try by action_type (legacy support)
     try {
       let result = await pool.query(
         'SELECT * FROM email_templates WHERE action_type = $1 LIMIT 1',
@@ -29,7 +62,7 @@ async function getTemplateByName(templateKey) {
       console.warn('email_templates.action_type not available yet:', actionErr.message);
     }
 
-    // 2) Try by exact name
+    // 3) Try by exact name
     let result = await pool.query(
       'SELECT * FROM email_templates WHERE name = $1 LIMIT 1',
       [templateKey]
@@ -38,7 +71,7 @@ async function getTemplateByName(templateKey) {
       return result.rows[0];
     }
 
-    // 3) Fallback: try by email_type so templates can be renamed in UI
+    // 4) Fallback: try by email_type
     try {
       result = await pool.query(
         'SELECT * FROM email_templates WHERE email_type = $1 LIMIT 1',
@@ -279,11 +312,11 @@ export async function sendTemplateEmail(templateName, recipientEmail, variables 
 
 /**
  * Send Welcome Email on account creation
- * Uses action_type: 'account_creation' if assigned, otherwise falls back to name 'Welcome Email'
+ * Uses action name from unified_actions: 'Welcome Email - Create Account'
  */
 export async function sendWelcomeEmail(userEmail, userName) {
   return await sendTemplateEmail(
-    'account_creation', // Try action_type first
+    'Welcome Email - Create Account', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
@@ -294,11 +327,11 @@ export async function sendWelcomeEmail(userEmail, userName) {
 
 /**
  * Send MT5 Account Created Email
- * Uses action_type: 'mt5_account_created' if assigned, otherwise falls back to name 'MT5 Account Created'
+ * Uses action name from unified_actions: 'MT5 Account Creation Email - on New MT5 Account'
  */
 export async function sendMT5AccountCreatedEmail(userEmail, userName, accountType, login, password) {
   return await sendTemplateEmail(
-    'mt5_account_created', // Try action_type first
+    'MT5 Account Creation Email - on New MT5 Account', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
@@ -311,11 +344,11 @@ export async function sendMT5AccountCreatedEmail(userEmail, userName, accountTyp
 
 /**
  * Send Deposit Request Created Email
- * Uses action_type: 'deposit_request' if assigned, otherwise falls back to name 'Deposit Request Created'
+ * Uses action name from unified_actions: 'Deposit Request Email - on Deposit Request'
  */
 export async function sendDepositRequestEmail(userEmail, userName, accountLogin, amount, date) {
   return await sendTemplateEmail(
-    'deposit_request', // Try action_type first
+    'Deposit Request Email - on Deposit Request', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
@@ -328,11 +361,11 @@ export async function sendDepositRequestEmail(userEmail, userName, accountLogin,
 
 /**
  * Send Withdrawal Request Created Email
- * Uses action_type: 'withdrawal_request' if assigned, otherwise falls back to name 'Withdrawal Request Created'
+ * Uses action name from unified_actions: 'Withdrawal Request Email - on Withdrawal Request'
  */
 export async function sendWithdrawalRequestEmail(userEmail, userName, accountLogin, amount, date) {
   return await sendTemplateEmail(
-    'withdrawal_request', // Try action_type first
+    'Withdrawal Request Email - on Withdrawal Request', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
@@ -345,11 +378,16 @@ export async function sendWithdrawalRequestEmail(userEmail, userName, accountLog
 
 /**
  * Send Transaction Completed Email (Deposit/Withdrawal)
- * Uses action_type: 'transaction_completed' if assigned, otherwise falls back to name 'Transaction Completed'
+ * Uses action name from unified_actions based on transaction type
  */
 export async function sendTransactionCompletedEmail(userEmail, userName, transactionType, accountLogin, amount, date) {
+  // Determine action name based on transaction type
+  const actionName = transactionType?.toLowerCase().includes('deposit')
+    ? 'Transaction Completed Email - Deposit'
+    : 'Transaction Completed Email - Withdrawal';
+  
   return await sendTemplateEmail(
-    'transaction_completed', // Try action_type first
+    actionName, // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
@@ -363,11 +401,11 @@ export async function sendTransactionCompletedEmail(userEmail, userName, transac
 
 /**
  * Send Internal Transfer Completed Email
- * Uses action_type: 'internal_transfer' if assigned, otherwise falls back to name 'Internal Transfer Completed'
+ * Uses action name from unified_actions: 'Internal Transfer Email - on Internal Transfer'
  */
 export async function sendInternalTransferEmail(userEmail, userName, fromAccount, toAccount, amount, date) {
   return await sendTemplateEmail(
-    'internal_transfer', // Try action_type first
+    'Internal Transfer Email - on Internal Transfer', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
@@ -381,11 +419,11 @@ export async function sendInternalTransferEmail(userEmail, userName, fromAccount
 
 /**
  * Send OTP Verification Email
- * Uses action_type: 'otp_verification' if assigned, otherwise falls back to name 'OTP Verification'
+ * Uses action name from unified_actions: 'OTP Verification Email - on OTP Request'
  */
 export async function sendOTPVerificationEmail(userEmail, userName, otp, verificationMessage) {
   return await sendTemplateEmail(
-    'otp_verification', // Try action_type first
+    'OTP Verification Email - on OTP Request', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'User',
@@ -397,11 +435,11 @@ export async function sendOTPVerificationEmail(userEmail, userName, otp, verific
 
 /**
  * Send KYC Completion Email
- * Uses action_type: 'kyc_completed' if assigned, otherwise falls back to name 'Transaction Completed'
+ * Uses action name from unified_actions: 'KYC Completion Email - on KYC Approval'
  */
 export async function sendKYCCompletionEmail(userEmail, userName) {
   return await sendTemplateEmail(
-    'kyc_completed', // Try action_type first
+    'KYC Completion Email - on KYC Approval', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
@@ -420,13 +458,11 @@ export async function sendKYCCompletionEmail(userEmail, userName) {
  */
 /**
  * Send Ticket Created Email (when user creates a ticket)
- * Uses ticket template from DB:
- *  - Prefer template with email_type = 'ticket_created'
- *  - Fallback to template with name = 'Ticket Created'
+ * Uses action name from unified_actions: 'Ticket Email - on Ticket Creation'
  */
 export async function sendTicketCreatedEmail(userEmail, userName, ticketId, subject, category = 'General', priority = 'medium') {
   return await sendTemplateEmail(
-    'ticket_created', // Try action_type first, then email_type, then name
+    'Ticket Email - on Ticket Creation', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
@@ -445,13 +481,11 @@ export async function sendTicketCreatedEmail(userEmail, userName, ticketId, subj
 
 /**
  * Send Ticket Response Email (when admin replies)
- * Uses ticket template from DB:
- *  - Prefer template with email_type = 'ticket_response'
- *  - Fallback to template with name = 'Ticket Response'
+ * Uses action name from unified_actions: 'Ticket Response Email - on Ticket Response'
  */
 export async function sendTicketResponseEmail(userEmail, userName, ticketId, subject, adminMessage, ticketStatus = 'Open') {
   return await sendTemplateEmail(
-    'ticket_response', // Try action_type first, then email_type, then name
+    'Ticket Response Email - on Ticket Response', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',

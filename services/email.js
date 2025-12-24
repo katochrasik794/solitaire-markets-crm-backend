@@ -112,6 +112,23 @@ try {
  * @returns {Promise<object>} - Email send result
  */
 export const sendPasswordResetEmail = async (email, resetToken) => {
+  // Try to use template from unified_actions first
+  try {
+    const { sendTemplateEmail } = await import('./templateEmail.service.js');
+    return await sendTemplateEmail(
+      'Forgot Password Email - on Forgot Password',
+      email,
+      {
+        recipientName: 'User',
+        resetUrl: `${process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com'}/reset-password?token=${resetToken}`
+      },
+      'Password Reset Request - Solitaire CRM'
+    );
+  } catch (templateError) {
+    // Fallback to hardcoded email if template not found
+    console.warn('Template not found for password reset, using fallback:', templateError.message);
+  }
+
   const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
   const resetUrl = `${frontendUrl}/reset-password?token=${resetToken}`;
   const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
@@ -530,6 +547,7 @@ export const sendOTPEmail = async (email, otp) => {
       accepted: info.accepted,
       rejected: info.rejected
     });
+
     return { success: true, messageId: info.messageId };
   } catch (error) {
     console.error('[EMAIL DEBUG] Error sending OTP email:', {
@@ -555,6 +573,23 @@ export const sendOTPEmail = async (email, otp) => {
     } else if (error.response) {
       throw new Error(`Email server rejected the request: ${error.response}`);
     } else {
+      // Log failed email action
+      try {
+        await logEmailAction({
+          actionType: 'otp_verification',
+          actionCategory: 'authentication',
+          recipientEmail: email,
+          emailTemplate: 'otp_verification',
+          emailSubject: 'Verify Your Email - Solitaire Markets',
+          emailStatus: 'failed',
+          emailError: error.message || 'Email send failed',
+          description: `Failed to send OTP verification email to ${email}`,
+          details: { error: error.message, code: error.code }
+        });
+      } catch (logError) {
+        console.warn('Failed to log failed email action (non-blocking):', logError);
+      }
+
       throw new Error(`Failed to send OTP email: ${error.message}`);
     }
   }
