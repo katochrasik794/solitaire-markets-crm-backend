@@ -102,15 +102,17 @@ function replaceTemplateVariables(html, variables) {
   if (!html) return '';
   
   let result = html;
-  const logoUrl = getLogoUrl(); // This now returns the actual URL: https://portal.solitairemarkets.com/logo.svg
+  const logoUrl = getLogoUrl(); // This now returns the actual URL: https://portal.solitairemarkets.com/logo.png
   
   // Get frontend URL - use live URL as default
   const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  // Dashboard URL - will redirect to login if not authenticated, then back to dashboard after login
   const dashboardUrl = `${frontendUrl}/user/dashboard`;
+  const loginUrl = `${frontendUrl}/login?redirect=/user/dashboard`;
   
   // Default variables - use actual logo URL
   const defaultVars = {
-    logoUrl: logoUrl, // Use actual URL: https://portal.solitairemarkets.com/logo.svg
+    logoUrl: logoUrl, // Use actual URL: https://portal.solitairemarkets.com/logo.png
     companyName: 'Solitaire Markets',
     companyEmail: 'support@solitairemarkets.me',
     dashboardUrl: dashboardUrl,
@@ -259,7 +261,7 @@ export async function sendTemplateEmail(templateName, recipientEmail, variables 
     let htmlContent = replaceTemplateVariables(template.html_code, variables);
     
     // Final check: ensure logo is present and properly replaced with actual URL
-    const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
+    const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.png
     const logoPlaceholderRegex = /\{\{.*logo.*\}\}/i;
     if (logoPlaceholderRegex.test(htmlContent)) {
       console.warn(`⚠️ Logo placeholder still found in template "${templateName}", forcing replacement...`);

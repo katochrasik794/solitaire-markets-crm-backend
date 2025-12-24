@@ -16,7 +16,7 @@ export const getLogoUrl = () => {
   }
   // Return actual logo URL - email clients prefer external URLs
   // This is the live logo URL that should be used in email templates
-  return 'https://portal.solitairemarkets.com/logo.svg';
+  return 'https://portal.solitairemarkets.com/logo.png';
 };
 
 // Validate required email environment variables
@@ -131,7 +131,7 @@ export const sendPasswordResetEmail = async (email, resetToken) => {
 
   const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
   const resetUrl = `${frontendUrl}/reset-password?token=${resetToken}`;
-  const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
+  const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.png
 
   const mailOptions = {
     from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
@@ -228,7 +228,7 @@ export const sendOperationEmail = async (type, payload) => {
 
     const safeAmount = typeof amount === 'number' ? amount.toFixed(2) : String(amount || '0');
     const ts = date || new Date().toISOString();
-    const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
+    const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.png
     const subjectMap = {
       deposit: 'Deposit Approved',
       withdrawal: 'Withdrawal Approved',
@@ -356,6 +356,7 @@ export const sendEmail = async ({ to, subject, html, text, attachments = [], inc
       finalHtml = finalHtml.replace(/href=["']([^"']*solitairemarkets\.me[^"']*dashboard[^"']*)["']/gi, `href="${dashboardUrl}"`);
       
       // Replace any "View Dashboard" text links regardless of URL
+      // The dashboard URL will redirect to login if not authenticated, then back to dashboard after login
       finalHtml = finalHtml.replace(/<a[^>]*>[\s]*View[\s]+Dashboard[\s]*<\/a>/gi, `<a href="${dashboardUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; font-weight: 700; font-size: 16px; padding: 16px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">View Dashboard</a>`);
     }
     
@@ -407,7 +408,7 @@ export const sendOTPEmail = async (email, otp) => {
     user: process.env.EMAIL_USER ? '***set***' : 'NOT SET'
   });
 
-  const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
+  const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.png
   
   const mailOptions = {
     from: `"${fromName}" <${fromEmail}>`,
