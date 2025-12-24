@@ -81,8 +81,7 @@ export const isValidEmail = (email) => {
     /^[0-9]+@/, // Starts with only numbers
     /@[0-9]+\.[a-z]+$/, // Domain is mostly numbers
     /(.)\1{4,}/, // Repeated characters (aaaaa, 11111)
-    /[0-9]{6,}/, // 6+ consecutive numbers
-    /^[a-z0-9]+[0-9]{5,}@/, // Many numbers at end of local part
+    /^[0-9]{8,}@/, // Local part starts with 8+ consecutive numbers (very suspicious)
     /@(test|temp|fake|spam|trash|throwaway|disposable)/, // Suspicious domain keywords
     /@[a-z]{1,2}\.[a-z]{1,2}$/, // Very short domain (a.b)
   ];
