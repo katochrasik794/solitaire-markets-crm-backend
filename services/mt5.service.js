@@ -276,11 +276,12 @@ export const deductBonus = async (
 };
 
 /**
- * GET /Users/{login}/getClientBalance
+ * GET /Users/{login}/GetClientBalance
+ * Get client balance from MT5 API
  */
 export const getClientBalance = async (login) => {
   const res = await fetch(
-    `${MT5_BASE_URL}/Users/${login}/getClientBalance`,
+    `${MT5_BASE_URL}/Users/${login}/GetClientBalance`,
     {
       method: 'GET',
       headers: getMT5Headers()
@@ -447,6 +448,72 @@ export const disableAccount = async (login) => {
   if (!res.ok) {
     throw new Error(
       data.Message || data.error || data.message || `Failed to disable account: ${res.status}`
+    );
+  }
+  return { success: true, data };
+};
+
+/**
+ * GET /client/tradehistory/trades-closed
+ * Get closed trades history for an account
+ * @param {number} accountId - MT5 account ID
+ * @param {string} fromDate - Start date (ISO string)
+ * @param {string} toDate - End date (ISO string)
+ * @param {number} page - Page number (default: 1)
+ * @param {number} pageSize - Items per page (default: 1000)
+ */
+export const getClosedTrades = async (accountId, fromDate = null, toDate = null, page = 1, pageSize = 1000) => {
+  const params = new URLSearchParams({
+    accountId: accountId.toString(),
+    page: page.toString(),
+    pageSize: pageSize.toString()
+  });
+  
+  if (fromDate) params.append('fromDate', fromDate);
+  if (toDate) params.append('toDate', toDate);
+
+  const res = await fetch(`${MT5_BASE_URL}/client/tradehistory/trades-closed?${params.toString()}`, {
+    method: 'GET',
+    headers: getMT5Headers()
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(
+      data.Message || data.error || `Failed to fetch closed trades: ${res.status}`
+    );
+  }
+  return { success: true, data };
+};
+
+/**
+ * GET /client/tradehistory/trades
+ * Get all trades (open + closed) for an account
+ * @param {number} accountId - MT5 account ID
+ * @param {string} fromDate - Start date (ISO string)
+ * @param {string} toDate - End date (ISO string)
+ * @param {number} page - Page number (default: 1)
+ * @param {number} pageSize - Items per page (default: 1000)
+ */
+export const getAllTrades = async (accountId, fromDate = null, toDate = null, page = 1, pageSize = 1000) => {
+  const params = new URLSearchParams({
+    accountId: accountId.toString(),
+    page: page.toString(),
+    pageSize: pageSize.toString()
+  });
+  
+  if (fromDate) params.append('fromDate', fromDate);
+  if (toDate) params.append('toDate', toDate);
+
+  const res = await fetch(`${MT5_BASE_URL}/client/tradehistory/trades?${params.toString()}`, {
+    method: 'GET',
+    headers: getMT5Headers()
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(
+      data.Message || data.error || `Failed to fetch trades: ${res.status}`
     );
   }
   return { success: true, data };

@@ -4,6 +4,7 @@ import { authenticate } from '../middleware/auth.js';
 import PDFDocument from 'pdfkit';
 import ExcelJS from 'exceljs';
 import { logUserAction } from '../services/logging.service.js';
+import * as mt5Service from '../services/mt5.service.js';
 
 const router = express.Router();
 
@@ -1235,7 +1236,7 @@ router.get('/transaction-history/download/excel', authenticate, async (req, res)
 
 /**
  * GET /api/reports/trading-performance
- * Get trading performance summary with real-time data
+ * Get trading performance summary with real-time data from MT5 API
  */
 router.get('/trading-performance', authenticate, async (req, res) => {
   try {
@@ -1246,12 +1247,17 @@ router.get('/trading-performance', authenticate, async (req, res) => {
     const days = parseInt(timeframe) || 365;
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
+    const fromDateISO = startDate.toISOString();
+    const toDateISO = new Date().toISOString();
     
-    // Get real accounts only (not demo)
+    // Get real accounts only (not demo) - only active accounts matching Dashboard filter
     let accountsQuery = `
-      SELECT account_number, balance, equity, credit, is_demo
+      SELECT account_number, balance, equity, credit, is_demo, account_status
       FROM trading_accounts
-      WHERE user_id = $1 AND platform = 'MT5' AND is_demo = FALSE
+      WHERE user_id = $1 
+        AND platform = 'MT5' 
+        AND is_demo = FALSE
+        AND (account_status IS NULL OR account_status = '' OR account_status = 'active')
     `;
     let accountsParams = [userId];
     
@@ -1289,6 +1295,121 @@ router.get('/trading-performance', authenticate, async (req, res) => {
         }
       });
     }
+    
+    // Fetch real-time balances from MT5 API for all accounts using getClientBalance
+    const balancePromises = accountNumbers.map(async (accNum) => {
+      try {
+        const login = parseInt(accNum, 10);
+        if (Number.isNaN(login)) return null;
+        
+        // Use getClientBalance API
+        const balanceResult = await mt5Service.getClientBalance(login);
+        let balanceData = null;
+        
+        // Try to get balance data from response
+        if (balanceResult.success && balanceResult.data) {
+          // Handle different response formats
+          if (balanceResult.data.Data) {
+            balanceData = balanceResult.data.Data;
+          } else if (balanceResult.data.Balance !== undefined) {
+            balanceData = balanceResult.data;
+          } else if (typeof balanceResult.data === 'object') {
+            balanceData = balanceResult.data;
+          }
+        }
+        
+        // Also get profile for additional data (Equity, Profit, etc.)
+        const profileResult = await mt5Service.getClientProfile(login);
+        let profileData = null;
+        
+        if (profileResult.success && profileResult.data && profileResult.data.Success && profileResult.data.Data) {
+          profileData = profileResult.data.Data;
+        }
+        
+        // Extract values - prioritize profile data, fallback to balance data
+        const balance = parseFloat(profileData?.Balance || balanceData?.Balance || 0);
+        const equity = parseFloat(profileData?.Equity || balanceData?.Equity || 0);
+        const credit = parseFloat(profileData?.Credit || balanceData?.Credit || 0);
+        const margin = parseFloat(profileData?.Margin || balanceData?.Margin || 0);
+        const freeMargin = parseFloat(profileData?.MarginFree || balanceData?.MarginFree || 0);
+        
+        // Get Profit/PnL from profile - try different field names
+        const profit = parseFloat(
+          profileData?.Profit || profileData?.profit || profileData?.ProfitLoss || profileData?.profitLoss ||
+          profileData?.RealProfit || profileData?.realProfit || profileData?.PL || profileData?.pl ||
+          profileData?.PnL || profileData?.pnl || profileData?.NetProfit || profileData?.netProfit || 0
+        );
+        
+        // Calculate unrealised P/L: Equity - Balance - Credit
+        const unrealisedPL = equity - balance - credit;
+        
+        // Update balance in database
+        await pool.query(
+          `UPDATE trading_accounts 
+           SET balance = $1, equity = $2, credit = $3, free_margin = $4, margin = $5, leverage = $6, updated_at = NOW()
+           WHERE account_number = $7 AND user_id = $8`,
+          [
+            balance,
+            equity,
+            credit,
+            freeMargin,
+            margin,
+            parseInt(profileData?.Leverage || balanceData?.Leverage || 2000),
+            accNum,
+            userId
+          ]
+        );
+        
+        return {
+          accountNumber: accNum,
+          balance: balance,
+          equity: equity,
+          credit: credit,
+          margin: margin,
+          freeMargin: freeMargin,
+          profit: profit,
+          unrealisedPL: unrealisedPL
+        };
+      } catch (error) {
+        console.error(`Error fetching balance for account ${accNum}:`, error);
+        // Return database values as fallback
+        const acc = realAccounts.find(a => a.account_number === accNum);
+        return acc ? {
+          accountNumber: accNum,
+          balance: parseFloat(acc.balance || 0),
+          equity: parseFloat(acc.equity || 0),
+          credit: parseFloat(acc.credit || 0),
+          margin: 0,
+          freeMargin: 0,
+          profit: 0,
+          unrealisedPL: 0
+        } : null;
+      }
+    });
+    
+    const accountBalances = (await Promise.all(balancePromises)).filter(Boolean);
+    
+    // Fetch closed trades from MT5 API for all accounts
+    const tradePromises = accountNumbers.map(async (accNum) => {
+      try {
+        const login = parseInt(accNum, 10);
+        if (Number.isNaN(login)) return [];
+        
+        const tradesResult = await mt5Service.getClosedTrades(login, fromDateISO, toDateISO, 1, 10000);
+        if (tradesResult.success && tradesResult.data && Array.isArray(tradesResult.data)) {
+          return tradesResult.data.map(trade => ({
+            ...trade,
+            accountNumber: accNum
+          }));
+        }
+        return [];
+      } catch (error) {
+        console.error(`Error fetching trades for account ${accNum}:`, error);
+        return [];
+      }
+    });
+    
+    const allTrades = (await Promise.all(tradePromises)).flat();
     
     // Get approved deposits for MT5 accounts
     let depositsQuery = `
@@ -1334,33 +1455,79 @@ router.get('/trading-performance', authenticate, async (req, res) => {
     
     const withdrawalsResult = await pool.query(withdrawalsQuery, withdrawalsParams);
     
-    // Calculate totals
+    // Calculate totals from deposits/withdrawals
     const totalDeposits = depositsResult.rows.reduce((sum, d) => sum + parseFloat(d.amount || 0), 0);
     const totalWithdrawals = withdrawalsResult.rows.reduce((sum, w) => sum + parseFloat(w.amount || 0), 0);
     
-    // Get current equity from accounts
-    const totalEquity = realAccounts.reduce((sum, acc) => {
-      const equity = parseFloat(acc.equity || 0);
-      const balance = parseFloat(acc.balance || 0);
-      const credit = parseFloat(acc.credit || 0);
-      return sum + equity + balance + credit;
+    // Get current equity from real-time MT5 API balances - ONLY use Equity field (not balance + credit)
+    // Equity already includes balance and unrealized P/L, so we don't add balance/credit separately
+    const totalEquity = accountBalances.reduce((sum, acc) => {
+      // Use ONLY equity from MT5 API - this is the correct value
+      return sum + (acc.equity || 0);
     }, 0);
     
-    // Calculate net profit: Current equity - (Total Deposits - Total Withdrawals)
-    // This represents the profit/loss from trading
-    // Example: Deposited $1000, Withdrew $200, Current Equity $900
-    // Net Profit = $900 - ($1000 - $200) = $900 - $800 = $100 (profit)
-    const netProfit = totalEquity - (totalDeposits - totalWithdrawals);
+    // Get total profit from getClientProfile/getClientBalance API (realized + unrealized)
+    const totalProfitFromAPI = accountBalances.reduce((sum, acc) => {
+      return sum + (acc.profit || 0);
+    }, 0);
     
-    // For profit/loss breakdown:
-    // Profit = positive net profit
-    // Loss = negative net profit (as positive number)
-    const profit = netProfit > 0 ? netProfit : 0;
-    const loss = netProfit < 0 ? Math.abs(netProfit) : 0;
+    // Calculate profit/loss from actual trades for closed orders count
+    let totalProfit = 0;
+    let totalLoss = 0;
+    let profitableTrades = 0;
+    let unprofitableTrades = 0;
+    let totalVolume = 0;
+    let unrealisedPL = 0;
+    
+    // Process trades - handle different possible field names from MT5 API
+    allTrades.forEach(trade => {
+      // Try different possible field names for profit
+      const profitValue = parseFloat(
+        trade.Profit || trade.profit || trade.ProfitLoss || trade.profitLoss || 
+        trade.RealProfit || trade.realProfit || trade.PL || trade.pl || 0
+      );
+      
+      // Try different possible field names for volume
+      const volumeValue = parseFloat(
+        trade.Volume || trade.volume || trade.VolumeInLots || trade.volumeInLots || 
+        trade.Size || trade.size || 0
+      );
+      
+      totalVolume += volumeValue;
+      
+      if (profitValue > 0) {
+        totalProfit += profitValue;
+        profitableTrades++;
+      } else if (profitValue < 0) {
+        totalLoss += Math.abs(profitValue);
+        unprofitableTrades++;
+      }
+    });
+    
+    // Use profit from API if available, otherwise use trades
+    // If we have profit from API, use it (includes both realized and unrealized)
+    // Otherwise fallback to trades (only realized)
+    let netProfit = totalProfitFromAPI;
+    let profit = totalProfitFromAPI > 0 ? totalProfitFromAPI : totalProfit;
+    let loss = totalProfitFromAPI < 0 ? Math.abs(totalProfitFromAPI) : totalLoss;
+    
+    // If no API profit but we have trades, use trades
+    if (totalProfitFromAPI === 0 && (totalProfit > 0 || totalLoss > 0)) {
+      netProfit = totalProfit - totalLoss;
+      profit = totalProfit;
+      loss = totalLoss;
+    }
+    
+    // Calculate unrealised P/L (equity - balance - credit)
+    // Unrealised P/L = Equity - Balance - Credit (from MT5 API)
+    unrealisedPL = accountBalances.reduce((sum, acc) => {
+      return sum + (acc.unrealisedPL || 0);
+    }, 0);
     
     // Get monthly data for charts
     const months = [];
     const monthlyData = {};
+    const monthlyTradeData = {};
     
     // Generate month labels (last 12 months or based on timeframe)
     const numMonths = Math.ceil(days / 30);
@@ -1374,6 +1541,14 @@ router.get('/trading-performance', authenticate, async (req, res) => {
         deposits: 0,
         withdrawals: 0,
         net: 0
+      };
+      monthlyTradeData[monthKey] = {
+        profit: 0,
+        loss: 0,
+        profitable: 0,
+        unprofitable: 0,
+        volume: 0,
+        equity: []
       };
     }
     
@@ -1400,21 +1575,47 @@ router.get('/trading-performance', authenticate, async (req, res) => {
       monthlyData[key].net = monthlyData[key].deposits - monthlyData[key].withdrawals;
     });
     
+    // Aggregate trades by month
+    allTrades.forEach(trade => {
+      // Try to get close time from trade
+      const closeTime = trade.CloseTime || trade.closeTime || trade.Time || trade.time || trade.ClosedAt || trade.closedAt;
+      if (closeTime) {
+        const tradeDate = new Date(closeTime);
+        const monthKey = tradeDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+        
+        if (monthlyTradeData[monthKey]) {
+          const profitValue = parseFloat(
+            trade.Profit || trade.profit || trade.ProfitLoss || trade.profitLoss || 
+            trade.RealProfit || trade.realProfit || trade.PL || trade.pl || 0
+          );
+          const volumeValue = parseFloat(
+            trade.Volume || trade.volume || trade.VolumeInLots || trade.volumeInLots || 
+            trade.Size || trade.size || 0
+          );
+          
+          if (profitValue > 0) {
+            monthlyTradeData[monthKey].profit += profitValue;
+            monthlyTradeData[monthKey].profitable++;
+          } else if (profitValue < 0) {
+            monthlyTradeData[monthKey].loss += Math.abs(profitValue);
+            monthlyTradeData[monthKey].unprofitable++;
+          }
+          monthlyTradeData[monthKey].volume += volumeValue;
+        }
+      }
+    });
+    
     // Build chart data arrays matching month labels
-    // For net profit chart, we show monthly cash flow (deposits - withdrawals)
-    // Positive = more deposits than withdrawals, Negative = more withdrawals than deposits
     const monthKeys = Object.keys(monthlyData);
     const netProfitData = {
       labels: months,
       profit: months.map((month) => {
-        // Find matching month key (handle year differences)
         const matchingKey = monthKeys.find(key => {
           const keyMonth = key.split(' ')[0];
           return keyMonth === month;
         });
-        if (matchingKey && monthlyData[matchingKey]) {
-          const net = monthlyData[matchingKey].net;
-          return net > 0 ? net : 0;
+        if (matchingKey && monthlyTradeData[matchingKey]) {
+          return monthlyTradeData[matchingKey].profit || 0;
         }
         return 0;
       }),
@@ -1423,23 +1624,39 @@ router.get('/trading-performance', authenticate, async (req, res) => {
           const keyMonth = key.split(' ')[0];
           return keyMonth === month;
         });
-        if (matchingKey && monthlyData[matchingKey]) {
-          const net = monthlyData[matchingKey].net;
-          return net < 0 ? Math.abs(net) : 0;
+        if (matchingKey && monthlyTradeData[matchingKey]) {
+          return monthlyTradeData[matchingKey].loss || 0;
         }
         return 0;
       })
     };
     
-    // For closed orders, we don't have trade data, so we'll show 0
-    // This would need MT5 API integration to get actual trade history
+    // Closed orders data from actual trades
     const closedOrdersData = {
       labels: months,
-      profitable: months.map(() => 0),
-      unprofitable: months.map(() => 0)
+      profitable: months.map((month) => {
+        const matchingKey = monthKeys.find(key => {
+          const keyMonth = key.split(' ')[0];
+          return keyMonth === month;
+        });
+        if (matchingKey && monthlyTradeData[matchingKey]) {
+          return monthlyTradeData[matchingKey].profitable || 0;
+        }
+        return 0;
+      }),
+      unprofitable: months.map((month) => {
+        const matchingKey = monthKeys.find(key => {
+          const keyMonth = key.split(' ')[0];
+          return keyMonth === month;
+        });
+        if (matchingKey && monthlyTradeData[matchingKey]) {
+          return monthlyTradeData[matchingKey].unprofitable || 0;
+        }
+        return 0;
+      })
     };
     
-    // Trading volume - use deposits + withdrawals as proxy
+    // Trading volume from actual trades
     const tradingVolumeData = {
       labels: months,
       volumes: months.map((month) => {
@@ -1447,15 +1664,14 @@ router.get('/trading-performance', authenticate, async (req, res) => {
           const keyMonth = key.split(' ')[0];
           return keyMonth === month;
         });
-        if (matchingKey && monthlyData[matchingKey]) {
-          return monthlyData[matchingKey].deposits + monthlyData[matchingKey].withdrawals;
+        if (matchingKey && monthlyTradeData[matchingKey]) {
+          return monthlyTradeData[matchingKey].volume || 0;
         }
         return 0;
       })
     };
     
-    // Equity data - for now show current equity for all months
-    // In future, could fetch historical equity from MT5 API
+    // Equity data - use current equity for all months (could be enhanced with historical data)
     const equityData = {
       labels: months,
       values: months.map(() => totalEquity)
@@ -1499,13 +1715,13 @@ router.get('/trading-performance', authenticate, async (req, res) => {
       data: {
         summary: {
           netProfit: parseFloat(netProfit.toFixed(2)),
-          profit: parseFloat(profit.toFixed(2)),
-          loss: parseFloat(loss.toFixed(2)),
-          unrealisedPL: 0, // Would need open positions data
-          closedOrders: 0, // Would need trade history
-          profitable: 0,
-          unprofitable: 0,
-          tradingVolume: parseFloat((totalDeposits + totalWithdrawals).toFixed(2)),
+          profit: parseFloat(totalProfit.toFixed(2)),
+          loss: parseFloat(totalLoss.toFixed(2)),
+          unrealisedPL: parseFloat(unrealisedPL.toFixed(2)),
+          closedOrders: profitableTrades + unprofitableTrades,
+          profitable: profitableTrades,
+          unprofitable: unprofitableTrades,
+          tradingVolume: parseFloat(totalVolume.toFixed(2)),
           lifetimeVolume: parseFloat(lifetimeVolume.toFixed(2)),
           equity: parseFloat(totalEquity.toFixed(2))
         },

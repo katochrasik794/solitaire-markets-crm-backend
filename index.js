@@ -14,6 +14,7 @@ import reportsRoutes from './routes/reports.js';
 import adminRoutes from './routes/admin.js';
 import supportRoutes from './routes/support.js';
 import tickerRoutes from './routes/tickers.js';
+import promotionRoutes from './routes/promotions.js';
 import paymentDetailsRoutes from './routes/paymentDetails.js';
 import unifiedActionsRoutes from './routes/unifiedActions.js';
 import pool from './config/database.js';
@@ -262,6 +263,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/admin/unified-actions', unifiedActionsRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/tickers', tickerRoutes);
+app.use('/api/promotions', promotionRoutes);
 app.use('/api/payment-details', paymentDetailsRoutes);
 
 // Debug: Log registered routes
@@ -277,6 +279,7 @@ console.log('  - /api/reports');
 console.log('  - /api/admin');
 console.log('  - /api/support');
 console.log('  - /api/tickers');
+console.log('  - /api/promotions');
 console.log('  - /api/payment-details');
 
 // Inspect admin routes
