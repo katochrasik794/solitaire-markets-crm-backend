@@ -23,6 +23,7 @@ import {
 } from '../services/templateEmail.service.js';
 import { logAdminAction } from '../services/logging.service.js';
 import { captureResponseData, logAdminActionMiddleware } from '../middleware/logging.middleware.js';
+import { requireAdminFeaturePermission } from '../middleware/permissions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -164,7 +165,7 @@ router.post('/login', validateLogin, async (req, res, next) => {
 
     // Find admin by email
     const result = await pool.query(
-      'SELECT id, username, email, password_hash, admin_role, is_active, login_attempts, locked_until FROM admin WHERE email = $1',
+      'SELECT id, username, email, password_hash, admin_role, is_active, login_attempts, locked_until, features, feature_permissions FROM admin WHERE email = $1',
       [email]
     );
     console.log('📋 Admin query result:', { found: result.rows.length > 0 });
@@ -289,6 +290,8 @@ router.post('/login', validateLogin, async (req, res, next) => {
       username: admin.username,
       email: admin.email,
       role: admin.admin_role,
+      features: admin.features || [],
+      feature_permissions: admin.feature_permissions || {},
       ...(countryAdminData && countryAdminData)
     };
 
@@ -909,14 +912,15 @@ router.delete('/roles/:id', authenticateAdmin, async (req, res) => {
 router.get('/admins', authenticateAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, username, email, admin_role, features, is_active, last_login
+      `SELECT id, username, email, admin_role, features, feature_permissions, is_active, last_login
        FROM admin
        ORDER BY id ASC`
     );
-    // Ensure features is always an array
+    // Ensure features is always an array and feature_permissions is always an object
     const admins = result.rows.map(admin => ({
       ...admin,
-      features: admin.features || []
+      features: admin.features || [],
+      feature_permissions: admin.feature_permissions || {}
     }));
     res.json({ ok: true, admins });
   } catch (error) {
@@ -1126,20 +1130,40 @@ router.put('/admins/:id/password', authenticateAdmin, async (req, res) => {
 
 /**
  * PUT /api/admin/admins/:id/features
- * Update admin features (save directly to admin table)
+ * Update admin features and feature_permissions (save directly to admin table)
  */
 router.put('/admins/:id/features', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { features } = req.body;
+    const { features, featurePermissions } = req.body;
 
     if (!Array.isArray(features)) {
       return res.status(400).json({ ok: false, error: 'Features must be an array' });
     }
 
+    // Validate featurePermissions if provided
+    if (featurePermissions !== undefined) {
+      if (typeof featurePermissions !== 'object' || Array.isArray(featurePermissions)) {
+        return res.status(400).json({ ok: false, error: 'featurePermissions must be an object' });
+      }
+      
+      // Validate structure: each feature should have view, add, edit, delete booleans
+      for (const [featurePath, perms] of Object.entries(featurePermissions)) {
+        if (typeof perms !== 'object' || Array.isArray(perms)) {
+          return res.status(400).json({ ok: false, error: `Invalid permissions structure for feature: ${featurePath}` });
+        }
+        const validActions = ['view', 'add', 'edit', 'delete'];
+        for (const action of validActions) {
+          if (perms[action] !== undefined && typeof perms[action] !== 'boolean') {
+            return res.status(400).json({ ok: false, error: `Permission ${action} for feature ${featurePath} must be a boolean` });
+          }
+        }
+      }
+    }
+
     // Check if admin exists
     const adminCheck = await pool.query(
-      'SELECT id, username, email, admin_role, features FROM admin WHERE id = $1',
+      'SELECT id, username, email, admin_role, features, feature_permissions FROM admin WHERE id = $1',
       [id]
     );
 
@@ -1149,13 +1173,36 @@ router.put('/admins/:id/features', authenticateAdmin, async (req, res) => {
 
     const beforeData = { ...adminCheck.rows[0] };
 
-    // Update features in admin table
+    // Prepare update query
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+
+    // Update features
     const featuresJson = JSON.stringify(features);
+    updates.push(`features = $${paramIndex}::jsonb`);
+    values.push(featuresJson);
+    paramIndex++;
+
+    // Update feature_permissions if provided
+    if (featurePermissions !== undefined) {
+      const permissionsJson = JSON.stringify(featurePermissions);
+      updates.push(`feature_permissions = $${paramIndex}::jsonb`);
+      values.push(permissionsJson);
+      paramIndex++;
+    }
+
+    // Add updated_at
+    updates.push(`updated_at = NOW()`);
+
+    // Add WHERE clause
+    values.push(id);
+
     const result = await pool.query(
-      `UPDATE admin SET features = $1::jsonb, updated_at = NOW()
-       WHERE id = $2
-       RETURNING id, username, email, admin_role, features, is_active, last_login, created_at`,
-      [featuresJson, id]
+      `UPDATE admin SET ${updates.join(', ')}
+       WHERE id = $${paramIndex}
+       RETURNING id, username, email, admin_role, features, feature_permissions, is_active, last_login, created_at`,
+      values
     );
 
     const updatedAdmin = result.rows[0];
@@ -1170,15 +1217,28 @@ router.put('/admins/:id/features', authenticateAdmin, async (req, res) => {
         targetType: 'admin',
         targetId: updatedAdmin.id,
         targetIdentifier: updatedAdmin.email,
-        description: `Updated features for admin: ${updatedAdmin.username} (${updatedAdmin.email})`,
+        description: `Updated features and permissions for admin: ${updatedAdmin.username} (${updatedAdmin.email})`,
         req,
         res,
-        beforeData: { features: beforeData.features || [] },
-        afterData: { features: updatedAdmin.features || [] }
+        beforeData: { 
+          features: beforeData.features || [],
+          feature_permissions: beforeData.feature_permissions || {}
+        },
+        afterData: { 
+          features: updatedAdmin.features || [],
+          feature_permissions: updatedAdmin.feature_permissions || {}
+        }
       });
     });
 
-    res.json({ ok: true, admin: { ...updatedAdmin, features: updatedAdmin.features || [] } });
+    res.json({ 
+      ok: true, 
+      admin: { 
+        ...updatedAdmin, 
+        features: updatedAdmin.features || [],
+        feature_permissions: updatedAdmin.feature_permissions || {}
+      } 
+    });
   } catch (error) {
     console.error('Update admin features error:', error);
     res.status(500).json({ ok: false, error: error.message || 'Failed to update admin features' });
@@ -5744,7 +5804,7 @@ router.delete('/manual-gateways/:id', authenticateAdmin, async (req, res, next) 
  * GET /api/admin/deposits
  * Get all deposit requests with filtering
  */
-router.get('/deposits', authenticateAdmin, async (req, res) => {
+router.get('/deposits', authenticateAdmin, requireAdminFeaturePermission('deposits', 'view'), async (req, res) => {
   try {
     const { status, limit = 500, offset = 0 } = req.query;
 
@@ -5868,7 +5928,7 @@ router.get('/deposits', authenticateAdmin, async (req, res) => {
  * POST /api/admin/deposits/:id/approve
  * Approve a deposit request
  */
-router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
+router.post('/deposits/:id/approve', authenticateAdmin, requireAdminFeaturePermission('deposits', 'edit'), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -6034,7 +6094,7 @@ router.post('/deposits/:id/approve', authenticateAdmin, async (req, res) => {
  * POST /api/admin/deposits/:id/reject
  * Reject a deposit request
  */
-router.post('/deposits/:id/reject', authenticateAdmin, async (req, res) => {
+router.post('/deposits/:id/reject', authenticateAdmin, requireAdminFeaturePermission('deposits', 'edit'), async (req, res) => {
   try {
     const { id } = req.params;
     const { reason } = req.body;
@@ -6528,7 +6588,7 @@ router.delete('/payment-gateways/:id', authenticateAdmin, async (req, res, next)
  * GET /api/admin/withdrawals
  * List all withdrawal requests
  */
-router.get('/withdrawals', authenticateAdmin, async (req, res) => {
+router.get('/withdrawals', authenticateAdmin, requireAdminFeaturePermission('withdrawals', 'view'), async (req, res) => {
   try {
     const { status, limit = 500 } = req.query;
 
@@ -6573,7 +6633,7 @@ router.get('/withdrawals', authenticateAdmin, async (req, res) => {
  * POST /api/admin/withdrawals/:id/approve
  * Approve a withdrawal request
  */
-router.post('/withdrawals/:id/approve', authenticateAdmin, async (req, res) => {
+router.post('/withdrawals/:id/approve', authenticateAdmin, requireAdminFeaturePermission('withdrawals', 'edit'), async (req, res) => {
   try {
     const { id } = req.params;
     const { externalTransactionId } = req.body;
@@ -6717,7 +6777,7 @@ router.post('/withdrawals/:id/approve', authenticateAdmin, async (req, res) => {
  * POST /api/admin/withdrawals/:id/reject
  * Reject a withdrawal request
  */
-router.post('/withdrawals/:id/reject', authenticateAdmin, async (req, res) => {
+router.post('/withdrawals/:id/reject', authenticateAdmin, requireAdminFeaturePermission('withdrawals', 'edit'), async (req, res) => {
   try {
     const { id } = req.params;
     const { reason } = req.body;
