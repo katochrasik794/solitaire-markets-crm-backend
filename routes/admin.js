@@ -7491,12 +7491,12 @@ router.get('/email-templates/:id', authenticateAdmin, async (req, res) => {
 // POST /api/admin/email-templates
 router.post('/email-templates', authenticateAdmin, async (req, res) => {
   try {
-    const { name, description, html_code, variables, is_default, from_email } = req.body;
+    const { name, description, html_code, variables, is_default, from_email, action_type } = req.body;
 
     const result = await pool.query(
       `INSERT INTO email_templates 
-       (name, description, html_code, variables, is_default, from_email, created_at, updated_at, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7)
+       (name, description, html_code, variables, is_default, from_email, action_type, created_at, updated_at, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8)
        RETURNING *`,
       [
         name,
@@ -7505,6 +7505,7 @@ router.post('/email-templates', authenticateAdmin, async (req, res) => {
         JSON.stringify(variables || []),
         is_default || false,
         from_email,
+        action_type || null,
         req.admin.adminId
       ]
     );
@@ -7520,7 +7521,7 @@ router.post('/email-templates', authenticateAdmin, async (req, res) => {
 router.put('/email-templates/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, html_code, variables, is_default, from_email } = req.body;
+    const { name, description, html_code, variables, is_default, from_email, action_type } = req.body;
 
     const result = await pool.query(
       `UPDATE email_templates 
@@ -7530,8 +7531,9 @@ router.put('/email-templates/:id', authenticateAdmin, async (req, res) => {
            variables = COALESCE($4, variables),
            is_default = COALESCE($5, is_default),
            from_email = COALESCE($6, from_email),
+           action_type = COALESCE($7, action_type),
            updated_at = NOW()
-       WHERE id = $7
+       WHERE id = $8
        RETURNING *`,
       [
         name,
@@ -7540,6 +7542,7 @@ router.put('/email-templates/:id', authenticateAdmin, async (req, res) => {
         variables ? JSON.stringify(variables) : null,
         is_default,
         from_email,
+        action_type !== undefined ? action_type : null,
         id
       ]
     );
@@ -7564,6 +7567,151 @@ router.delete('/email-templates/:id', authenticateAdmin, async (req, res) => {
   } catch (error) {
     console.error('Delete email template error:', error);
     res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/email-templates/actions
+ * Get list of available CRM actions that can be assigned templates
+ */
+router.get('/email-templates/actions', authenticateAdmin, async (req, res) => {
+  try {
+    const actions = [
+      {
+        action_type: 'account_creation',
+        name: 'Account Creation',
+        description: 'Welcome email sent when a new user account is created',
+        category: 'User Management'
+      },
+      {
+        action_type: 'mt5_account_created',
+        name: 'MT5 Account Created',
+        description: 'Email sent when an MT5 trading account is created for a user',
+        category: 'Trading Accounts'
+      },
+      {
+        action_type: 'deposit_request',
+        name: 'Deposit Request',
+        description: 'Email sent when a user creates a deposit request',
+        category: 'Transactions'
+      },
+      {
+        action_type: 'withdrawal_request',
+        name: 'Withdrawal Request',
+        description: 'Email sent when a user creates a withdrawal request',
+        category: 'Transactions'
+      },
+      {
+        action_type: 'transaction_completed',
+        name: 'Transaction Completed',
+        description: 'Email sent when a deposit or withdrawal is approved/completed',
+        category: 'Transactions'
+      },
+      {
+        action_type: 'internal_transfer',
+        name: 'Internal Transfer',
+        description: 'Email sent when an internal transfer between accounts is completed',
+        category: 'Transactions'
+      },
+      {
+        action_type: 'otp_verification',
+        name: 'OTP Verification',
+        description: 'Email sent with OTP code for account verification or password reset',
+        category: 'Security'
+      },
+      {
+        action_type: 'kyc_completed',
+        name: 'KYC Completed',
+        description: 'Email sent when KYC verification is completed and approved',
+        category: 'Compliance'
+      },
+      {
+        action_type: 'ticket_created',
+        name: 'Ticket Created',
+        description: 'Email sent when a user creates a support ticket',
+        category: 'Support'
+      },
+      {
+        action_type: 'ticket_response',
+        name: 'Ticket Response',
+        description: 'Email sent when an admin responds to a support ticket',
+        category: 'Support'
+      }
+    ];
+
+    // Get current template assignments
+    const templatesResult = await pool.query(
+      'SELECT id, name, action_type FROM email_templates WHERE action_type IS NOT NULL'
+    );
+
+    const assignments = {};
+    templatesResult.rows.forEach(template => {
+      if (template.action_type) {
+        assignments[template.action_type] = {
+          template_id: template.id,
+          template_name: template.name
+        };
+      }
+    });
+
+    res.json({
+      ok: true,
+      actions: actions.map(action => ({
+        ...action,
+        assigned_template: assignments[action.action_type] || null
+      }))
+    });
+  } catch (error) {
+    console.error('Get email template actions error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to get actions' });
+  }
+});
+
+/**
+ * PUT /api/admin/email-templates/assign-action
+ * Assign a template to a CRM action
+ */
+router.put('/email-templates/assign-action', authenticateAdmin, async (req, res) => {
+  try {
+    const { action_type, template_id } = req.body;
+
+    if (!action_type) {
+      return res.status(400).json({ ok: false, error: 'action_type is required' });
+    }
+
+    if (!template_id) {
+      // Unassign template from action
+      await pool.query(
+        'UPDATE email_templates SET action_type = NULL WHERE action_type = $1',
+        [action_type]
+      );
+      return res.json({ ok: true, message: 'Template unassigned from action' });
+    }
+
+    // First, unassign any existing template for this action
+    await pool.query(
+      'UPDATE email_templates SET action_type = NULL WHERE action_type = $1',
+      [action_type]
+    );
+
+    // Assign the new template
+    const result = await pool.query(
+      'UPDATE email_templates SET action_type = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+      [action_type, template_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Template not found' });
+    }
+
+    res.json({
+      ok: true,
+      message: 'Template assigned to action successfully',
+      template: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Assign template to action error:', error);
+    res.status(500).json({ ok: false, error: error.message || 'Failed to assign template' });
   }
 });
 

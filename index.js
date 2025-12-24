@@ -15,6 +15,7 @@ import adminRoutes from './routes/admin.js';
 import supportRoutes from './routes/support.js';
 import tickerRoutes from './routes/tickers.js';
 import paymentDetailsRoutes from './routes/paymentDetails.js';
+import unifiedActionsRoutes from './routes/unifiedActions.js';
 import pool from './config/database.js';
 
 dotenv.config();
@@ -256,6 +257,7 @@ app.use('/api/deposits', depositsRoutes);
 app.use('/api/withdrawals', withdrawalsRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/unified-actions', unifiedActionsRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/tickers', tickerRoutes);
 app.use('/api/payment-details', paymentDetailsRoutes);
