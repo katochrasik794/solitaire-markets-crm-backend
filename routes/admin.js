@@ -45,6 +45,12 @@ if (!fs.existsSync(gatewaysUploadsDir)) {
   fs.mkdirSync(gatewaysUploadsDir, { recursive: true });
 }
 
+// Create uploads directory for KYC documents
+const kycUploadsDir = path.join(__dirname, '../uploads/kyc');
+if (!fs.existsSync(kycUploadsDir)) {
+  fs.mkdirSync(kycUploadsDir, { recursive: true });
+}
+
 // Configure multer for payment gateway file uploads
 const gatewayStorage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -53,6 +59,35 @@ const gatewayStorage = multer.diskStorage({
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     cb(null, `gateway-${uniqueSuffix}${path.extname(file.originalname)}`);
+  }
+});
+
+// Configure multer for KYC document uploads
+const kycStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, kycUploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, `kyc-${uniqueSuffix}${path.extname(file.originalname)}`);
+  }
+});
+
+const kycUpload = multer({
+  storage: kycStorage,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit for documents
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|webp|pdf/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype) || file.mimetype === 'application/pdf';
+
+    if (mimetype && extname) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files (JPEG, PNG, GIF, WEBP) and PDF files are allowed'));
+    }
   }
 });
 
@@ -2199,9 +2234,71 @@ router.get('/kyc', authenticateAdmin, async (req, res, next) => {
  */
 router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
   try {
-    const kycId = parseInt(req.params.id);
+    let kycId = null;
+    let userId = null;
+    
+    // Handle synthetic IDs like "no-kyc-19" where 19 is the user_id
+    if (req.params.id.startsWith('no-kyc-')) {
+      userId = parseInt(req.params.id.replace('no-kyc-', ''));
+      if (Number.isNaN(userId)) {
+        return res.status(400).json({ ok: false, error: 'Invalid user id in synthetic KYC id' });
+      }
+      
+      // Check if user exists
+      const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
+      if (userCheck.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: 'User not found' });
+      }
+      
+      // Check if KYC record already exists for this user
+      const existingKyc = await pool.query(
+        'SELECT id FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+        [userId]
+      );
+      
+      if (existingKyc.rows.length > 0) {
+        kycId = existingKyc.rows[0].id;
+      } else {
+        // Create a new KYC record for this user
+        // Use the status from the request if provided, otherwise default to 'pending'
+        const initialStatus = req.body.verificationStatus 
+          ? String(req.body.verificationStatus).toLowerCase() 
+          : 'pending';
+        
+        // Validate status
+        if (!['pending', 'approved', 'rejected'].includes(initialStatus)) {
+          return res.status(400).json({
+            ok: false,
+            error: 'verificationStatus must be one of: pending, approved, rejected'
+          });
+        }
+        
+        // Set reviewed_at if status is approved or rejected
+        const shouldSetReviewedAt = (initialStatus === 'approved' || initialStatus === 'rejected');
+        
+        const createResult = await pool.query(
+          shouldSetReviewedAt
+            ? `INSERT INTO kyc_verifications (user_id, status, submitted_at, reviewed_at, created_at, updated_at)
+               VALUES ($1, $2, NOW(), NOW(), NOW(), NOW())
+               RETURNING id`
+            : `INSERT INTO kyc_verifications (user_id, status, submitted_at, reviewed_at, created_at, updated_at)
+               VALUES ($1, $2, NOW(), NULL, NOW(), NOW())
+               RETURNING id`,
+          [userId, initialStatus]
+        );
+        kycId = createResult.rows[0].id;
+      }
+    } else {
+      kycId = parseInt(req.params.id);
     if (Number.isNaN(kycId)) {
       return res.status(400).json({ ok: false, error: 'Invalid KYC id' });
+    }
+
+    // Check if KYC record exists
+    const kycCheck = await pool.query('SELECT id FROM kyc_verifications WHERE id = $1', [kycId]);
+    if (kycCheck.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'KYC record not found' });
+    }
     }
 
     const {
@@ -2209,12 +2306,6 @@ router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
       documentReference,
       addressReference
     } = req.body;
-
-    // Check if KYC record exists
-    const kycCheck = await pool.query('SELECT id FROM kyc_verifications WHERE id = $1', [kycId]);
-    if (kycCheck.rows.length === 0) {
-      return res.status(404).json({ ok: false, error: 'KYC record not found' });
-    }
 
     // Build update query dynamically
     const updates = [];
@@ -2281,6 +2372,48 @@ router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
     res.status(500).json({
       ok: false,
       error: error.message || 'Failed to update KYC record'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/uploads
+ * Upload KYC documents (document and/or address proof)
+ */
+router.post('/uploads', authenticateAdmin, kycUpload.fields([
+  { name: 'document', maxCount: 1 },
+  { name: 'address', maxCount: 1 }
+]), async (req, res, next) => {
+  try {
+    const files = req.files || {};
+    const baseUrl = getBaseUrl();
+    const fileUrls = {};
+
+    if (files.document && files.document[0]) {
+      fileUrls.document = `${baseUrl}/uploads/kyc/${files.document[0].filename}`;
+    }
+
+    if (files.address && files.address[0]) {
+      fileUrls.address = `${baseUrl}/uploads/kyc/${files.address[0].filename}`;
+    }
+
+    if (Object.keys(fileUrls).length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No files uploaded'
+      });
+    }
+
+    res.json({
+      ok: true,
+      message: 'Files uploaded successfully',
+      files: fileUrls
+    });
+  } catch (error) {
+    console.error('Upload KYC documents error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to upload files'
     });
   }
 });
