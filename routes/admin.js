@@ -7304,6 +7304,7 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
           // Get frontend URL - use live URL as default
           const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
           const dashboardUrl = `${frontendUrl}/user/dashboard`;
+          const supportUrl = `${frontendUrl}/user/support`; // Correct support URL
           
           const vars = {
             ...templateVariables,
@@ -7315,6 +7316,7 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
             companyName: 'Solitaire Markets',
             companyEmail: 'support@solitairemarkets.me',
             dashboardUrl: dashboardUrl,
+            supportUrl: supportUrl, // Support page URL
             frontendUrl: frontendUrl,
             logoUrl: logoUrl // Use actual URL: https://portal.solitairemarkets.com/logo.svg
           };
@@ -7362,6 +7364,22 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
           
           // Replace any href attributes that contain "dashboard" but have wrong domain
           htmlContent = htmlContent.replace(/href=["']([^"']*solitairemarkets\.me[^"']*dashboard[^"']*)["']/gi, `href="${dashboardUrl}"`);
+          
+          // CRITICAL: Fix incorrect support URLs (should be /user/support, not /user/dashboard/support)
+          htmlContent = htmlContent.replace(/\/user\/dashboard\/support/gi, supportUrl);
+          htmlContent = htmlContent.replace(/\/user\/dashboar\/support/gi, supportUrl); // Fix typo "dashboar"
+          htmlContent = htmlContent.replace(/\{\{dashboardUrl\}\}\/support/gi, supportUrl);
+          htmlContent = htmlContent.replace(/\{\{dashboard_url\}\}\/support/gi, supportUrl);
+          htmlContent = htmlContent.replace(/\{\{DASHBOARD_URL\}\}\/support/gi, supportUrl);
+          
+          // Replace supportUrl variable
+          htmlContent = htmlContent.replace(/\{\{\s*supportUrl\s*\}\}/gi, supportUrl);
+          htmlContent = htmlContent.replace(/\{\{\s*support_url\s*\}\}/gi, supportUrl);
+          htmlContent = htmlContent.replace(/\{\{\s*SUPPORT_URL\s*\}\}/gi, supportUrl);
+          
+          // Replace "View Ticket" links to use correct support URL
+          htmlContent = htmlContent.replace(/<a[^>]*>[\s]*View[\s]+Ticket[\s]*<\/a>/gi, `<a href="${supportUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; font-weight: 700; font-size: 16px; padding: 16px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">View Ticket</a>`);
+          htmlContent = htmlContent.replace(/<a[^>]*>[\s]*View[\s]*&[\s]*Reply[\s]+to[\s]+Ticket[\s]*<\/a>/gi, `<a href="${supportUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; font-weight: 700; font-size: 16px; padding: 16px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">View & Reply to Ticket</a>`);
           
           // Ensure logo is always present - check if logo image exists in HTML
           const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) && 

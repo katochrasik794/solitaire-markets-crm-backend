@@ -340,6 +340,7 @@ export const sendEmail = async ({ to, subject, html, text, attachments = [], inc
     if (finalHtml) {
       const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
       const dashboardUrl = `${frontendUrl}/user/dashboard`;
+      const supportUrl = `${frontendUrl}/user/support`; // Correct support URL
       
       // Replace any solitairemarkets.me URLs (wrong domain) with correct dashboard URL
       finalHtml = finalHtml.replace(/https?:\/\/solitairemarkets\.me\/[^"'\s>]*/gi, dashboardUrl);
@@ -355,9 +356,18 @@ export const sendEmail = async ({ to, subject, html, text, attachments = [], inc
       // Replace any href attributes that contain "dashboard" but have wrong domain
       finalHtml = finalHtml.replace(/href=["']([^"']*solitairemarkets\.me[^"']*dashboard[^"']*)["']/gi, `href="${dashboardUrl}"`);
       
+      // CRITICAL: Fix incorrect support URLs (should be /user/support, not /user/dashboard/support)
+      finalHtml = finalHtml.replace(/\/user\/dashboard\/support/gi, supportUrl);
+      finalHtml = finalHtml.replace(/\/user\/dashboar\/support/gi, supportUrl); // Fix typo "dashboar"
+      finalHtml = finalHtml.replace(/\{\{dashboardUrl\}\}\/support/gi, supportUrl);
+      
       // Replace any "View Dashboard" text links regardless of URL
       // The dashboard URL will redirect to login if not authenticated, then back to dashboard after login
       finalHtml = finalHtml.replace(/<a[^>]*>[\s]*View[\s]+Dashboard[\s]*<\/a>/gi, `<a href="${dashboardUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; font-weight: 700; font-size: 16px; padding: 16px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">View Dashboard</a>`);
+      
+      // Replace "View Ticket" links to use correct support URL
+      finalHtml = finalHtml.replace(/<a[^>]*>[\s]*View[\s]+Ticket[\s]*<\/a>/gi, `<a href="${supportUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; font-weight: 700; font-size: 16px; padding: 16px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">View Ticket</a>`);
+      finalHtml = finalHtml.replace(/<a[^>]*>[\s]*View[\s]*&[\s]*Reply[\s]+to[\s]+Ticket[\s]*<\/a>/gi, `<a href="${supportUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; font-weight: 700; font-size: 16px; padding: 16px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">View & Reply to Ticket</a>`);
     }
     
     const mailOptions = {

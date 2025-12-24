@@ -108,6 +108,7 @@ function replaceTemplateVariables(html, variables) {
   const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
   // Dashboard URL - will redirect to login if not authenticated, then back to dashboard after login
   const dashboardUrl = `${frontendUrl}/user/dashboard`;
+  const supportUrl = `${frontendUrl}/user/support`; // Correct support URL (not /user/dashboard/support)
   const loginUrl = `${frontendUrl}/login?redirect=/user/dashboard`;
   
   // Default variables - use actual logo URL
@@ -116,6 +117,7 @@ function replaceTemplateVariables(html, variables) {
     companyName: 'Solitaire Markets',
     companyEmail: 'support@solitairemarkets.me',
     dashboardUrl: dashboardUrl,
+    supportUrl: supportUrl, // Support page URL
     frontendUrl: frontendUrl,
     currentYear: new Date().getFullYear(),
     ...variables
@@ -175,6 +177,22 @@ function replaceTemplateVariables(html, variables) {
   
   // Replace any href attributes that contain "dashboard" but have wrong domain
   result = result.replace(/href=["']([^"']*solitairemarkets\.me[^"']*dashboard[^"']*)["']/gi, `href="${dashboardUrl}"`);
+  
+  // CRITICAL: Fix incorrect support URLs (should be /user/support, not /user/dashboard/support)
+  // Replace any /dashboard/support with /support
+  result = result.replace(/\/user\/dashboard\/support/gi, supportUrl);
+  result = result.replace(/\/user\/dashboar\/support/gi, supportUrl); // Fix typo "dashboar"
+  result = result.replace(/\{\{dashboardUrl\}\}\/support/gi, supportUrl);
+  result = result.replace(/\{\{dashboard_url\}\}\/support/gi, supportUrl);
+  result = result.replace(/\{\{DASHBOARD_URL\}\}\/support/gi, supportUrl);
+  
+  // Replace supportUrl variable
+  result = result.replace(/\{\{\s*supportUrl\s*\}\}/gi, supportUrl);
+  result = result.replace(/\{\{\s*support_url\s*\}\}/gi, supportUrl);
+  result = result.replace(/\{\{\s*SUPPORT_URL\s*\}\}/gi, supportUrl);
+  result = result.replace(/\{\{supportUrl\}\}/gi, supportUrl);
+  result = result.replace(/\{\{support_url\}\}/gi, supportUrl);
+  result = result.replace(/\{\{SUPPORT_URL\}\}/gi, supportUrl);
   
   // Ensure logo is always present - check if logo image exists in HTML
   const hasLogoImg = /<img[^>]*src[^>]*>/i.test(result) && 
