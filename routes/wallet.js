@@ -83,6 +83,63 @@ router.post('/deposit', authenticate, async (req, res, next) => {
       });
     }
 
+    // Check KYC verification status
+    const kycResult = await pool.query(
+      `SELECT status 
+       FROM kyc_verifications 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 1`,
+      [req.user.id]
+    );
+    
+    const kycStatus = kycResult.rows[0]?.status?.toLowerCase() || 'unverified';
+    const isKycVerified = kycStatus === 'approved';
+    
+    // If KYC is not verified, limit deposit to $2000 USD
+    if (!isKycVerified) {
+      const MAX_UNVERIFIED_DEPOSIT = 2000;
+      
+      // Check total deposits (wallet + MT5) for unverified users
+      let totalDeposits = 0;
+      
+      // Get wallet balance
+      const walletResult = await pool.query(
+        'SELECT balance FROM wallets WHERE user_id = $1 LIMIT 1',
+        [req.user.id]
+      );
+      if (walletResult.rows.length > 0) {
+        totalDeposits += parseFloat(walletResult.rows[0].balance || 0);
+      }
+      
+      // Get total MT5 account balances
+      const mt5Result = await pool.query(
+        'SELECT SUM(balance) as total_balance FROM trading_accounts WHERE user_id = $1 AND platform = \'MT5\' AND is_demo = FALSE',
+        [req.user.id]
+      );
+      if (mt5Result.rows.length > 0 && mt5Result.rows[0].total_balance) {
+        totalDeposits += parseFloat(mt5Result.rows[0].total_balance || 0);
+      }
+      
+      // Check if this deposit would exceed the limit
+      const totalAfterDeposit = totalDeposits + numericAmount;
+      if (totalAfterDeposit > MAX_UNVERIFIED_DEPOSIT) {
+        const maxAllowedDeposit = Math.max(0, MAX_UNVERIFIED_DEPOSIT - totalDeposits);
+        return res.status(400).json({
+          success: false,
+          message: `KYC verification required. Maximum deposit limit for unverified accounts is USD ${MAX_UNVERIFIED_DEPOSIT}. You can deposit up to USD ${maxAllowedDeposit.toFixed(2)} more. Please complete KYC verification to remove this limit.`
+        });
+      }
+      
+      // Also check single deposit amount
+      if (numericAmount > MAX_UNVERIFIED_DEPOSIT) {
+        return res.status(400).json({
+          success: false,
+          message: `KYC verification required. Maximum single deposit for unverified accounts is USD ${MAX_UNVERIFIED_DEPOSIT}. Please complete KYC verification to remove this limit.`
+        });
+      }
+    }
+
     let wallet = await getWalletByUserId(req.user.id);
     if (!wallet) {
       wallet = await createWalletForUser(req.user.id);
