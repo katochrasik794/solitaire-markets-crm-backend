@@ -205,7 +205,9 @@ setInterval(cancelExpiredDeposits, 5 * 60 * 1000); // Every 5 minutes
 // If you later want to restrict origins, this block should be updated accordingly.
 app.use(cors({
   origin: true,        // reflect request origin
-  credentials: true    // allow cookies/authorization headers
+  credentials: true,    // allow cookies/authorization headers
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -316,7 +318,10 @@ app.use((err, req, res, next) => {
 
 // 404 handler
 app.use((req, res) => {
-  console.log(`❌ 404 - Route not found: ${req.method} ${req.path}`);
+  // Don't log OPTIONS requests (CORS preflight)
+  if (req.method !== 'OPTIONS') {
+    console.log(`❌ 404 - Route not found: ${req.method} ${req.path}`);
+  }
   res.status(404).json({
     success: false,
     message: 'Route not found',

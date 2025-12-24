@@ -6,6 +6,7 @@ import { validateRegister, validateLogin, validateForgotPassword, validateResetP
 import { sendPasswordResetEmail, sendOTPEmail } from '../services/email.js';
 import { sendWelcomeEmail, sendOTPVerificationEmail } from '../services/templateEmail.service.js';
 import jwt from 'jsonwebtoken';
+import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -1042,6 +1043,265 @@ router.post('/verify-activation-otp', async (req, res, next) => {
   } catch (error) {
     console.error('Verify activation OTP error:', error);
     next(error);
+  }
+});
+
+/**
+ * GET /api/auth/profile
+ * Get authenticated user's profile with status and details
+ */
+router.get('/profile', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Get user profile - select only columns that definitely exist
+    const userResult = await pool.query(
+      `SELECT 
+        id, email, first_name, last_name, phone_code, phone_number, country,
+        is_email_verified, referral_code, referred_by,
+        created_at, updated_at, last_login
+      FROM users 
+      WHERE id = $1`,
+      [userId]
+    );
+
+    // Try to get status and kyc_status if columns exist
+    let userStatus = 'active';
+    let userKycStatus = 'unverified';
+    try {
+      const statusResult = await pool.query(
+        `SELECT status, kyc_status FROM users WHERE id = $1`,
+        [userId]
+      );
+      if (statusResult.rows.length > 0) {
+        userStatus = statusResult.rows[0].status || 'active';
+        userKycStatus = statusResult.rows[0].kyc_status || 'unverified';
+      }
+    } catch (statusError) {
+      // Columns don't exist, use defaults
+      console.log('Status/kyc_status columns not found, using defaults');
+    }
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    // Get wallet balance
+    const walletResult = await pool.query(
+      'SELECT balance, currency FROM wallets WHERE user_id = $1 LIMIT 1',
+      [userId]
+    );
+    const wallet = walletResult.rows[0] || null;
+
+    // Get KYC verification details
+    const kycResult = await pool.query(
+      `SELECT status, submitted_at, reviewed_at, rejection_reason 
+       FROM kyc_verifications 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 1`,
+      [userId]
+    );
+    const kyc = kycResult.rows[0] || null;
+
+    // Get trading accounts count
+    const accountsResult = await pool.query(
+      'SELECT COUNT(*) as count FROM trading_accounts WHERE user_id = $1',
+      [userId]
+    );
+    const accountsCount = parseInt(accountsResult.rows[0]?.count || 0);
+
+    res.json({
+      success: true,
+      data: {
+        profile: {
+          id: user.id,
+          email: user.email,
+          firstName: user.first_name,
+          lastName: user.last_name,
+          phoneCode: user.phone_code,
+          phoneNumber: user.phone_number,
+          country: user.country,
+          countryCode: null, // Not stored in users table - would need to join with countries table
+          status: userStatus,
+          kycStatus: userKycStatus,
+          isEmailVerified: user.is_email_verified,
+          referralCode: user.referral_code,
+          referredBy: user.referred_by,
+          createdAt: user.created_at,
+          updatedAt: user.updated_at,
+          lastLogin: user.last_login
+        },
+        wallet: wallet ? {
+          balance: parseFloat(wallet.balance || 0),
+          currency: wallet.currency || 'USD'
+        } : null,
+        kyc: kyc ? {
+          status: kyc.status,
+          submittedAt: kyc.submitted_at,
+          reviewedAt: kyc.reviewed_at,
+          rejectionReason: kyc.rejection_reason
+        } : null,
+        accountsCount
+      }
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch profile',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+/**
+ * GET /api/auth/logs
+ * Get authenticated user's activity logs
+ */
+router.get('/logs', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { limit = 50, offset = 0 } = req.query;
+
+    // Get total count
+    const countResult = await pool.query(
+      'SELECT COUNT(*) as total FROM logs_of_users WHERE user_id = $1',
+      [userId]
+    );
+    const total = parseInt(countResult.rows[0]?.total || 0);
+
+    // Get logs
+    const logsResult = await pool.query(
+      `SELECT 
+        id, action_type, action_category, description, 
+        ip_address, user_agent, created_at
+      FROM logs_of_users
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3`,
+      [userId, parseInt(limit), parseInt(offset)]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        logs: logsResult.rows,
+        total,
+        limit: parseInt(limit),
+        offset: parseInt(offset)
+      }
+    });
+  } catch (error) {
+    console.error('Get logs error:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch logs',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+/**
+ * OPTIONS /api/auth/change-password
+ * Handle CORS preflight for change-password
+ */
+router.options('/change-password', (req, res) => {
+  console.log('🔐 OPTIONS preflight for change-password');
+  res.header('Access-Control-Allow-Methods', 'PUT, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.sendStatus(200);
+});
+
+/**
+ * PUT /api/auth/change-password
+ * Change user password (requires current password)
+ */
+router.put('/change-password', (req, res, next) => {
+  console.log('🔐 PUT /change-password hit - method:', req.method, 'originalMethod:', req.headers['x-original-method'] || 'N/A');
+  next();
+}, authenticate, async (req, res) => {
+  try {
+    console.log('🔐 Change password request received:', {
+      method: req.method,
+      path: req.path,
+      hasBody: !!req.body,
+      bodyKeys: req.body ? Object.keys(req.body) : []
+    });
+    
+    const userId = req.user.id;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password and new password are required'
+      });
+    }
+
+    // Validate new password
+    const passwordValidation = validatePassword(newPassword);
+    if (!passwordValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        message: passwordValidation.message
+      });
+    }
+
+    // Get user's current password hash
+    const userResult = await pool.query(
+      'SELECT password_hash FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Verify current password
+    const isCurrentPasswordValid = await comparePassword(
+      currentPassword,
+      userResult.rows[0].password_hash
+    );
+
+    if (!isCurrentPasswordValid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    // Hash new password
+    const newPasswordHash = await hashPassword(newPassword);
+
+    // Update password
+    await pool.query(
+      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+      [newPasswordHash, userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Password changed successfully'
+    });
+  } catch (error) {
+    console.error('Change password error:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to change password',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
