@@ -32,3 +32,4 @@ CREATE TRIGGER update_unified_actions_updated_at BEFORE UPDATE ON unified_action
 -- Comment on table
 COMMENT ON TABLE unified_actions IS 'List of all email-triggering actions in the system. Each action can be assigned to an email template.';
 
+
