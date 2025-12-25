@@ -2888,8 +2888,8 @@ router.post('/users/:id/accounts/create', authenticateAdmin, async (req, res, ne
           user.email,
           userName,
           accountType,
-          accountNumber,
-          'Please check your account dashboard for password details'
+          accountNumber, // This is the login (MT5 account number)
+          masterPassword // Master password for MT5 login
         );
         console.log(`MT5 account created email sent to ${user.email} (admin created)`);
       } catch (emailError) {

@@ -5,6 +5,7 @@ import { comparePassword, encryptPassword, generateRandomPassword } from '../uti
 import * as mt5Service from '../services/mt5.service.js';
 import dotenv from 'dotenv';
 import { logUserAction } from '../services/logging.service.js';
+import { sendMT5AccountCreatedEmail } from '../services/templateEmail.service.js';
 
 dotenv.config();
 
@@ -661,8 +662,8 @@ router.post('/create', authenticate, async (req, res, next) => {
           user.email,
           userName,
           accountType,
-          accountNumber,
-          'Please check your account dashboard for password details'
+          accountNumber, // This is the login (MT5 account number)
+          masterPasswordValue // Master password for MT5 login
         );
         console.log(`MT5 account created email sent to ${user.email}`);
       } catch (emailError) {
