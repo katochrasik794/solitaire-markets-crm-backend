@@ -868,12 +868,41 @@ router.get('/roles', authenticateAdmin, async (req, res) => {
 // Create a new role
 router.post('/roles', authenticateAdmin, async (req, res) => {
   try {
-    const { name, description, permissions } = req.body;
+    const { name, description, permissions, featurePermissions } = req.body;
     if (!name) return res.status(400).json({ ok: false, error: 'Role name is required' });
 
-    const permsJson = permissions && typeof permissions === 'object'
-      ? permissions
-      : { features: Array.isArray(permissions) ? permissions : [] };
+    // Build permissions object with features and feature_permissions
+    let permsJson = { features: [] };
+    
+    // Handle features (can be array or part of permissions object)
+    if (permissions && typeof permissions === 'object' && !Array.isArray(permissions)) {
+      permsJson = { ...permissions };
+    } else if (Array.isArray(permissions)) {
+      permsJson.features = permissions;
+    } else if (permissions && typeof permissions === 'object' && permissions.features) {
+      permsJson.features = permissions.features;
+    }
+
+    // Validate and add feature_permissions if provided
+    if (featurePermissions !== undefined) {
+      if (typeof featurePermissions !== 'object' || Array.isArray(featurePermissions)) {
+        return res.status(400).json({ ok: false, error: 'featurePermissions must be an object' });
+      }
+      
+      // Validate structure: each feature should have view, add, edit, delete booleans
+      for (const [featurePath, perms] of Object.entries(featurePermissions)) {
+        if (typeof perms !== 'object' || Array.isArray(perms)) {
+          return res.status(400).json({ ok: false, error: `Invalid permissions structure for feature: ${featurePath}` });
+        }
+        const validActions = ['view', 'add', 'edit', 'delete'];
+        for (const action of validActions) {
+          if (perms[action] !== undefined && typeof perms[action] !== 'boolean') {
+            return res.status(400).json({ ok: false, error: `Permission ${action} for feature ${featurePath} must be a boolean` });
+          }
+        }
+      }
+      permsJson.feature_permissions = featurePermissions;
+    }
 
     const result = await pool.query(
       `INSERT INTO admin_roles (name, description, permissions, is_system)
@@ -893,11 +922,54 @@ router.post('/roles', authenticateAdmin, async (req, res) => {
 router.patch('/roles/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, permissions } = req.body;
+    const { name, description, permissions, featurePermissions } = req.body;
 
-    const permsJson = permissions && typeof permissions === 'object'
-      ? permissions
-      : (Array.isArray(permissions) ? { features: permissions } : null);
+    // Get existing role to merge with
+    const existingRole = await pool.query(
+      'SELECT permissions FROM admin_roles WHERE id = $1',
+      [id]
+    );
+
+    if (existingRole.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Role not found' });
+    }
+
+    let permsJson = existingRole.rows[0].permissions || { features: [] };
+
+    // Update features if provided
+    if (permissions !== undefined) {
+      if (Array.isArray(permissions)) {
+        permsJson = { ...permsJson, features: permissions };
+      } else if (typeof permissions === 'object' && permissions !== null) {
+        if (permissions.features) {
+          permsJson.features = permissions.features;
+        }
+        if (permissions.feature_permissions) {
+          permsJson.feature_permissions = permissions.feature_permissions;
+        }
+      }
+    }
+
+    // Update feature_permissions if provided separately
+    if (featurePermissions !== undefined) {
+      if (typeof featurePermissions !== 'object' || Array.isArray(featurePermissions)) {
+        return res.status(400).json({ ok: false, error: 'featurePermissions must be an object' });
+      }
+      
+      // Validate structure: each feature should have view, add, edit, delete booleans
+      for (const [featurePath, perms] of Object.entries(featurePermissions)) {
+        if (typeof perms !== 'object' || Array.isArray(perms)) {
+          return res.status(400).json({ ok: false, error: `Invalid permissions structure for feature: ${featurePath}` });
+        }
+        const validActions = ['view', 'add', 'edit', 'delete'];
+        for (const action of validActions) {
+          if (perms[action] !== undefined && typeof perms[action] !== 'boolean') {
+            return res.status(400).json({ ok: false, error: `Permission ${action} for feature ${featurePath} must be a boolean` });
+          }
+        }
+      }
+      permsJson.feature_permissions = featurePermissions;
+    }
 
     const result = await pool.query(
       `UPDATE admin_roles
