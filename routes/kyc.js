@@ -18,7 +18,7 @@ router.get('/status', authenticate, async (req, res) => {
 
     // Get latest KYC status from kyc_verifications table
     const kycResult = await pool.query(
-      `SELECT status 
+      `SELECT status, sumsub_applicant_id 
        FROM kyc_verifications 
        WHERE user_id = $1 
        ORDER BY created_at DESC 
@@ -32,11 +32,14 @@ router.get('/status', authenticate, async (req, res) => {
       ? String(kycResult.rows[0].status).toLowerCase() 
       : 'unverified';
 
+    // Use sumsub_applicant_id from kyc_verifications if available, otherwise from users table
+    const kycSumsubApplicantId = kycResult.rows[0]?.sumsub_applicant_id || sumsubApplicantId;
+
     res.json({
       success: true,
       data: {
         status,
-        sumsub_applicant_id: sumsubApplicantId
+        sumsub_applicant_id: kycSumsubApplicantId
       }
     });
   } catch (error) {
@@ -49,17 +52,83 @@ router.get('/status', authenticate, async (req, res) => {
 // Save profile data (step 1)
 router.post('/profile', authenticate, async (req, res) => {
   try {
-    const profileData = req.body;
-    // Upsert profile data
-    await pool.query(
-      'UPDATE users SET kyc_profile = $1 WHERE id = $2',
-      [profileData, req.user.id]
+    const { hasTradingExperience, employmentStatus, annualIncome, totalNetWorth, sourceOfWealth } = req.body;
+
+    // Validate required fields
+    if (!hasTradingExperience || !employmentStatus || !annualIncome || !totalNetWorth || !sourceOfWealth) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'All fields are required' 
+      });
+    }
+
+    // Convert hasTradingExperience from "yes"/"no" to boolean
+    const hasTradingExperienceBool = hasTradingExperience === 'yes' || hasTradingExperience === true;
+
+    // Check if KYC record exists
+    const existingKyc = await pool.query(
+      'SELECT id FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [req.user.id]
     );
 
-    res.json({ success: true });
+    if (existingKyc.rows.length > 0) {
+      // Update existing record with profile data, set status to 'pending' for step 1 submission
+      await pool.query(
+        `UPDATE kyc_verifications 
+         SET has_trading_experience = $1,
+             employment_status = $2,
+             annual_income = $3,
+             total_net_worth = $4,
+             source_of_wealth = $5,
+             status = 'pending',
+             submitted_at = COALESCE(submitted_at, NOW()),
+             updated_at = NOW()
+         WHERE user_id = $6`,
+        [
+          hasTradingExperienceBool,
+          employmentStatus,
+          annualIncome,
+          totalNetWorth,
+          sourceOfWealth,
+          req.user.id
+        ]
+      );
+    } else {
+      // Insert new KYC record with status 'pending' for step 1
+      await pool.query(
+        `INSERT INTO kyc_verifications (
+          user_id, 
+          has_trading_experience, 
+          employment_status, 
+          annual_income, 
+          total_net_worth, 
+          source_of_wealth, 
+          status,
+          submitted_at,
+          created_at,
+          updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW(), NOW(), NOW())`,
+        [
+          req.user.id,
+          hasTradingExperienceBool,
+          employmentStatus,
+          annualIncome,
+          totalNetWorth,
+          sourceOfWealth
+        ]
+      );
+    }
+
+    // Also save to users.kyc_profile as JSON for backward compatibility
+    await pool.query(
+      'UPDATE users SET kyc_profile = $1 WHERE id = $2',
+      [req.body, req.user.id]
+    );
+
+    res.json({ success: true, message: 'Profile submitted successfully' });
   } catch (error) {
     console.error('Save profile error:', error);
-    res.status(500).json({ success: false, error: 'Failed to save profile' });
+    res.status(500).json({ success: false, error: 'Failed to save profile: ' + error.message });
   }
 });
 
@@ -213,27 +282,45 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
           [status, req.user.id]
         );
 
-        // Update kyc_verifications table
-        await pool.query(
-          `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-           ON CONFLICT (user_id) DO UPDATE 
-           SET status = $2,
-               sumsub_review_result = COALESCE($4, kyc_verifications.sumsub_review_result),
-               sumsub_review_comment = COALESCE($5, kyc_verifications.sumsub_review_comment),
-               sumsub_verification_status = COALESCE($6, kyc_verifications.sumsub_verification_status),
-               sumsub_verification_result = COALESCE($7, kyc_verifications.sumsub_verification_result),
-               updated_at = NOW()`,
+        // Update kyc_verifications table - preserve existing profile data
+        const updateResult = await pool.query(
+          `UPDATE kyc_verifications 
+           SET status = $1,
+               sumsub_applicant_id = COALESCE($2, sumsub_applicant_id),
+               sumsub_review_result = COALESCE($3, sumsub_review_result),
+               sumsub_review_comment = COALESCE($4, sumsub_review_comment),
+               sumsub_verification_status = COALESCE($5, sumsub_verification_status),
+               sumsub_verification_result = COALESCE($6, sumsub_verification_result),
+               reviewed_at = CASE WHEN $1 = 'approved' OR $1 = 'rejected' THEN NOW() ELSE reviewed_at END,
+               updated_at = NOW()
+           WHERE user_id = $7`,
           [
-            req.user.id,
             status,
             sumsubApplicantId,
             reviewResult,
             reviewComment,
             sumsubStatus.reviewStatus || sumsubStatus.status,
-            JSON.stringify(sumsubStatus)
+            JSON.stringify(sumsubStatus),
+            req.user.id
           ]
         );
+
+        // If no record was updated, insert a new one (shouldn't happen if profile was submitted, but handle it)
+        if (updateResult.rowCount === 0) {
+          await pool.query(
+            `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, reviewed_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $2 = 'approved' OR $2 = 'rejected' THEN NOW() ELSE NULL END, NOW())`,
+            [
+              req.user.id,
+              status,
+              sumsubApplicantId,
+              reviewResult,
+              reviewComment,
+              sumsubStatus.reviewStatus || sumsubStatus.status,
+              JSON.stringify(sumsubStatus)
+            ]
+          );
+        }
 
         console.log(`✅ Updated KYC status for user ${req.user.id} from Sumsub: ${status}`);
       } catch (sumsubError) {
@@ -272,18 +359,29 @@ router.post('/update-status', authenticate, async (req, res) => {
       [status, req.user.id]
     );
 
-    // Sync to kyc_verifications
-    await pool.query(
-      `INSERT INTO kyc_verifications (user_id, status, reviewed_at, updated_at)
-              VALUES ($1, $2, NOW(), NOW())
-              ON CONFLICT (user_id) DO UPDATE 
-              SET status = $2, reviewed_at = NOW(), updated_at = NOW()`,
-      [req.user.id, status]
+    // Sync to kyc_verifications - preserve existing profile data
+    const updateResult = await pool.query(
+      `UPDATE kyc_verifications 
+       SET status = $1, 
+           reviewed_at = CASE WHEN $1 = 'approved' OR $1 = 'rejected' THEN NOW() ELSE reviewed_at END,
+           updated_at = NOW()
+       WHERE user_id = $2`,
+      [status, req.user.id]
     );
+
+    // If no record was updated, insert a new one
+    if (updateResult.rowCount === 0) {
+      await pool.query(
+        `INSERT INTO kyc_verifications (user_id, status, reviewed_at, updated_at)
+         VALUES ($1, $2, CASE WHEN $2 = 'approved' OR $2 = 'rejected' THEN NOW() ELSE NULL END, NOW())`,
+        [req.user.id, status]
+      );
+    }
 
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ success: false });
+    console.error('Update KYC status error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -339,29 +437,46 @@ router.post('/webhook', async (req, res) => {
       );
 
       // Update or insert into kyc_verifications table
-      await pool.query(
-        `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, sumsub_webhook_received_at, reviewed_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), NOW())
-         ON CONFLICT (user_id) DO UPDATE 
-         SET status = $2, 
-             sumsub_applicant_id = COALESCE($3, kyc_verifications.sumsub_applicant_id),
-             sumsub_review_result = COALESCE($4, kyc_verifications.sumsub_review_result),
-             sumsub_review_comment = COALESCE($5, kyc_verifications.sumsub_review_comment),
-             sumsub_verification_status = COALESCE($6, kyc_verifications.sumsub_verification_status),
-             sumsub_verification_result = COALESCE($7, kyc_verifications.sumsub_verification_result),
+      // First try to update existing record (preserves profile data)
+      const updateResult = await pool.query(
+        `UPDATE kyc_verifications 
+         SET status = $1, 
+             sumsub_applicant_id = COALESCE($2, sumsub_applicant_id),
+             sumsub_review_result = COALESCE($3, sumsub_review_result),
+             sumsub_review_comment = COALESCE($4, sumsub_review_comment),
+             sumsub_verification_status = COALESCE($5, sumsub_verification_status),
+             sumsub_verification_result = COALESCE($6, sumsub_verification_result),
              sumsub_webhook_received_at = NOW(),
              reviewed_at = NOW(),
-             updated_at = NOW()`,
+             updated_at = NOW()
+         WHERE user_id = $7`,
         [
-          userId, 
-          status, 
+          status,
           applicantId || externalUserId,
           reviewAnswer,
           reviewComment,
           type,
-          JSON.stringify(payload)
+          JSON.stringify(payload),
+          userId
         ]
       );
+
+      // If no record was updated, insert a new one
+      if (updateResult.rowCount === 0) {
+        await pool.query(
+          `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, sumsub_webhook_received_at, reviewed_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), NOW())`,
+          [
+            userId, 
+            status, 
+            applicantId || externalUserId,
+            reviewAnswer,
+            reviewComment,
+            type,
+            JSON.stringify(payload)
+          ]
+        );
+      }
 
       console.log(`✅ KYC status updated successfully for user ${userId}: ${status}`);
     } else if (type === 'applicantCreated' || type === 'applicantPending') {
