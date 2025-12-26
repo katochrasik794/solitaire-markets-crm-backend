@@ -18,8 +18,18 @@ const router = express.Router();
 router.get('/', authenticateAdmin, async (req, res) => {
   try {
     const {
-      system_type, // Filter by system: 'crm_admin', 'crm_user', 'ib_client', 'ib_admin', or 'all'
-      search // Search in action_name
+      system_type = 'all', // Filter by system: 'crm_admin', 'crm_user', 'ib_client', 'ib_admin', or 'all'
+      search, // Search in action_name
+      page = 1,
+      limit = 50,
+      sort_by = 'created_at',
+      sort_order = 'DESC',
+      action_type,
+      action_category,
+      actor_email,
+      target_type,
+      start_date,
+      end_date
     } = req.query;
 
     // Build WHERE conditions
@@ -45,7 +55,24 @@ router.get('/', authenticateAdmin, async (req, res) => {
       ? `WHERE ${whereConditions.join(' AND ')}`
       : '';
 
-    // Get actions with template info
+    // Validate and sanitize sort parameters
+    const validSortColumns = ['id', 'action_name', 'system_type', 'created_at', 'updated_at'];
+    const sortColumn = validSortColumns.includes(sort_by) ? sort_by : 'created_at';
+    const sortDirection = sort_order.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    // Get total count
+    const countQuery = `SELECT COUNT(*) as total FROM unified_actions ${whereClause}`;
+    const countResult = await pool.query(countQuery, queryParams);
+    const total = parseInt(countResult.rows[0].total);
+
+    // Calculate pagination
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 50;
+    const offset = (pageNum - 1) * limitNum;
+    const totalPages = Math.ceil(total / limitNum);
+
+    // Get actions with template info (using parameterized query for sort column to prevent SQL injection)
+    // Note: Column names cannot be parameterized, so we validate against whitelist above
     const dataQuery = `
       SELECT 
         ua.id,
@@ -58,21 +85,99 @@ router.get('/', authenticateAdmin, async (req, res) => {
       FROM unified_actions ua
       LEFT JOIN email_templates et ON ua.template_id = et.id
       ${whereClause}
-      ORDER BY system_type, action_name
+      ORDER BY ua.${sortColumn} ${sortDirection}
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
 
+    queryParams.push(limitNum, offset);
     const result = await pool.query(dataQuery, queryParams);
 
     res.json({
       ok: true,
       actions: result.rows,
-      total: result.rows.length
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: total,
+        total_pages: totalPages
+      }
     });
   } catch (error) {
     console.error('Get unified actions error:', error);
     res.status(500).json({
       ok: false,
       error: error.message || 'Failed to fetch actions'
+    });
+  }
+});
+
+/**
+ * GET /api/admin/unified-actions/action-types
+ * Get unique action types grouped by system type from action logs
+ */
+router.get('/action-types', authenticateAdmin, async (req, res) => {
+  try {
+    // Initialize action types object
+    const actionTypes = {
+      crm_admin: [],
+      crm_user: []
+    };
+
+    // Get unique action types from logs_of_admin (crm_admin system)
+    try {
+      const adminLogsQuery = `
+        SELECT DISTINCT 
+          action_type,
+          action_category
+        FROM logs_of_admin
+        WHERE action_type IS NOT NULL
+      `;
+      const adminResult = await pool.query(adminLogsQuery);
+      
+      // Process admin logs
+      adminResult.rows.forEach(row => {
+        actionTypes.crm_admin.push({
+          action_type: row.action_type,
+          action_category: row.action_category || ''
+        });
+      });
+    } catch (error) {
+      // Table might not exist, continue with empty array
+      console.warn('Error fetching admin logs for action types:', error.message);
+    }
+
+    // Get unique action types from logs_of_users (crm_user system)
+    try {
+      const userLogsQuery = `
+        SELECT DISTINCT 
+          action_type,
+          action_category
+        FROM logs_of_users
+        WHERE action_type IS NOT NULL
+      `;
+      const userResult = await pool.query(userLogsQuery);
+      
+      // Process user logs
+      userResult.rows.forEach(row => {
+        actionTypes.crm_user.push({
+          action_type: row.action_type,
+          action_category: row.action_category || ''
+        });
+      });
+    } catch (error) {
+      // Table might not exist, continue with empty array
+      console.warn('Error fetching user logs for action types:', error.message);
+    }
+
+    res.json({
+      ok: true,
+      action_types: actionTypes
+    });
+  } catch (error) {
+    console.error('Get action types error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to fetch action types'
     });
   }
 });
