@@ -79,7 +79,7 @@ router.get('/gateways', authenticate, async (req, res) => {
         display_order,
         instructions
       FROM manual_payment_gateways
-      WHERE is_active = TRUE
+      WHERE is_active = TRUE AND COALESCE(is_deposit_enabled, TRUE) = TRUE
       ORDER BY is_recommended DESC, display_order ASC, name ASC`
     );
 
@@ -175,9 +175,9 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       });
     }
 
-    // Verify gateway exists and is active
+    // Verify gateway exists, is active, and enabled for deposits
     const gatewayCheck = await pool.query(
-      'SELECT id FROM manual_payment_gateways WHERE id = $1 AND is_active = TRUE',
+      'SELECT id FROM manual_payment_gateways WHERE id = $1 AND is_active = TRUE AND COALESCE(is_deposit_enabled, TRUE) = TRUE',
       [gateway_id]
     );
 

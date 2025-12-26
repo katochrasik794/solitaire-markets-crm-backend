@@ -314,4 +314,88 @@ router.get('/my', authenticate, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/withdrawals/gateways
+ * Get all active payment gateways for user withdrawals
+ */
+router.get('/gateways', authenticate, async (req, res) => {
+  try {
+    const getBaseUrl = () => {
+      if (process.env.FRONTEND_URL) {
+        return process.env.FRONTEND_URL.replace(/\/$/, '');
+      }
+      return 'http://localhost:5000';
+    };
+
+    const result = await pool.query(
+      `SELECT 
+        id,
+        type,
+        name,
+        type_data,
+        icon_path,
+        qr_code_path,
+        is_active,
+        COALESCE(is_recommended, false) as is_recommended,
+        display_order,
+        instructions
+      FROM manual_payment_gateways
+      WHERE is_active = TRUE AND COALESCE(is_withdrawal_enabled, FALSE) = TRUE
+      ORDER BY is_recommended DESC, display_order ASC, name ASC`
+    );
+
+    // Map backend types to frontend types and format response
+    const typeMapping = {
+      'UPI': 'upi',
+      'Bank_Transfer': 'wire',
+      'USDT_TRC20': 'crypto',
+      'USDT_ERC20': 'crypto',
+      'USDT_BEP20': 'crypto',
+      'Bitcoin': 'crypto',
+      'Ethereum': 'crypto',
+      'Other_Crypto': 'crypto',
+      'Debit_Card': 'card',
+      'Other': 'local'
+    };
+
+    const gateways = result.rows.map(row => {
+      const parsedTypeData = typeof row.type_data === 'string'
+        ? JSON.parse(row.type_data) 
+        : row.type_data;
+
+      const baseUrl = getBaseUrl();
+      return {
+        id: row.id,
+        type: typeMapping[row.type] || row.type.toLowerCase(),
+        name: row.name,
+        icon_url: row.icon_path ? `${baseUrl}${row.icon_path}` : null,
+        qr_code_url: row.qr_code_path ? `${baseUrl}${row.qr_code_path}` : null,
+        is_recommended: row.is_recommended,
+        instructions: row.instructions,
+        // Type-specific data
+        vpa_address: parsedTypeData.vpa || null,
+        crypto_address: parsedTypeData.address || null,
+        bank_name: parsedTypeData.bank_name || null,
+        account_name: parsedTypeData.account_name || null,
+        account_number: parsedTypeData.account_number || null,
+        ifsc_code: parsedTypeData.ifsc || null,
+        swift_code: parsedTypeData.swift || null,
+        account_type: parsedTypeData.account_type || null,
+        country_code: parsedTypeData.country_code || null
+      };
+    });
+
+    res.json({
+      success: true,
+      gateways
+    });
+  } catch (error) {
+    console.error('Get withdrawal gateways error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to fetch withdrawal gateways'
+    });
+  }
+});
+
 export default router;

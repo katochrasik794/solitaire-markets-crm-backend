@@ -5360,6 +5360,8 @@ router.get('/manual-gateways', authenticateAdmin, async (req, res, next) => {
         COALESCE(is_recommended, false) as is_recommended,
         display_order,
         instructions,
+        COALESCE(is_deposit_enabled, TRUE) as is_deposit_enabled,
+        COALESCE(is_withdrawal_enabled, FALSE) as is_withdrawal_enabled,
         created_at,
         updated_at,
         -- Extract type-specific fields from type_data JSONB
@@ -5471,6 +5473,8 @@ router.post('/manual-gateways', authenticateAdmin, gatewayUpload.fields([
     const is_recommended = req.body.is_recommended === 'true' || req.body.is_recommended === true;
     const display_order = parseInt(req.body.display_order) || 0;
     const instructions = req.body.instructions || null;
+    const is_deposit_enabled = req.body.is_deposit_enabled === 'true' || req.body.is_deposit_enabled === true || req.body.is_deposit_enabled === undefined;
+    const is_withdrawal_enabled = req.body.is_withdrawal_enabled === 'true' || req.body.is_withdrawal_enabled === true;
 
     if (!type || !name) {
       return res.status(400).json({
@@ -5525,8 +5529,8 @@ router.post('/manual-gateways', authenticateAdmin, gatewayUpload.fields([
 
     const result = await pool.query(
       `INSERT INTO manual_payment_gateways 
-        (type, name, type_data, icon_path, qr_code_path, is_active, is_recommended, display_order, instructions)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        (type, name, type_data, icon_path, qr_code_path, is_active, is_recommended, display_order, instructions, is_deposit_enabled, is_withdrawal_enabled)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *`,
       [
         normalizedType,
@@ -5537,7 +5541,9 @@ router.post('/manual-gateways', authenticateAdmin, gatewayUpload.fields([
         is_active,
         is_recommended,
         display_order,
-        instructions
+        instructions,
+        is_deposit_enabled,
+        is_withdrawal_enabled
       ]
     );
 
@@ -5579,7 +5585,9 @@ router.post('/manual-gateways', authenticateAdmin, gatewayUpload.fields([
       swift_code: parsedTypeData.swift || null,
       account_type: parsedTypeData.account_type || null,
       country_code: parsedTypeData.country_code || null,
-      details: parsedTypeData.details || null
+      details: parsedTypeData.details || null,
+      is_deposit_enabled: gateway.is_deposit_enabled !== undefined ? gateway.is_deposit_enabled : true,
+      is_withdrawal_enabled: gateway.is_withdrawal_enabled !== undefined ? gateway.is_withdrawal_enabled : false
     };
 
     res.json({
@@ -5689,7 +5697,9 @@ router.patch('/manual-gateways/:id/toggle-status', authenticateAdmin, async (req
       swift_code: parsedTypeData.swift || null,
       account_type: parsedTypeData.account_type || null,
       country_code: parsedTypeData.country_code || null,
-      details: parsedTypeData.details || null
+      details: parsedTypeData.details || null,
+      is_deposit_enabled: gateway.is_deposit_enabled !== undefined ? gateway.is_deposit_enabled : true,
+      is_withdrawal_enabled: gateway.is_withdrawal_enabled !== undefined ? gateway.is_withdrawal_enabled : false
     };
 
     res.json({
@@ -5721,6 +5731,12 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
     const is_active = req.body.is_active === 'true' || req.body.is_active === true;
     const display_order = parseInt(req.body.display_order) || 0;
     const instructions = req.body.instructions || null;
+    const is_deposit_enabled = req.body.is_deposit_enabled !== undefined 
+      ? (req.body.is_deposit_enabled === 'true' || req.body.is_deposit_enabled === true)
+      : null;
+    const is_withdrawal_enabled = req.body.is_withdrawal_enabled !== undefined
+      ? (req.body.is_withdrawal_enabled === 'true' || req.body.is_withdrawal_enabled === true)
+      : null;
 
     if (!type || !name) {
       return res.status(400).json({
@@ -5785,33 +5801,53 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
       qrCodePath = `/uploads/gateways/${req.files.qr_code[0].filename}`;
     }
 
+    // Build update query with optional deposit/withdrawal fields
+    const updateFields = [
+      'type = $1',
+      'name = $2',
+      'type_data = $3',
+      'icon_path = $4',
+      'qr_code_path = $5',
+      'is_active = $6',
+      'is_recommended = $7',
+      'display_order = $8',
+      'instructions = $9'
+    ];
+    const updateValues = [
+      normalizedType,
+      name,
+      JSON.stringify(typeData),
+      iconPath,
+      qrCodePath,
+      is_active,
+      is_recommended,
+      display_order,
+      instructions
+    ];
+    
+    let paramIndex = updateValues.length + 1;
+    
+    if (is_deposit_enabled !== null) {
+      updateFields.push(`is_deposit_enabled = $${paramIndex}`);
+      updateValues.push(is_deposit_enabled);
+      paramIndex++;
+    }
+    
+    if (is_withdrawal_enabled !== null) {
+      updateFields.push(`is_withdrawal_enabled = $${paramIndex}`);
+      updateValues.push(is_withdrawal_enabled);
+      paramIndex++;
+    }
+    
+    updateFields.push('updated_at = NOW()');
+    updateValues.push(id);
+    
     const result = await pool.query(
       `UPDATE manual_payment_gateways 
-      SET 
-        type = $1,
-        name = $2,
-        type_data = $3,
-        icon_path = $4,
-        qr_code_path = $5,
-        is_active = $6,
-        is_recommended = $7,
-        display_order = $8,
-        instructions = $9,
-        updated_at = NOW()
-      WHERE id = $10
+      SET ${updateFields.join(', ')}
+      WHERE id = $${paramIndex}
       RETURNING *`,
-      [
-        normalizedType,
-        name,
-        JSON.stringify(typeData),
-        iconPath,
-        qrCodePath,
-        is_active,
-        is_recommended,
-        display_order,
-        instructions,
-        id
-      ]
+      updateValues
     );
 
     const gateway = result.rows[0];
@@ -5849,7 +5885,9 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
       swift_code: parsedTypeData.swift || null,
       account_type: parsedTypeData.account_type || null,
       country_code: parsedTypeData.country_code || null,
-      details: parsedTypeData.details || null
+      details: parsedTypeData.details || null,
+      is_deposit_enabled: gateway.is_deposit_enabled !== undefined ? gateway.is_deposit_enabled : true,
+      is_withdrawal_enabled: gateway.is_withdrawal_enabled !== undefined ? gateway.is_withdrawal_enabled : false
     };
 
     res.json({
