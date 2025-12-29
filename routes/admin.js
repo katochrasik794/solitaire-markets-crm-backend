@@ -13,8 +13,8 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import crypto from 'crypto';
 import { sendOperationEmail, sendEmail, getLogoUrl } from '../services/email.js';
-import { 
-  sendTransactionCompletedEmail, 
+import {
+  sendTransactionCompletedEmail,
   sendInternalTransferEmail,
   sendKYCCompletionEmail,
   sendTicketCreatedEmail,
@@ -347,7 +347,7 @@ router.post('/login', validateLogin, async (req, res, next) => {
       code: error.code,
       detail: error.detail
     });
-    
+
     // Return a proper error response instead of passing to error handler
     res.status(500).json({
       success: false,
@@ -873,7 +873,7 @@ router.post('/roles', authenticateAdmin, async (req, res) => {
 
     // Build permissions object with features and feature_permissions
     let permsJson = { features: [] };
-    
+
     // Handle features (can be array or part of permissions object)
     if (permissions && typeof permissions === 'object' && !Array.isArray(permissions)) {
       permsJson = { ...permissions };
@@ -888,7 +888,7 @@ router.post('/roles', authenticateAdmin, async (req, res) => {
       if (typeof featurePermissions !== 'object' || Array.isArray(featurePermissions)) {
         return res.status(400).json({ ok: false, error: 'featurePermissions must be an object' });
       }
-      
+
       // Validate structure: each feature should have view, add, edit, delete booleans
       for (const [featurePath, perms] of Object.entries(featurePermissions)) {
         if (typeof perms !== 'object' || Array.isArray(perms)) {
@@ -955,7 +955,7 @@ router.patch('/roles/:id', authenticateAdmin, async (req, res) => {
       if (typeof featurePermissions !== 'object' || Array.isArray(featurePermissions)) {
         return res.status(400).json({ ok: false, error: 'featurePermissions must be an object' });
       }
-      
+
       // Validate structure: each feature should have view, add, edit, delete booleans
       for (const [featurePath, perms] of Object.entries(featurePermissions)) {
         if (typeof perms !== 'object' || Array.isArray(perms)) {
@@ -1062,7 +1062,7 @@ router.post('/admins', authenticateAdmin, async (req, res) => {
 
     // Determine role - use provided role or default to 'admin'
     const role = admin_role || 'admin';
-    
+
     // Get features from request body (optional, defaults to empty array)
     const features = req.body.features || [];
     const featuresJson = Array.isArray(features) ? JSON.stringify(features) : '[]';
@@ -1076,7 +1076,7 @@ router.post('/admins', authenticateAdmin, async (req, res) => {
     );
 
     const newAdmin = result.rows[0];
-    
+
     // Ensure features is always an array in response
     const adminResponse = {
       ...newAdmin,
@@ -1142,7 +1142,7 @@ router.put('/admins/:id/role', authenticateAdmin, async (req, res) => {
     );
 
     const updatedAdmin = result.rows[0];
-    
+
     // Ensure features is always an array in response
     const adminResponse = {
       ...updatedAdmin,
@@ -1253,7 +1253,7 @@ router.put('/admins/:id/features', authenticateAdmin, async (req, res) => {
       if (typeof featurePermissions !== 'object' || Array.isArray(featurePermissions)) {
         return res.status(400).json({ ok: false, error: 'featurePermissions must be an object' });
       }
-      
+
       // Validate structure: each feature should have view, add, edit, delete booleans
       for (const [featurePath, perms] of Object.entries(featurePermissions)) {
         if (typeof perms !== 'object' || Array.isArray(perms)) {
@@ -1327,24 +1327,24 @@ router.put('/admins/:id/features', authenticateAdmin, async (req, res) => {
         description: `Updated features and permissions for admin: ${updatedAdmin.username} (${updatedAdmin.email})`,
         req,
         res,
-        beforeData: { 
+        beforeData: {
           features: beforeData.features || [],
           feature_permissions: beforeData.feature_permissions || {}
         },
-        afterData: { 
+        afterData: {
           features: updatedAdmin.features || [],
           feature_permissions: updatedAdmin.feature_permissions || {}
         }
       });
     });
 
-    res.json({ 
-      ok: true, 
-      admin: { 
-        ...updatedAdmin, 
+    res.json({
+      ok: true,
+      admin: {
+        ...updatedAdmin,
         features: updatedAdmin.features || [],
         feature_permissions: updatedAdmin.feature_permissions || {}
-      } 
+      }
     });
   } catch (error) {
     console.error('Update admin features error:', error);
@@ -1580,9 +1580,9 @@ router.post('/users', authenticateAdmin, async (req, res, next) => {
         createdAt: user.created_at
       }
     };
-    
+
     res.status(201).json(responseData);
-    
+
     // Log admin action
     setImmediate(async () => {
       await logAdminAction({
@@ -1989,7 +1989,7 @@ router.patch('/users/:id', authenticateAdmin, async (req, res, next) => {
       [userId]
     );
     const beforeData = beforeResult.rows[0] || null;
-    
+
     const responseData = {
       ok: true,
       user: {
@@ -2004,9 +2004,9 @@ router.patch('/users/:id', authenticateAdmin, async (req, res, next) => {
         updatedAt: row.updated_at
       }
     };
-    
+
     res.json(responseData);
-    
+
     // Log admin action
     setImmediate(async () => {
       await logAdminAction({
@@ -2074,7 +2074,7 @@ router.patch('/users/:id/email-verify', authenticateAdmin, async (req, res, next
       ok: true,
       message: `Email ${verified ? 'verified' : 'unverified'} successfully`
     });
-    
+
     // Log admin action
     setImmediate(async () => {
       await logAdminAction({
@@ -2131,7 +2131,7 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
         'SELECT id FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
         [userId]
       );
-      
+
       if (existingCheck.rows.length > 0) {
         // Update existing record
         await pool.query(
@@ -2142,11 +2142,11 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
         );
       } else {
         // Insert new record
-      await pool.query(
-        `INSERT INTO kyc_verifications (user_id, status, reviewed_at)
+        await pool.query(
+          `INSERT INTO kyc_verifications (user_id, status, reviewed_at)
            VALUES ($1, 'approved', NOW())`,
-        [userId]
-      );
+          [userId]
+        );
       }
     } else {
       // Set KYC as pending or remove approval
@@ -2155,15 +2155,15 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
         'SELECT id FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
         [userId]
       );
-      
+
       if (existingCheck.rows.length > 0) {
         // Update existing record to pending
-      await pool.query(
-        `UPDATE kyc_verifications 
+        await pool.query(
+          `UPDATE kyc_verifications 
          SET status = 'pending', reviewed_at = NULL
          WHERE user_id = $1`,
-        [userId]
-      );
+          [userId]
+        );
       } else {
         // Insert new pending record
         await pool.query(
@@ -2177,17 +2177,17 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
     // Get user email and name for logging and email
     const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [userId]);
     const userEmail = userResult.rows[0]?.email || null;
-    const userName = userResult.rows.length > 0 
+    const userName = userResult.rows.length > 0
       ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
       : 'Valued Customer';
-    
+
     // Get before/after KYC data
     const kycBefore = await pool.query(
       'SELECT status FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
       [userId]
     );
     const beforeData = kycBefore.rows[0] || { status: null };
-    
+
     const kycAfter = await pool.query(
       'SELECT status FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
       [userId]
@@ -2210,7 +2210,7 @@ router.patch('/users/:id/kyc-verify', authenticateAdmin, async (req, res, next) 
         }
       });
     }
-    
+
     // Log admin action
     setImmediate(async () => {
       await logAdminAction({
@@ -2308,35 +2308,35 @@ router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
   try {
     let kycId = null;
     let userId = null;
-    
+
     // Handle synthetic IDs like "no-kyc-19" where 19 is the user_id
     if (req.params.id.startsWith('no-kyc-')) {
       userId = parseInt(req.params.id.replace('no-kyc-', ''));
       if (Number.isNaN(userId)) {
         return res.status(400).json({ ok: false, error: 'Invalid user id in synthetic KYC id' });
       }
-      
+
       // Check if user exists
       const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
       if (userCheck.rows.length === 0) {
         return res.status(404).json({ ok: false, error: 'User not found' });
       }
-      
+
       // Check if KYC record already exists for this user
       const existingKyc = await pool.query(
         'SELECT id FROM kyc_verifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
         [userId]
       );
-      
+
       if (existingKyc.rows.length > 0) {
         kycId = existingKyc.rows[0].id;
       } else {
         // Create a new KYC record for this user
         // Use the status from the request if provided, otherwise default to 'pending'
-        const initialStatus = req.body.verificationStatus 
-          ? String(req.body.verificationStatus).toLowerCase() 
+        const initialStatus = req.body.verificationStatus
+          ? String(req.body.verificationStatus).toLowerCase()
           : 'pending';
-        
+
         // Validate status
         if (!['pending', 'approved', 'rejected'].includes(initialStatus)) {
           return res.status(400).json({
@@ -2344,10 +2344,10 @@ router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
             error: 'verificationStatus must be one of: pending, approved, rejected'
           });
         }
-        
+
         // Set reviewed_at if status is approved or rejected
         const shouldSetReviewedAt = (initialStatus === 'approved' || initialStatus === 'rejected');
-        
+
         const createResult = await pool.query(
           shouldSetReviewedAt
             ? `INSERT INTO kyc_verifications (user_id, status, submitted_at, reviewed_at, created_at, updated_at)
@@ -2362,15 +2362,15 @@ router.patch('/kyc/:id', authenticateAdmin, async (req, res, next) => {
       }
     } else {
       kycId = parseInt(req.params.id);
-    if (Number.isNaN(kycId)) {
-      return res.status(400).json({ ok: false, error: 'Invalid KYC id' });
-    }
+      if (Number.isNaN(kycId)) {
+        return res.status(400).json({ ok: false, error: 'Invalid KYC id' });
+      }
 
-    // Check if KYC record exists
-    const kycCheck = await pool.query('SELECT id FROM kyc_verifications WHERE id = $1', [kycId]);
-    if (kycCheck.rows.length === 0) {
-      return res.status(404).json({ ok: false, error: 'KYC record not found' });
-    }
+      // Check if KYC record exists
+      const kycCheck = await pool.query('SELECT id FROM kyc_verifications WHERE id = $1', [kycId]);
+      if (kycCheck.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: 'KYC record not found' });
+      }
     }
 
     const {
@@ -2513,7 +2513,7 @@ router.delete('/users/:id', authenticateAdmin, async (req, res, next) => {
       'SELECT balance FROM wallets WHERE user_id = $1',
       [userId]
     );
-    
+
     let walletBalance = 0;
     if (walletCheck.rows.length > 0) {
       walletBalance = parseFloat(walletCheck.rows[0].balance || 0);
@@ -4084,7 +4084,7 @@ router.post(
       let usersWithoutBalance = 0;
       let usersInProfit = 0;
       let usersInLoss = 0;
-      
+
       // Try different column combinations until one works
       const queryAttempts = [
         {
@@ -4109,7 +4109,7 @@ router.post(
           params: [group.group_name]
         }
       ];
-      
+
       let successfulQuery = null;
       for (const attempt of queryAttempts) {
         try {
@@ -4121,7 +4121,7 @@ router.post(
           continue;
         }
       }
-      
+
       if (!successfulQuery) {
         // No working query found - return empty report
         return res.json({
@@ -4143,16 +4143,16 @@ router.post(
           }
         });
       }
-      
+
       userIds = accountsResult.rows.map(r => r.user_id);
       totalUsers = userIds.length;
-      
+
       // Use the same WHERE pattern for subsequent queries
-      const baseWhere = successfulQuery.query.includes('mt5_group_id') 
+      const baseWhere = successfulQuery.query.includes('mt5_group_id')
         ? 'ta.mt5_group_id = $1'
         : successfulQuery.query.includes('mt5_group_name')
-        ? 'ta.mt5_group_name = $1'
-        : 'ta."group" = $1';
+          ? 'ta.mt5_group_name = $1'
+          : 'ta."group" = $1';
       const baseParams = successfulQuery.params;
 
 
@@ -4547,14 +4547,14 @@ router.put('/mt5/account/:accountId/password', authenticateAdmin, async (req, re
     try {
       console.log(`[MT5 Password Change] Attempting to change password for account ${login}`);
       mt5Result = await mt5Service.changePassword(login, newPassword, 'master');
-      
+
       // Check if the API call was successful
       if (!mt5Result || !mt5Result.success) {
         const errorMsg = mt5Result?.error || mt5Result?.message || 'Failed to update password in MT5 API';
         console.error(`[MT5 Password Change] API call failed:`, errorMsg);
         throw new Error(errorMsg);
       }
-      
+
       console.log(`[MT5 Password Change] Successfully changed password in MT5 for account ${login}`);
     } catch (mt5Error) {
       console.error('[MT5 Password Change] MT5 API error:', {
@@ -5117,7 +5117,7 @@ router.post('/mt5/assign', authenticateAdmin, async (req, res, next) => {
     };
 
     res.json(responseData);
-    
+
     // Log admin action
     setImmediate(async () => {
       await logAdminAction({
@@ -5731,7 +5731,8 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
     const is_active = req.body.is_active === 'true' || req.body.is_active === true;
     const display_order = parseInt(req.body.display_order) || 0;
     const instructions = req.body.instructions || null;
-    const is_deposit_enabled = req.body.is_deposit_enabled !== undefined 
+    const is_recommended = req.body.is_recommended === 'true' || req.body.is_recommended === true;
+    const is_deposit_enabled = req.body.is_deposit_enabled !== undefined
       ? (req.body.is_deposit_enabled === 'true' || req.body.is_deposit_enabled === true)
       : null;
     const is_withdrawal_enabled = req.body.is_withdrawal_enabled !== undefined
@@ -5824,24 +5825,24 @@ router.put('/manual-gateways/:id', authenticateAdmin, gatewayUpload.fields([
       display_order,
       instructions
     ];
-    
+
     let paramIndex = updateValues.length + 1;
-    
+
     if (is_deposit_enabled !== null) {
       updateFields.push(`is_deposit_enabled = $${paramIndex}`);
       updateValues.push(is_deposit_enabled);
       paramIndex++;
     }
-    
+
     if (is_withdrawal_enabled !== null) {
       updateFields.push(`is_withdrawal_enabled = $${paramIndex}`);
       updateValues.push(is_withdrawal_enabled);
       paramIndex++;
     }
-    
+
     updateFields.push('updated_at = NOW()');
     updateValues.push(id);
-    
+
     const result = await pool.query(
       `UPDATE manual_payment_gateways 
       SET ${updateFields.join(', ')}
@@ -6221,11 +6222,11 @@ router.post('/deposits/:id/approve', authenticateAdmin, requireAdminFeaturePermi
             'SELECT id FROM wallets WHERE user_id = $1 LIMIT 1',
             [deposit.user_id]
           );
-          
+
           if (walletResult.rows.length === 0) {
             throw new Error(`No wallet found for user ${deposit.user_id}`);
           }
-          
+
           deposit.wallet_id = walletResult.rows[0].id;
         }
 
@@ -6248,25 +6249,25 @@ router.post('/deposits/:id/approve', authenticateAdmin, requireAdminFeaturePermi
     } catch (balanceError) {
       console.error('Error adding balance:', balanceError);
       // Rollback the approval if balance update fails
-        await pool.query(
-          `UPDATE deposit_requests 
+      await pool.query(
+        `UPDATE deposit_requests 
            SET status = 'pending', updated_at = NOW()
            WHERE id = $1`,
-          [id]
-        );
-        return res.status(500).json({
-          ok: false,
+        [id]
+      );
+      return res.status(500).json({
+        ok: false,
         error: `Failed to add balance: ${balanceError.message}`
-        });
+      });
     }
 
     // Get user email and name for logging and email
     const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [deposit.user_id]);
     const userEmail = userResult.rows[0]?.email || null;
-    const userName = userResult.rows.length > 0 
+    const userName = userResult.rows.length > 0
       ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
       : 'Valued Customer';
-    
+
     // Get before data
     const beforeData = {
       id: deposit.id,
@@ -6274,7 +6275,7 @@ router.post('/deposits/:id/approve', authenticateAdmin, requireAdminFeaturePermi
       amount: deposit.amount,
       currency: deposit.currency
     };
-    
+
     // Get after data
     const afterResult = await pool.query(
       'SELECT id, status, amount, currency FROM deposit_requests WHERE id = $1',
@@ -6306,7 +6307,7 @@ router.post('/deposits/:id/approve', authenticateAdmin, requireAdminFeaturePermi
         console.error('Failed to send deposit approved email:', emailError);
       }
     });
-    
+
     // Log admin action
     setImmediate(async () => {
       await logAdminAction({
@@ -6354,7 +6355,7 @@ router.post('/deposits/:id/reject', authenticateAdmin, requireAdminFeaturePermis
       });
     }
     const beforeData = beforeResult.rows[0];
-    
+
     // Get user email
     const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [beforeData.user_id]);
     const userEmail = userResult.rows[0]?.email || null;
@@ -6380,7 +6381,7 @@ router.post('/deposits/:id/reject', authenticateAdmin, requireAdminFeaturePermis
       ok: true,
       message: 'Deposit rejected successfully'
     });
-    
+
     // Log admin action
     setImmediate(async () => {
       await logAdminAction({
@@ -6958,7 +6959,7 @@ router.post('/withdrawals/:id/approve', authenticateAdmin, requireAdminFeaturePe
     // Get user email for logging
     const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [withdrawal.user_id]);
     const userEmail = userResult.rows[0]?.email || null;
-    
+
     // Get after data
     const afterResult = await pool.query(
       'SELECT * FROM withdrawals WHERE id = $1',
@@ -6989,7 +6990,7 @@ router.post('/withdrawals/:id/approve', authenticateAdmin, requireAdminFeaturePe
         console.error('Failed to send withdrawal approved email:', emailError);
       }
     });
-    
+
     // Log admin action
     setImmediate(async () => {
       await logAdminAction({
@@ -7080,7 +7081,7 @@ router.post('/withdrawals/:id/reject', authenticateAdmin, requireAdminFeaturePer
     // Get user email for logging
     const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [withdrawal.user_id]);
     const userEmail = userResult.rows[0]?.email || null;
-    
+
     // Get after data
     const afterResult = await pool.query(
       'SELECT * FROM withdrawals WHERE id = $1',
@@ -7092,7 +7093,7 @@ router.post('/withdrawals/:id/reject', authenticateAdmin, requireAdminFeaturePer
       ok: true,
       message: 'Withdrawal rejected successfully'
     });
-    
+
     // Log admin action
     setImmediate(async () => {
       await logAdminAction({
@@ -7543,12 +7544,12 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
           // Replace standard variables
           // Get logo URL - use actual URL for email templates
           const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
-          
+
           // Get frontend URL - use live URL as default
           const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
           const dashboardUrl = `${frontendUrl}/user/dashboard`;
           const supportUrl = `${frontendUrl}/user/support`; // Correct support URL
-          
+
           const vars = {
             ...templateVariables,
             recipientName,
@@ -7570,64 +7571,64 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
             const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'gi');
             htmlContent = htmlContent.replace(regex, String(vars[key] || ''));
           });
-          
+
           // Force replace any remaining logoUrl variables (case-insensitive, handle all variations)
           // Use actual URL
           htmlContent = htmlContent.replace(/\{\{\s*logoUrl\s*\}\}/gi, logoUrl);
           htmlContent = htmlContent.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
           htmlContent = htmlContent.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
-          
+
           // Replace any CID references with actual URL
           htmlContent = htmlContent.replace(/cid:solitaire-logo/gi, logoUrl);
-          
+
           // Replace any base64 logo URLs with actual URL
           const base64Pattern = /data:image\/svg\+xml;base64,[^"'\s>]+/gi;
           htmlContent = htmlContent.replace(base64Pattern, logoUrl);
-          
+
           // Fix common issue: replace companyEmail in href attributes with dashboardUrl
           htmlContent = htmlContent.replace(/href=["']\{\{\s*companyEmail\s*\}\}["']/gi, `href="${dashboardUrl}"`);
           htmlContent = htmlContent.replace(/href=["']\{\{companyEmail\}\}["']/gi, `href="${dashboardUrl}"`);
-          
+
           // Also replace dashboardUrl variations
           htmlContent = htmlContent.replace(/\{\{\s*dashboardUrl\s*\}\}/gi, dashboardUrl);
           htmlContent = htmlContent.replace(/\{\{\s*dashboard_url\s*\}\}/gi, dashboardUrl);
           htmlContent = htmlContent.replace(/\{\{\s*DASHBOARD_URL\s*\}\}/gi, dashboardUrl);
-          
+
           // CRITICAL: Replace all hardcoded wrong URLs with correct dashboard URL
           // Replace any solitairemarkets.me URLs (wrong domain) with correct dashboard URL
           htmlContent = htmlContent.replace(/https?:\/\/solitairemarkets\.me\/[^"'\s>]*/gi, dashboardUrl);
           htmlContent = htmlContent.replace(/https?:\/\/www\.solitairemarkets\.me\/[^"'\s>]*/gi, dashboardUrl);
-          
+
           // Replace any "View Dashboard" or similar links that might have wrong URLs
           htmlContent = htmlContent.replace(/href=["']https?:\/\/solitairemarkets\.me[^"']*["']/gi, `href="${dashboardUrl}"`);
           htmlContent = htmlContent.replace(/href=["']https?:\/\/www\.solitairemarkets\.me[^"']*["']/gi, `href="${dashboardUrl}"`);
-          
+
           // Also replace any localhost URLs that might be in templates
           htmlContent = htmlContent.replace(/href=["']https?:\/\/localhost[^"']*["']/gi, `href="${dashboardUrl}"`);
-          
+
           // Replace any href attributes that contain "dashboard" but have wrong domain
           htmlContent = htmlContent.replace(/href=["']([^"']*solitairemarkets\.me[^"']*dashboard[^"']*)["']/gi, `href="${dashboardUrl}"`);
-          
+
           // CRITICAL: Fix incorrect support URLs (should be /user/support, not /user/dashboard/support)
           htmlContent = htmlContent.replace(/\/user\/dashboard\/support/gi, supportUrl);
           htmlContent = htmlContent.replace(/\/user\/dashboar\/support/gi, supportUrl); // Fix typo "dashboar"
           htmlContent = htmlContent.replace(/\{\{dashboardUrl\}\}\/support/gi, supportUrl);
           htmlContent = htmlContent.replace(/\{\{dashboard_url\}\}\/support/gi, supportUrl);
           htmlContent = htmlContent.replace(/\{\{DASHBOARD_URL\}\}\/support/gi, supportUrl);
-          
+
           // Replace supportUrl variable
           htmlContent = htmlContent.replace(/\{\{\s*supportUrl\s*\}\}/gi, supportUrl);
           htmlContent = htmlContent.replace(/\{\{\s*support_url\s*\}\}/gi, supportUrl);
           htmlContent = htmlContent.replace(/\{\{\s*SUPPORT_URL\s*\}\}/gi, supportUrl);
-          
+
           // Replace "View Ticket" links to use correct support URL
           htmlContent = htmlContent.replace(/<a[^>]*>[\s]*View[\s]+Ticket[\s]*<\/a>/gi, `<a href="${supportUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; font-weight: 700; font-size: 16px; padding: 16px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">View Ticket</a>`);
           htmlContent = htmlContent.replace(/<a[^>]*>[\s]*View[\s]*&[\s]*Reply[\s]+to[\s]+Ticket[\s]*<\/a>/gi, `<a href="${supportUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; font-weight: 700; font-size: 16px; padding: 16px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">View & Reply to Ticket</a>`);
-          
+
           // Ensure logo is always present - check if logo image exists in HTML
-          const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) && 
-                            (htmlContent.toLowerCase().includes('logo') || htmlContent.toLowerCase().includes('solitaire') || htmlContent.includes(logoUrl));
-          
+          const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) &&
+            (htmlContent.toLowerCase().includes('logo') || htmlContent.toLowerCase().includes('solitaire') || htmlContent.includes(logoUrl));
+
           if (!hasLogoImg) {
             console.log('📧 Adding logo to template that doesn\'t have one:', selectedTemplate.name);
             // Try to inject logo after <body> tag or at the beginning
@@ -7730,11 +7731,11 @@ router.get('/email-templates', authenticateAdmin, async (req, res) => {
         AND table_name = 'email_templates'
       );
     `);
-    
+
     if (!tableCheck.rows[0].exists) {
       // Table doesn't exist, create it
       console.log('email_templates table not found, creating...');
-      
+
       // Create the update function first (if it doesn't exist)
       await pool.query(`
         CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -7745,7 +7746,7 @@ router.get('/email-templates', authenticateAdmin, async (req, res) => {
         END;
         $$ language 'plpgsql';
       `);
-      
+
       // Create the table
       await pool.query(`
         CREATE TABLE email_templates (
@@ -7761,12 +7762,12 @@ router.get('/email-templates', authenticateAdmin, async (req, res) => {
           created_by INTEGER REFERENCES users(id) ON DELETE SET NULL
         );
       `);
-      
+
       // Create index
       await pool.query(`
         CREATE INDEX idx_email_templates_name ON email_templates(name);
       `);
-      
+
       // Create trigger
       await pool.query(`
         CREATE TRIGGER update_email_templates_updated_at 
@@ -7774,18 +7775,18 @@ router.get('/email-templates', authenticateAdmin, async (req, res) => {
           FOR EACH ROW 
           EXECUTE FUNCTION update_updated_at_column();
       `);
-      
+
       console.log('email_templates table created successfully');
     }
-    
+
     const result = await pool.query(
       'SELECT * FROM email_templates ORDER BY created_at DESC'
     );
     res.json({ ok: true, templates: result.rows });
   } catch (error) {
     console.error('Get email templates error:', error);
-    res.status(500).json({ 
-      ok: false, 
+    res.status(500).json({
+      ok: false,
       error: error.message || 'Failed to load templates',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
@@ -7832,8 +7833,8 @@ router.get('/email-templates/actions', authenticateAdmin, async (req, res) => {
  */
 router.put('/email-templates/assign-action', authenticateAdmin, async (req, res) => {
   try {
-    console.log('📧 Assign-action route hit!', { 
-      body: req.body, 
+    console.log('📧 Assign-action route hit!', {
+      body: req.body,
       hasAuth: !!req.headers.authorization,
       action_id: req.body?.action_id,
       template_id: req.body?.template_id
@@ -7872,9 +7873,9 @@ router.put('/email-templates/assign-action', authenticateAdmin, async (req, res)
     }
 
     if (!finalActionId) {
-      return res.status(400).json({ 
-        ok: false, 
-        error: 'action_id or action_type is required' 
+      return res.status(400).json({
+        ok: false,
+        error: 'action_id or action_type is required'
       });
     }
 
@@ -7915,8 +7916,8 @@ router.put('/email-templates/assign-action', authenticateAdmin, async (req, res)
   } catch (error) {
     console.error('Assign template to action error:', error);
     console.error('Error stack:', error.stack);
-    res.status(500).json({ 
-      ok: false, 
+    res.status(500).json({
+      ok: false,
       error: error.message || 'Failed to assign template',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
@@ -7975,12 +7976,12 @@ router.put('/email-templates/:id', authenticateAdmin, async (req, res) => {
     // Check if this is actually the assign-action route being matched incorrectly
     if (req.params.id === 'assign-action') {
       console.error('⚠️ Route conflict detected: /email-templates/:id matched "assign-action"');
-      return res.status(500).json({ 
-        ok: false, 
-        error: 'Route conflict: assign-action route should be defined before :id route' 
+      return res.status(500).json({
+        ok: false,
+        error: 'Route conflict: assign-action route should be defined before :id route'
       });
     }
-    
+
     const { id } = req.params;
     const { name, description, html_code, variables, is_default, from_email, action_type } = req.body;
 
@@ -8059,7 +8060,7 @@ router.post('/email-templates/:id/send-test', authenticateAdmin, async (req, res
     const logoUrl = getLogoUrl(); // Returns: https://portal.solitairemarkets.com/logo.svg
     const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
     const dashboardUrl = `${frontendUrl}/user/dashboard`;
-    
+
     const standardVars = {
       logoUrl: logoUrl, // Use actual URL: https://portal.solitairemarkets.com/logo.svg
       companyEmail: 'support@solitairemarkets.me',
@@ -8076,29 +8077,29 @@ router.post('/email-templates/:id/send-test', authenticateAdmin, async (req, res
         htmlContent = htmlContent.replace(regex, String(standardVars[key] || ''));
       }
     });
-    
+
     // Force replace any remaining logoUrl variables (case-insensitive) - use actual URL
     htmlContent = htmlContent.replace(/\{\{\s*logoUrl\s*\}\}/gi, logoUrl);
     htmlContent = htmlContent.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
     htmlContent = htmlContent.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
-    
+
     // Replace any CID references with actual URL
     htmlContent = htmlContent.replace(/cid:solitaire-logo/gi, logoUrl);
-    
+
     // Replace any base64 logo URLs with actual URL
     const base64Pattern = /data:image\/svg\+xml;base64,[^"'\s>]+/gi;
     htmlContent = htmlContent.replace(base64Pattern, logoUrl);
     console.log('📧 Replaced base64/CID logos with actual URL in test email');
-    
+
     // Also replace dashboardUrl variations
     htmlContent = htmlContent.replace(/\{\{\s*dashboardUrl\s*\}\}/gi, dashboardUrl);
     htmlContent = htmlContent.replace(/\{\{\s*dashboard_url\s*\}\}/gi, dashboardUrl);
     htmlContent = htmlContent.replace(/\{\{\s*DASHBOARD_URL\s*\}\}/gi, dashboardUrl);
-    
+
     // Ensure logo is always present in test emails
-    const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) && 
-                      (htmlContent.toLowerCase().includes('logo') || htmlContent.toLowerCase().includes('solitaire') || htmlContent.includes(logoUrl));
-    
+    const hasLogoImg = /<img[^>]*src[^>]*>/i.test(htmlContent) &&
+      (htmlContent.toLowerCase().includes('logo') || htmlContent.toLowerCase().includes('solitaire') || htmlContent.includes(logoUrl));
+
     if (!hasLogoImg) {
       const bodyMatch = htmlContent.match(/<body[^>]*>/i);
       if (bodyMatch) {
@@ -8163,7 +8164,7 @@ router.post('/email-templates/preview', authenticateAdmin, async (req, res) => {
 
     // Default variables for preview
     const logoUrl = getLogoUrl();
-    
+
     const defaultVars = {
       recipientName: 'John Doe',
       recipientEmail: 'john@example.com',
@@ -8199,16 +8200,16 @@ router.post('/email-templates/preview', authenticateAdmin, async (req, res) => {
       const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'gi');
       previewHtml = previewHtml.replace(regex, String(defaultVars[key] || ''));
     });
-    
+
     // Force replace any remaining logoUrl variables (case-insensitive)
     previewHtml = previewHtml.replace(/\{\{\s*logoUrl\s*\}\}/gi, logoUrl);
     previewHtml = previewHtml.replace(/\{\{\s*logo_url\s*\}\}/gi, logoUrl);
     previewHtml = previewHtml.replace(/\{\{\s*LOGO_URL\s*\}\}/gi, logoUrl);
-    
+
     // Ensure logo is always present in preview
-    const hasLogoImg = /<img[^>]*src[^>]*>/i.test(previewHtml) && 
-                      (previewHtml.includes('logo') || previewHtml.includes('Logo') || previewHtml.includes(logoUrl));
-    
+    const hasLogoImg = /<img[^>]*src[^>]*>/i.test(previewHtml) &&
+      (previewHtml.includes('logo') || previewHtml.includes('Logo') || previewHtml.includes(logoUrl));
+
     if (!hasLogoImg) {
       // Try to inject logo after <body> tag
       const bodyMatch = previewHtml.match(/<body[^>]*>/i);
@@ -8311,7 +8312,7 @@ router.get('/logs/admin', authenticateAdmin, async (req, res, next) => {
       paramIndex++;
     }
 
-    const whereClause = whereConditions.length > 0 
+    const whereClause = whereConditions.length > 0
       ? `WHERE ${whereConditions.join(' AND ')}`
       : '';
 
@@ -8420,18 +8421,18 @@ router.get('/logs/admin/detail/:logId', authenticateAdmin, async (req, res, next
     }
 
     const log = result.rows[0];
-    
+
     // Parse JSONB fields
     if (log.request_body) {
       try {
-        log.request_body = typeof log.request_body === 'string' 
-          ? JSON.parse(log.request_body) 
+        log.request_body = typeof log.request_body === 'string'
+          ? JSON.parse(log.request_body)
           : log.request_body;
       } catch (e) {
         log.request_body = null;
       }
     }
-    
+
     if (log.response_body) {
       try {
         log.response_body = typeof log.response_body === 'string'
@@ -8441,7 +8442,7 @@ router.get('/logs/admin/detail/:logId', authenticateAdmin, async (req, res, next
         log.response_body = null;
       }
     }
-    
+
     if (log.before_data) {
       try {
         log.before_data = typeof log.before_data === 'string'
@@ -8451,7 +8452,7 @@ router.get('/logs/admin/detail/:logId', authenticateAdmin, async (req, res, next
         log.before_data = null;
       }
     }
-    
+
     if (log.after_data) {
       try {
         log.after_data = typeof log.after_data === 'string'
@@ -8662,7 +8663,7 @@ router.get('/logs/user/detail/:logId', authenticateAdmin, async (req, res, next)
     }
 
     const log = result.rows[0];
-    
+
     // Parse JSONB fields
     if (log.request_body) {
       try {
@@ -8673,7 +8674,7 @@ router.get('/logs/user/detail/:logId', authenticateAdmin, async (req, res, next)
         log.request_body = null;
       }
     }
-    
+
     if (log.response_body) {
       try {
         log.response_body = typeof log.response_body === 'string'
@@ -8683,7 +8684,7 @@ router.get('/logs/user/detail/:logId', authenticateAdmin, async (req, res, next)
         log.response_body = null;
       }
     }
-    
+
     if (log.before_data) {
       try {
         log.before_data = typeof log.before_data === 'string'
@@ -8693,7 +8694,7 @@ router.get('/logs/user/detail/:logId', authenticateAdmin, async (req, res, next)
         log.before_data = null;
       }
     }
-    
+
     if (log.after_data) {
       try {
         log.after_data = typeof log.after_data === 'string'
@@ -8731,7 +8732,7 @@ router.get('/ib-requests/pending', authenticateAdmin, async (req, res) => {
   try {
     // Try to connect to IB database using IB_DATABASE_URL or same database
     const ibDatabaseUrl = process.env.IB_DATABASE_URL || process.env.DATABASE_URL;
-    
+
     if (!ibDatabaseUrl) {
       return res.status(500).json({
         ok: false,
@@ -8743,8 +8744,8 @@ router.get('/ib-requests/pending', authenticateAdmin, async (req, res) => {
     const { Pool } = await import('pg');
     const ibPool = new Pool({
       connectionString: ibDatabaseUrl,
-      ssl: process.env.NODE_ENV === 'production' || ibDatabaseUrl.includes('render.com') 
-        ? { rejectUnauthorized: false } 
+      ssl: process.env.NODE_ENV === 'production' || ibDatabaseUrl.includes('render.com')
+        ? { rejectUnauthorized: false }
         : false
     });
 
@@ -8805,7 +8806,7 @@ router.post('/ib-requests/cross-login', authenticateAdmin, async (req, res) => {
 
     // Try to connect to IB database to find matching admin
     const ibDatabaseUrl = process.env.IB_DATABASE_URL || process.env.DATABASE_URL;
-    
+
     if (!ibDatabaseUrl) {
       return res.status(500).json({
         ok: false,
@@ -8816,8 +8817,8 @@ router.post('/ib-requests/cross-login', authenticateAdmin, async (req, res) => {
     const { Pool } = await import('pg');
     const ibPool = new Pool({
       connectionString: ibDatabaseUrl,
-      ssl: process.env.NODE_ENV === 'production' || ibDatabaseUrl.includes('render.com') 
-        ? { rejectUnauthorized: false } 
+      ssl: process.env.NODE_ENV === 'production' || ibDatabaseUrl.includes('render.com')
+        ? { rejectUnauthorized: false }
         : false
     });
 
@@ -8842,7 +8843,7 @@ router.post('/ib-requests/cross-login', authenticateAdmin, async (req, res) => {
       // Generate a JWT token for IB admin (using IB's JWT secret if available)
       const jwt = await import('jsonwebtoken');
       const ibJwtSecret = process.env.IB_JWT_SECRET || process.env.JWT_SECRET || 'dev-secret';
-      
+
       const ibAdmin = adminResult.rows[0];
       const ibToken = jwt.default.sign(
         {
