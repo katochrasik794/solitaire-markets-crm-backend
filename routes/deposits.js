@@ -38,7 +38,7 @@ const proofUpload = multer({
     const allowedTypes = /jpeg|jpg|png|pdf/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
-    
+
     if (mimetype && extname) {
       return cb(null, true);
     } else {
@@ -98,8 +98,8 @@ router.get('/gateways', authenticate, async (req, res) => {
     };
 
     const gateways = result.rows.map(row => {
-      const parsedTypeData = typeof row.type_data === 'string' 
-        ? JSON.parse(row.type_data) 
+      const parsedTypeData = typeof row.type_data === 'string'
+        ? JSON.parse(row.type_data)
         : row.type_data || {};
 
       const baseUrl = getBaseUrl();
@@ -107,8 +107,8 @@ router.get('/gateways', authenticate, async (req, res) => {
         id: row.id,
         type: typeMapping[row.type] || row.type.toLowerCase(),
         name: row.name,
-        icon_url: row.icon_path ? `${baseUrl}${row.icon_path}` : null,
-        qr_code_url: row.qr_code_path ? `${baseUrl}${row.qr_code_path}` : null,
+        icon_url: row.icon_path,
+        qr_code_url: row.qr_code_path,
         is_recommended: row.is_recommended,
         instructions: row.instructions,
         // Type-specific data
@@ -144,9 +144,9 @@ router.get('/gateways', authenticate, async (req, res) => {
 router.post('/request', authenticate, proofUpload.single('proof'), async (req, res) => {
   try {
     const userId = req.user.id;
-    const { 
-      gateway_id, 
-      amount, 
+    const {
+      gateway_id,
+      amount,
       currency = 'USD',
       converted_amount,
       converted_currency,
@@ -205,17 +205,17 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
        LIMIT 1`,
       [userId]
     );
-    
+
     const kycStatus = kycResult.rows[0]?.status?.toLowerCase() || 'unverified';
     const isKycVerified = kycStatus === 'approved';
-    
+
     // If KYC is not verified, limit deposit to $2000 USD
     if (!isKycVerified) {
       const MAX_UNVERIFIED_DEPOSIT = 2000;
-      
+
       // Check total deposits (wallet + MT5) for unverified users
       let totalDeposits = 0;
-      
+
       // Get wallet balance
       const walletResult = await pool.query(
         'SELECT balance FROM wallets WHERE user_id = $1 LIMIT 1',
@@ -224,7 +224,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       if (walletResult.rows.length > 0) {
         totalDeposits += parseFloat(walletResult.rows[0].balance || 0);
       }
-      
+
       // Get total MT5 account balances
       const mt5Result = await pool.query(
         'SELECT SUM(balance) as total_balance FROM trading_accounts WHERE user_id = $1 AND platform = \'MT5\' AND is_demo = FALSE',
@@ -233,7 +233,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       if (mt5Result.rows.length > 0 && mt5Result.rows[0].total_balance) {
         totalDeposits += parseFloat(mt5Result.rows[0].total_balance || 0);
       }
-      
+
       // Check if this deposit would exceed the limit
       const totalAfterDeposit = totalDeposits + depositAmount;
       if (totalAfterDeposit > MAX_UNVERIFIED_DEPOSIT) {
@@ -243,7 +243,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
           error: `KYC verification required. Maximum deposit limit for unverified accounts is ${currency} ${MAX_UNVERIFIED_DEPOSIT}. You can deposit up to ${currency} ${maxAllowedDeposit.toFixed(2)} more. Please complete KYC verification to remove this limit.`
         });
       }
-      
+
       // Also check single deposit amount
       if (depositAmount > MAX_UNVERIFIED_DEPOSIT) {
         return res.status(400).json({
@@ -256,17 +256,17 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
     // Validate deposit limits if depositing to MT5 account
     if (deposit_to === 'mt5' && mt5_account_id) {
       const mt5AccountId = String(mt5_account_id).trim();
-      
+
       // Check which columns exist for joining with mt5_groups
       const colsRes = await pool.query(
         `SELECT column_name FROM information_schema.columns WHERE table_name = 'trading_accounts'`
       );
       const existingCols = new Set(colsRes.rows.map((r) => r.column_name));
-      
+
       const hasMt5GroupName = existingCols.has('mt5_group_name');
       const hasMt5GroupId = existingCols.has('mt5_group_id');
       const hasGroup = existingCols.has('group');
-      
+
       // Build join condition based on available columns (try ALL possible joins with OR)
       const joinConditions = [];
       if (hasMt5GroupName) {
@@ -278,7 +278,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       if (hasGroup) {
         joinConditions.push('ta.group = mg.group_name');
       }
-      
+
       // Get account's group limits
       let query = `
         SELECT 
@@ -287,16 +287,16 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
           mg.maximum_deposit
         FROM trading_accounts ta
       `;
-      
+
       if (joinConditions.length > 0) {
         const joinCondition = joinConditions.join(' OR ');
         query += `LEFT JOIN mt5_groups mg ON (${joinCondition}) AND mg.is_active = TRUE`;
       } else {
         query += `CROSS JOIN (SELECT NULL::DECIMAL(15,2) as minimum_deposit, NULL::DECIMAL(15,2) as maximum_deposit) mg`;
       }
-      
+
       query += ` WHERE ta.account_number = $1 AND ta.user_id = $2 AND ta.platform = 'MT5'`;
-      
+
       const accountGroupResult = await pool.query(query, [mt5AccountId, userId]);
 
       if (accountGroupResult.rows.length === 0) {
@@ -309,14 +309,14 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       const groupLimits = accountGroupResult.rows[0];
       const minDeposit = parseFloat(groupLimits.minimum_deposit || 0);
       const maxDeposit = groupLimits.maximum_deposit ? parseFloat(groupLimits.maximum_deposit) : null;
-      
+
       // Get current account balance
       const accountBalanceResult = await pool.query(
         'SELECT balance FROM trading_accounts WHERE account_number = $1 AND user_id = $2',
         [mt5AccountId, userId]
       );
-      const currentBalance = accountBalanceResult.rows.length > 0 
-        ? parseFloat(accountBalanceResult.rows[0].balance || 0) 
+      const currentBalance = accountBalanceResult.rows.length > 0
+        ? parseFloat(accountBalanceResult.rows[0].balance || 0)
         : 0;
 
       // Validate against limits
@@ -346,19 +346,19 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
     let mt5AccountId = null;
     let walletId = null;
     let walletNumber = null;
-    
+
     // Handle MT5 account ID
     if (deposit_to === 'mt5' && mt5_account_id) {
       mt5AccountId = String(mt5_account_id).trim();
       console.log('Setting MT5 account ID:', mt5AccountId);
     }
-    
+
     // Handle wallet - prioritize wallet_number
     if (deposit_to === 'wallet') {
       if (wallet_number) {
         walletNumber = String(wallet_number).trim();
         console.log('Using provided wallet_number:', walletNumber);
-        
+
         // Also fetch wallet_id from wallet_number for reference
         const walletResult = await pool.query(
           'SELECT id FROM wallets WHERE wallet_number = $1 LIMIT 1',
@@ -373,7 +373,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       } else if (wallet_id) {
         walletId = parseInt(wallet_id);
         console.log('Using provided wallet_id:', walletId);
-        
+
         // ALWAYS fetch wallet_number from wallet_id - this is critical!
         const walletResult = await pool.query(
           'SELECT wallet_number FROM wallets WHERE id = $1 LIMIT 1',
@@ -399,7 +399,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
           console.error('No wallet found for user:', userId);
         }
       }
-      
+
       // Final validation - ensure wallet_number is set
       if (!walletNumber && walletId) {
         console.error('CRITICAL: wallet_number is missing but wallet_id exists:', walletId);
@@ -466,7 +466,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
     };
 
     res.json(responseData);
-    
+
     // Log user action and send email
     setImmediate(async () => {
       await logUserAction({
@@ -487,7 +487,7 @@ router.post('/request', authenticate, proofUpload.single('proof'), async (req, r
       // Send deposit request email
       try {
         const userResult = await pool.query('SELECT first_name, last_name FROM users WHERE id = $1', [req.user.id]);
-        const userName = userResult.rows.length > 0 
+        const userName = userResult.rows.length > 0
           ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
           : 'Valued Customer';
         const accountLogin = deposit.mt5_account_id || deposit.wallet_number || 'N/A';
@@ -546,17 +546,17 @@ router.post('/cregis/create', authenticate, async (req, res) => {
        LIMIT 1`,
       [userId]
     );
-    
+
     const kycStatus = kycResult.rows[0]?.status?.toLowerCase() || 'unverified';
     const isKycVerified = kycStatus === 'approved';
-    
+
     // If KYC is not verified, limit deposit to $2000 USD
     if (!isKycVerified) {
       const MAX_UNVERIFIED_DEPOSIT = 2000;
-      
+
       // Check total deposits (wallet + MT5) for unverified users
       let totalDeposits = 0;
-      
+
       // Get wallet balance
       const walletResult = await pool.query(
         'SELECT balance FROM wallets WHERE user_id = $1 LIMIT 1',
@@ -565,7 +565,7 @@ router.post('/cregis/create', authenticate, async (req, res) => {
       if (walletResult.rows.length > 0) {
         totalDeposits += parseFloat(walletResult.rows[0].balance || 0);
       }
-      
+
       // Get total MT5 account balances
       const mt5Result = await pool.query(
         'SELECT SUM(balance) as total_balance FROM trading_accounts WHERE user_id = $1 AND platform = \'MT5\' AND is_demo = FALSE',
@@ -574,7 +574,7 @@ router.post('/cregis/create', authenticate, async (req, res) => {
       if (mt5Result.rows.length > 0 && mt5Result.rows[0].total_balance) {
         totalDeposits += parseFloat(mt5Result.rows[0].total_balance || 0);
       }
-      
+
       // Check if this deposit would exceed the limit
       const totalAfterDeposit = totalDeposits + depositAmount;
       if (totalAfterDeposit > MAX_UNVERIFIED_DEPOSIT) {
@@ -584,7 +584,7 @@ router.post('/cregis/create', authenticate, async (req, res) => {
           error: `KYC verification required. Maximum deposit limit for unverified accounts is USD ${MAX_UNVERIFIED_DEPOSIT}. You can deposit up to USD ${maxAllowedDeposit.toFixed(2)} more. Please complete KYC verification to remove this limit.`
         });
       }
-      
+
       // Also check single deposit amount
       if (depositAmount > MAX_UNVERIFIED_DEPOSIT) {
         return res.status(400).json({
@@ -609,7 +609,7 @@ router.post('/cregis/create', authenticate, async (req, res) => {
 
     if (deposit_to === 'mt5' && mt5_account_id) {
       mt5AccountId = String(mt5_account_id).trim();
-      
+
       // Verify MT5 account belongs to user
       const accountCheck = await pool.query(
         'SELECT id, account_number FROM trading_accounts WHERE account_number = $1 AND user_id = $2 AND platform = \'MT5\'',
@@ -676,7 +676,7 @@ router.post('/cregis/create', authenticate, async (req, res) => {
 
     // Generate order ID and create Cregis payment
     const orderId = cregisService.generateOrderId(depositRequest.id);
-    
+
     console.log('Creating Cregis payment for deposit:', {
       depositId: depositRequest.id,
       orderId,
@@ -935,10 +935,10 @@ router.get('/cregis/status/:depositId', authenticate, async (req, res) => {
       );
 
       // If payment is paid/paid_over and deposit is for MT5, add balance
-      if ((cregisStatus === 'paid' || cregisStatus === 'paid_over') 
-          && deposit.deposit_to_type === 'mt5' 
-          && deposit.mt5_account_id 
-          && deposit.status !== 'approved') {
+      if ((cregisStatus === 'paid' || cregisStatus === 'paid_over')
+        && deposit.deposit_to_type === 'mt5'
+        && deposit.mt5_account_id
+        && deposit.status !== 'approved') {
         try {
           const login = parseInt(deposit.mt5_account_id, 10);
           if (!Number.isNaN(login)) {
@@ -1036,10 +1036,10 @@ router.post('/cregis/webhook', express.json(), async (req, res) => {
     );
 
     // If payment is paid/paid_over and deposit is for MT5, add balance
-    if ((status === 'paid' || status === 'paid_over') 
-        && deposit.deposit_to_type === 'mt5' 
-        && deposit.mt5_account_id 
-        && deposit.status !== 'approved') {
+    if ((status === 'paid' || status === 'paid_over')
+      && deposit.deposit_to_type === 'mt5'
+      && deposit.mt5_account_id
+      && deposit.status !== 'approved') {
       try {
         const login = parseInt(deposit.mt5_account_id, 10);
         if (!Number.isNaN(login)) {
