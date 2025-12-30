@@ -18,6 +18,7 @@ import promotionRoutes from './routes/promotions.js';
 import paymentDetailsRoutes from './routes/paymentDetails.js';
 import unifiedActionsRoutes from './routes/unifiedActions.js';
 import menusRoutes from './routes/menus.js';
+import sessionRoutes from './routes/session.js';
 import pool from './config/database.js';
 
 dotenv.config();
@@ -131,7 +132,7 @@ const cancelExpiredDeposits = async () => {
   try {
     // Test connection first - if it fails, skip this run
     await pool.query('SELECT 1');
-    
+
     // Find pending deposits with cregis_order_id that are older than 60 minutes
     const result = await pool.query(
       `UPDATE deposit_requests 
@@ -222,15 +223,15 @@ app.get('/api/health', async (req, res) => {
   try {
     // Try to ping database
     await pool.query('SELECT 1');
-    res.json({ 
-      status: 'ok', 
+    res.json({
+      status: 'ok',
       message: 'Server is running',
       database: 'connected'
     });
   } catch (error) {
     // Still return 200 but indicate DB is not connected
-    res.status(200).json({ 
-      status: 'ok', 
+    res.status(200).json({
+      status: 'ok',
       message: 'Server is running',
       database: 'disconnected',
       warning: 'Database connection pending'
@@ -244,8 +245,8 @@ app.head('/', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     message: 'Solitaire CRM API Server',
     version: '1.0.0'
   });
@@ -267,6 +268,7 @@ app.use('/api/tickers', tickerRoutes);
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/payment-details', paymentDetailsRoutes);
 app.use('/api/menus', menusRoutes);
+app.use('/api/session', sessionRoutes);
 
 // Debug: Log registered routes
 console.log('✅ Routes registered:');
@@ -283,6 +285,7 @@ console.log('  - /api/support');
 console.log('  - /api/tickers');
 console.log('  - /api/promotions');
 console.log('  - /api/payment-details');
+console.log('  - /api/session');
 
 // Inspect admin routes
 if (adminRoutes && adminRoutes.stack) {
