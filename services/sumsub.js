@@ -79,13 +79,22 @@ async function sumsubRequest(method, endpoint, body = null) {
         url: url
       });
       
-      // Provide more specific error messages for common errors
-      if (response.status === 403) {
-        const errorMsg = data.description || data.message || 'Forbidden';
-        throw new Error(`Sumsub API 403 Forbidden: ${errorMsg}. This usually means: 1) The verification level doesn't exist, 2) Your token doesn't have permission for this level, or 3) The level requires different configuration. Please check your Sumsub dashboard.`);
-      }
+      // Store error response data for database storage
+      const errorResponse = {
+        error: true,
+        status: response.status,
+        statusText: response.statusText,
+        code: data.code || response.status,
+        description: data.description || data.message || response.statusText,
+        correlationId: data.correlationId || null,
+        data: data
+      };
       
-      throw new Error(`Sumsub API error (${response.status}): ${data.description || data.message || response.statusText}`);
+      // Attach error response to error object so it can be stored in database
+      const error = new Error(`Sumsub API error (${response.status}): ${errorResponse.description}`);
+      error.errorResponse = errorResponse;
+      
+      throw error;
     }
 
     return data;
@@ -217,6 +226,10 @@ export async function getApplicantStatus(applicantId) {
     return result;
   } catch (error) {
     console.error('Get applicant status error:', error);
+    // Preserve error response data if available
+    if (error.errorResponse) {
+      throw error;
+    }
     throw error;
   }
 }
@@ -232,6 +245,10 @@ export async function getApplicantData(applicantId) {
     return result;
   } catch (error) {
     console.error('Get applicant data error:', error);
+    // Preserve error response data if available
+    if (error.errorResponse) {
+      throw error;
+    }
     throw error;
   }
 }

@@ -23,3 +23,5 @@ WHERE is_deposit_enabled IS NULL OR is_withdrawal_enabled IS NULL;
 COMMENT ON COLUMN manual_payment_gateways.is_deposit_enabled IS 'Indicates if this gateway is available for deposit transactions';
 COMMENT ON COLUMN manual_payment_gateways.is_withdrawal_enabled IS 'Indicates if this gateway is available for withdrawal transactions';
 
+
+
