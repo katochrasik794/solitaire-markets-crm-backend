@@ -2,6 +2,7 @@ import express from 'express';
 import pool from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
 import { createAccessToken } from '../services/sumsub.service.js';
+import { getApplicantData, getApplicantStatus } from '../services/sumsub.js';
 
 const router = express.Router();
 
@@ -9,10 +10,18 @@ const router = express.Router();
 // Get KYC status and data from kyc_verifications table
 router.get('/status', authenticate, async (req, res) => {
   try {
+    if (!req.user || !req.user.id) {
+      console.error('Authentication error: req.user is missing');
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const userId = req.user.id;
+    console.log(`[KYC Status] Fetching status for user ${userId}`);
+
     // First, get user's sumsub_applicant_id
     const userResult = await pool.query(
       'SELECT sumsub_applicant_id FROM users WHERE id = $1',
-      [req.user.id]
+      [userId]
     );
     const sumsubApplicantId = userResult.rows[0]?.sumsub_applicant_id || null;
 
@@ -23,7 +32,7 @@ router.get('/status', authenticate, async (req, res) => {
        WHERE user_id = $1 
        ORDER BY created_at DESC 
        LIMIT 1`,
-      [req.user.id]
+      [userId]
     );
 
     // If no KYC record exists, default to unverified
@@ -35,6 +44,8 @@ router.get('/status', authenticate, async (req, res) => {
     // Use sumsub_applicant_id from kyc_verifications if available, otherwise from users table
     const kycSumsubApplicantId = kycResult.rows[0]?.sumsub_applicant_id || sumsubApplicantId;
 
+    console.log(`[KYC Status] User ${userId} status: ${status}, applicantId: ${kycSumsubApplicantId}`);
+
     res.json({
       success: true,
       data: {
@@ -43,8 +54,14 @@ router.get('/status', authenticate, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Get KYC info error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch KYC info' });
+    console.error('❌ Get KYC info error:', error);
+    console.error('Error stack:', error.stack);
+    console.error('Request user:', req.user);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Failed to fetch KYC info',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
@@ -253,27 +270,70 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
     // If refresh is requested and we have an applicant ID, fetch from Sumsub API
     if (refresh && sumsubApplicantId) {
       try {
-        const { getApplicantStatus } = await import('../services/sumsub.js');
-        const sumsubStatus = await getApplicantStatus(sumsubApplicantId);
+        // Fetch both status and full applicant data to get idDocs
+        const [sumsubStatus, fullApplicantData] = await Promise.allSettled([
+          getApplicantStatus(sumsubApplicantId),
+          getApplicantData(sumsubApplicantId)
+        ]);
         
-        console.log(`📊 Sumsub status for applicant ${sumsubApplicantId}:`, JSON.stringify(sumsubStatus, null, 2));
-        
-        // Extract review result from Sumsub response
-        if (sumsubStatus.reviewResult) {
-          reviewResult = sumsubStatus.reviewResult.reviewAnswer || sumsubStatus.reviewResult.reviewStatus;
-          reviewComment = sumsubStatus.reviewResult.reviewComment || sumsubStatus.reviewResult.comment;
-        } else if (sumsubStatus.review) {
-          reviewResult = sumsubStatus.review.reviewAnswer || sumsubStatus.review.reviewStatus;
-          reviewComment = sumsubStatus.review.reviewComment || sumsubStatus.review.comment;
+        let statusData = null;
+        let applicantData = null;
+        let sumsubResponseData = {};
+
+        // Process status response
+        if (sumsubStatus.status === 'fulfilled') {
+          statusData = sumsubStatus.value;
+          console.log(`📊 Sumsub status for applicant ${sumsubApplicantId}:`, JSON.stringify(statusData, null, 2));
+          
+          // Extract review result from Sumsub response
+          if (statusData.reviewResult) {
+            reviewResult = statusData.reviewResult.reviewAnswer || statusData.reviewResult.reviewStatus;
+            reviewComment = statusData.reviewResult.reviewComment || statusData.reviewResult.comment;
+          } else if (statusData.review) {
+            reviewResult = statusData.review.reviewAnswer || statusData.review.reviewStatus;
+            reviewComment = statusData.review.reviewComment || statusData.review.comment;
+          }
+
+          // Update local database with fresh data from Sumsub
+          if (reviewResult === 'GREEN' || reviewResult === 'approved') {
+            status = 'approved';
+          } else if (reviewResult === 'RED' || reviewResult === 'rejected') {
+            status = 'rejected';
+          } else if (statusData.reviewStatus === 'pending' || statusData.reviewStatus === 'init') {
+            status = 'pending';
+          }
+
+          sumsubResponseData.status = statusData;
+        } else {
+          // Handle status fetch error
+          console.error('⚠️ Error fetching status from Sumsub:', sumsubStatus.reason);
+          if (sumsubStatus.reason?.errorResponse) {
+            sumsubResponseData.statusError = sumsubStatus.reason.errorResponse;
+          } else {
+            sumsubResponseData.statusError = {
+              error: true,
+              message: sumsubStatus.reason?.message || 'Failed to fetch status'
+            };
+          }
         }
 
-        // Update local database with fresh data from Sumsub
-        if (reviewResult === 'GREEN' || reviewResult === 'approved') {
-          status = 'approved';
-        } else if (reviewResult === 'RED' || reviewResult === 'rejected') {
-          status = 'rejected';
-        } else if (sumsubStatus.reviewStatus === 'pending' || sumsubStatus.reviewStatus === 'init') {
-          status = 'pending';
+        // Process full applicant data response (includes idDocs)
+        if (fullApplicantData.status === 'fulfilled') {
+          applicantData = fullApplicantData.value;
+          console.log(`✅ Retrieved full applicant data with idDocs:`, JSON.stringify(applicantData, null, 2));
+          sumsubResponseData.fullApplicantData = applicantData;
+          sumsubResponseData.idDocs = applicantData.idDocs || null;
+        } else {
+          // Handle applicant data fetch error
+          console.error('⚠️ Error fetching applicant data from Sumsub:', fullApplicantData.reason);
+          if (fullApplicantData.reason?.errorResponse) {
+            sumsubResponseData.applicantDataError = fullApplicantData.reason.errorResponse;
+          } else {
+            sumsubResponseData.applicantDataError = {
+              error: true,
+              message: fullApplicantData.reason?.message || 'Failed to fetch applicant data'
+            };
+          }
         }
 
         // Update database with latest status
@@ -290,7 +350,7 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
                sumsub_review_result = COALESCE($3, sumsub_review_result),
                sumsub_review_comment = COALESCE($4, sumsub_review_comment),
                sumsub_verification_status = COALESCE($5, sumsub_verification_status),
-               sumsub_verification_result = COALESCE($6, sumsub_verification_result),
+               sumsub_verification_result = $6,
                reviewed_at = CASE WHEN $1 = 'approved' OR $1 = 'rejected' THEN NOW() ELSE reviewed_at END,
                updated_at = NOW()
            WHERE user_id = $7`,
@@ -299,8 +359,8 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
             sumsubApplicantId,
             reviewResult,
             reviewComment,
-            sumsubStatus.reviewStatus || sumsubStatus.status,
-            JSON.stringify(sumsubStatus),
+            statusData?.reviewStatus || statusData?.status || 'unknown',
+            JSON.stringify(sumsubResponseData),
             req.user.id
           ]
         );
@@ -316,16 +376,48 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
               sumsubApplicantId,
               reviewResult,
               reviewComment,
-              sumsubStatus.reviewStatus || sumsubStatus.status,
-              JSON.stringify(sumsubStatus)
+              statusData?.reviewStatus || statusData?.status || 'unknown',
+              JSON.stringify(sumsubResponseData)
             ]
           );
         }
 
         console.log(`✅ Updated KYC status for user ${req.user.id} from Sumsub: ${status}`);
       } catch (sumsubError) {
-        console.error('⚠️ Error fetching status from Sumsub API:', sumsubError);
-        // Continue with database status if API call fails
+        console.error('⚠️ Error fetching data from Sumsub API:', sumsubError);
+        // Store error response if available
+        let errorResponseData = {
+          error: true,
+          message: sumsubError.message || 'Failed to fetch data from Sumsub'
+        };
+        
+        if (sumsubError.errorResponse) {
+          errorResponseData = sumsubError.errorResponse;
+        }
+
+        // Store error in database
+        const updateResult = await pool.query(
+          `UPDATE kyc_verifications 
+           SET sumsub_verification_result = COALESCE(sumsub_verification_result::jsonb || $1::jsonb, $1::jsonb),
+               updated_at = NOW()
+           WHERE user_id = $2`,
+          [
+            JSON.stringify({ fetchError: errorResponseData }),
+            req.user.id
+          ]
+        );
+
+        // If no record exists, create one with error
+        if (updateResult.rowCount === 0) {
+          await pool.query(
+            `INSERT INTO kyc_verifications (user_id, status, sumsub_verification_result, updated_at)
+             VALUES ($1, 'pending', $2, NOW())`,
+            [
+              req.user.id,
+              JSON.stringify({ fetchError: errorResponseData })
+            ]
+          );
+        }
       }
     } else {
       // Use database status
@@ -385,6 +477,140 @@ router.post('/update-status', authenticate, async (req, res) => {
   }
 });
 
+// POST /api/kyc/sumsub/callback
+// Handle Sumsub SDK onMessage callback from client
+router.post('/sumsub/callback', authenticate, async (req, res) => {
+  try {
+    const { type, payload } = req.body;
+    console.log('📨 Sumsub SDK callback received:', { type, payload: JSON.stringify(payload, null, 2) });
+
+    const userId = req.user.id;
+    const userResult = await pool.query(
+      'SELECT sumsub_applicant_id FROM users WHERE id = $1',
+      [userId]
+    );
+    const sumsubApplicantId = userResult.rows[0]?.sumsub_applicant_id || userId.toString();
+
+    let status = 'pending';
+    let reviewAnswer = null;
+    let reviewComment = null;
+    let sumsubResponseData = { type, payload };
+
+    // Handle different callback types
+    if (type === 'idCheck.onReviewCompleted' || payload?.reviewStatus === 'completed') {
+      // Extract review result
+      reviewAnswer = payload?.reviewResult?.reviewAnswer || payload?.reviewResult || null;
+      reviewComment = payload?.reviewResult?.reviewComment || payload?.reviewComment || null;
+
+      if (reviewAnswer === 'GREEN' || reviewAnswer === 'approved') {
+        status = 'approved';
+      } else if (reviewAnswer === 'RED' || reviewAnswer === 'rejected') {
+        status = 'rejected';
+      }
+
+      console.log(`📝 Processing review completion for user ${userId}: ${status}`, { reviewAnswer, reviewComment });
+
+      // Fetch full applicant data (including idDocs) when verification is completed
+      if ((status === 'approved' || status === 'rejected') && sumsubApplicantId) {
+        try {
+          console.log(`📥 Fetching full applicant data for applicant ${sumsubApplicantId}`);
+          const fullApplicantData = await getApplicantData(sumsubApplicantId);
+          console.log(`✅ Retrieved full applicant data with idDocs`);
+          
+          sumsubResponseData = {
+            ...sumsubResponseData,
+            fullApplicantData: fullApplicantData,
+            idDocs: fullApplicantData.idDocs || null
+          };
+        } catch (fetchError) {
+          console.error(`⚠️ Error fetching full applicant data:`, fetchError);
+          if (fetchError.errorResponse) {
+            sumsubResponseData.fetchError = fetchError.errorResponse;
+          } else {
+            sumsubResponseData.fetchError = {
+              error: true,
+              message: fetchError.message || 'Failed to fetch applicant data'
+            };
+          }
+        }
+      }
+
+      // Update users table
+      await pool.query(
+        `UPDATE users SET kyc_status = $1, updated_at = NOW() WHERE id = $2`,
+        [status, userId]
+      );
+
+      // Update or insert into kyc_verifications table
+      const updateResult = await pool.query(
+        `UPDATE kyc_verifications 
+         SET status = $1,
+             sumsub_applicant_id = COALESCE($2, sumsub_applicant_id),
+             sumsub_review_result = COALESCE($3, sumsub_review_result),
+             sumsub_review_comment = COALESCE($4, sumsub_review_comment),
+             sumsub_verification_status = COALESCE($5, sumsub_verification_status),
+             sumsub_verification_result = $6,
+             reviewed_at = CASE WHEN $1 = 'approved' OR $1 = 'rejected' THEN NOW() ELSE reviewed_at END,
+             updated_at = NOW()
+         WHERE user_id = $7`,
+        [
+          status,
+          sumsubApplicantId,
+          reviewAnswer,
+          reviewComment,
+          payload?.reviewStatus || 'completed',
+          JSON.stringify(sumsubResponseData),
+          userId
+        ]
+      );
+
+      // If no record was updated, insert a new one
+      if (updateResult.rowCount === 0) {
+        await pool.query(
+          `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, reviewed_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $2 = 'approved' OR $2 = 'rejected' THEN NOW() ELSE NULL END, NOW())`,
+          [
+            userId,
+            status,
+            sumsubApplicantId,
+            reviewAnswer,
+            reviewComment,
+            payload?.reviewStatus || 'completed',
+            JSON.stringify(sumsubResponseData)
+          ]
+        );
+      }
+
+      console.log(`✅ KYC status updated successfully for user ${userId}: ${status}`);
+    } else if (type === 'idCheck.onApplicantSubmitted') {
+      // Just update status to pending
+      await pool.query(
+        `UPDATE users SET kyc_status = 'pending', updated_at = NOW() WHERE id = $1`,
+        [userId]
+      );
+
+      // Store callback data
+      await pool.query(
+        `UPDATE kyc_verifications 
+         SET status = 'pending',
+             sumsub_verification_result = COALESCE(sumsub_verification_result::jsonb || $1::jsonb, $1::jsonb),
+             updated_at = NOW()
+         WHERE user_id = $2`,
+        [
+          JSON.stringify(sumsubResponseData),
+          userId
+        ]
+      );
+    }
+
+    res.json({ success: true, status });
+  } catch (error) {
+    console.error('❌ Sumsub callback error:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 
 // Webhook Handler
 router.post('/webhook', async (req, res) => {
@@ -394,8 +620,51 @@ router.post('/webhook', async (req, res) => {
     
     const { externalUserId, type, reviewResult, applicantId } = payload;
 
+    // Check if payload contains error response (code, description, correlationId)
+    if (payload.code && payload.description) {
+      console.log('⚠️ Error response in webhook payload:', payload);
+      // Store error response in database if we can identify the user
+      let userId = null;
+      if (externalUserId) {
+        const userIdMatch = externalUserId.toString().match(/user[_-]?(\d+)$/i) || [null, externalUserId];
+        userId = parseInt(userIdMatch[1] || externalUserId);
+      } else if (applicantId) {
+        const applicantMatch = applicantId.toString().match(/user[_-]?(\d+)$/i) || [null, applicantId];
+        userId = parseInt(applicantMatch[1] || applicantId);
+      }
+
+      if (userId && !isNaN(userId)) {
+        // Store error response in database
+        await pool.query(
+          `UPDATE kyc_verifications 
+           SET sumsub_verification_result = COALESCE(sumsub_verification_result::jsonb || $1::jsonb, $1::jsonb),
+               status = CASE WHEN status = 'approved' THEN status ELSE 'rejected' END,
+               rejection_reason = COALESCE(rejection_reason, $2),
+               updated_at = NOW()
+           WHERE user_id = $3`,
+          [
+            JSON.stringify({ error: payload }),
+            payload.description,
+            userId
+          ]
+        );
+
+        // Update users table if status should be rejected
+        if (payload.code >= 400) {
+          await pool.query(
+            `UPDATE users SET kyc_status = 'rejected', updated_at = NOW() WHERE id = $1`,
+            [userId]
+          );
+        }
+      }
+      
+      return res.status(200).send('OK - Error stored');
+    }
+
     // Handle different webhook event types
-    if (type === 'applicantReviewed' || type === 'applicantStatusChanged') {
+    // Also handle cases where reviewStatus is 'completed' or reviewResult exists but type might be missing
+    if (type === 'applicantReviewed' || type === 'applicantStatusChanged' || 
+        payload.reviewStatus === 'completed' || payload.reviewResult || reviewResult) {
       // Extract userId from externalUserId (format: "user_123" or just "123")
       let userId = null;
       if (externalUserId) {
@@ -410,12 +679,24 @@ router.post('/webhook', async (req, res) => {
       }
 
       if (!userId || isNaN(userId)) {
-        console.error('⚠️ Invalid userId in Sumsub webhook:', { externalUserId, applicantId, type });
+        console.error('⚠️ Invalid userId in Sumsub webhook:', { externalUserId, applicantId, type, payload });
         return res.status(200).send('Ignored - invalid userId');
       }
 
-      // Determine status from reviewResult
-      const reviewAnswer = reviewResult?.reviewAnswer || reviewResult?.reviewStatus || payload.reviewStatus;
+      // Determine status from reviewResult - handle multiple structures
+      let reviewAnswer = null;
+      if (reviewResult?.reviewAnswer) {
+        reviewAnswer = reviewResult.reviewAnswer;
+      } else if (reviewResult?.reviewStatus) {
+        reviewAnswer = reviewResult.reviewStatus;
+      } else if (payload.reviewResult?.reviewAnswer) {
+        reviewAnswer = payload.reviewResult.reviewAnswer;
+      } else if (payload.reviewResult) {
+        reviewAnswer = payload.reviewResult;
+      } else if (payload.reviewStatus) {
+        reviewAnswer = payload.reviewStatus;
+      }
+
       const isApproved = reviewAnswer === 'GREEN' || reviewAnswer === 'approved';
       const isRejected = reviewAnswer === 'RED' || reviewAnswer === 'rejected';
 
@@ -426,9 +707,48 @@ router.post('/webhook', async (req, res) => {
         status = 'rejected';
       }
 
-      const reviewComment = reviewResult?.reviewComment || reviewResult?.comment || payload.comment || null;
+      const reviewComment = reviewResult?.reviewComment || reviewResult?.comment || 
+                           payload.reviewComment || payload.comment || null;
 
       console.log(`📝 Updating KYC status for user ${userId}: ${status}`, { reviewAnswer, reviewComment });
+
+      // Fetch full applicant data (including idDocs) when verification is completed (approved or rejected)
+      let fullApplicantData = null;
+      let sumsubResponseData = payload;
+      
+      const actualApplicantId = applicantId || externalUserId || userId.toString();
+      if ((status === 'approved' || status === 'rejected') && actualApplicantId) {
+        try {
+          console.log(`📥 Fetching full applicant data for applicant ${actualApplicantId}`);
+          fullApplicantData = await getApplicantData(actualApplicantId);
+          console.log(`✅ Retrieved full applicant data with idDocs:`, JSON.stringify(fullApplicantData, null, 2));
+          
+          // Merge webhook payload with full applicant data
+          sumsubResponseData = {
+            ...payload,
+            fullApplicantData: fullApplicantData,
+            idDocs: fullApplicantData.idDocs || null
+          };
+        } catch (fetchError) {
+          console.error(`⚠️ Error fetching full applicant data:`, fetchError);
+          // If error has errorResponse, store it
+          if (fetchError.errorResponse) {
+            sumsubResponseData = {
+              ...payload,
+              fetchError: fetchError.errorResponse
+            };
+          } else {
+            // Store the error in the response
+            sumsubResponseData = {
+              ...payload,
+              fetchError: {
+                error: true,
+                message: fetchError.message || 'Failed to fetch applicant data'
+              }
+            };
+          }
+        }
+      }
 
       // Update users table
       await pool.query(
@@ -445,18 +765,18 @@ router.post('/webhook', async (req, res) => {
              sumsub_review_result = COALESCE($3, sumsub_review_result),
              sumsub_review_comment = COALESCE($4, sumsub_review_comment),
              sumsub_verification_status = COALESCE($5, sumsub_verification_status),
-             sumsub_verification_result = COALESCE($6, sumsub_verification_result),
+             sumsub_verification_result = $6,
              sumsub_webhook_received_at = NOW(),
-             reviewed_at = NOW(),
+             reviewed_at = CASE WHEN $1 = 'approved' OR $1 = 'rejected' THEN NOW() ELSE reviewed_at END,
              updated_at = NOW()
          WHERE user_id = $7`,
         [
           status,
-          applicantId || externalUserId,
+          actualApplicantId,
           reviewAnswer,
           reviewComment,
           type,
-          JSON.stringify(payload),
+          JSON.stringify(sumsubResponseData),
           userId
         ]
       );
@@ -465,15 +785,15 @@ router.post('/webhook', async (req, res) => {
       if (updateResult.rowCount === 0) {
         await pool.query(
           `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, sumsub_webhook_received_at, reviewed_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), NOW())`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), CASE WHEN $2 = 'approved' OR $2 = 'rejected' THEN NOW() ELSE NULL END, NOW())`,
           [
             userId, 
             status, 
-            applicantId || externalUserId,
+            actualApplicantId,
             reviewAnswer,
             reviewComment,
             type,
-            JSON.stringify(payload)
+            JSON.stringify(sumsubResponseData)
           ]
         );
       }
