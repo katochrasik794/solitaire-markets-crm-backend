@@ -25,3 +25,4 @@ COMMENT ON COLUMN manual_payment_gateways.is_withdrawal_enabled IS 'Indicates if
 
 
 
+
