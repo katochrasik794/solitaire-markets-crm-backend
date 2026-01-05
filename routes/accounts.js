@@ -22,9 +22,10 @@ router.get('/groups', authenticate, async (req, res, next) => {
     const result = await pool.query(
       `SELECT 
         id, group_name, dedicated_name, currency, demo_leverage, 
-        margin_call, margin_stop_out, trade_flags
+        margin_call, margin_stop_out, trade_flags, server, company, created_at
        FROM mt5_groups
        WHERE is_active = TRUE
+         AND LOWER(group_name) NOT LIKE '%demo%'
        ORDER BY dedicated_name NULLS LAST, group_name ASC`,
       []
     );

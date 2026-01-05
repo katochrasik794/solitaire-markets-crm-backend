@@ -19,6 +19,7 @@ import paymentDetailsRoutes from './routes/paymentDetails.js';
 import unifiedActionsRoutes from './routes/unifiedActions.js';
 import menusRoutes from './routes/menus.js';
 import sessionRoutes from './routes/session.js';
+import ibRequestsRoutes from './routes/ibRequests.js';
 import pool from './config/database.js';
 
 dotenv.config();
@@ -269,6 +270,7 @@ app.use('/api/promotions', promotionRoutes);
 app.use('/api/payment-details', paymentDetailsRoutes);
 app.use('/api/menus', menusRoutes);
 app.use('/api/session', sessionRoutes);
+app.use('/api/ib-requests', ibRequestsRoutes);
 
 // Debug: Log registered routes
 console.log('✅ Routes registered:');
