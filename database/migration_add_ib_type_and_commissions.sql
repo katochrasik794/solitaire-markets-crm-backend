@@ -32,3 +32,4 @@ COMMENT ON COLUMN ib_requests.referrer_ib_id IS 'User ID of the Master IB who re
 COMMENT ON COLUMN ib_requests.group_pip_commissions IS 'JSON object storing group-wise pip commission allocations: {"group_id": pip_value, ...}';
 COMMENT ON COLUMN ib_requests.approved_at IS 'Timestamp when the IB request was approved';
 
+

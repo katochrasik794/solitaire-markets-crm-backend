@@ -1,6 +1,6 @@
 import express from 'express';
 import pool from '../config/database.js';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, authenticateAdmin } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -192,7 +192,7 @@ router.get('/', authenticate, async (req, res, next) => {
  * GET /api/ib-requests/admin
  * Get all IB requests with user details (admin only)
  */
-router.get('/admin', authenticate, async (req, res, next) => {
+router.get('/admin', authenticateAdmin, async (req, res, next) => {
   try {
     // Check if user is admin (you may need to adjust this based on your admin check)
     // For now, we'll assume this endpoint requires admin authentication middleware
@@ -321,7 +321,7 @@ router.get('/admin', authenticate, async (req, res, next) => {
  * GET /api/ib-requests/active-groups
  * Get active MT5 groups (excluding demo groups)
  */
-router.get('/active-groups', authenticate, async (req, res, next) => {
+router.get('/active-groups', authenticateAdmin, async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT 
@@ -358,7 +358,7 @@ router.get('/active-groups', authenticate, async (req, res, next) => {
  * GET /api/ib-requests/master-ibs
  * Get list of approved Master IBs for referrer selection
  */
-router.get('/master-ibs', authenticate, async (req, res, next) => {
+router.get('/master-ibs', authenticateAdmin, async (req, res, next) => {
   try {
     // Check if ib_type column exists
     const colsRes = await pool.query(
@@ -421,7 +421,7 @@ router.get('/master-ibs', authenticate, async (req, res, next) => {
  * POST /api/ib-requests/:id/approve
  * Approve IB request with ib_type, referrer, and pip commissions
  */
-router.post('/:id/approve', authenticate, async (req, res, next) => {
+router.post('/:id/approve', authenticateAdmin, async (req, res, next) => {
   try {
     const requestId = parseInt(req.params.id);
     const { ib_type, referrer_ib_id, group_pip_commissions } = req.body;
@@ -550,7 +550,7 @@ router.post('/:id/approve', authenticate, async (req, res, next) => {
  * POST /api/ib-requests/:id/reject
  * Reject IB request
  */
-router.post('/:id/reject', authenticate, async (req, res, next) => {
+router.post('/:id/reject', authenticateAdmin, async (req, res, next) => {
   try {
     const requestId = parseInt(req.params.id);
     const { rejection_reason } = req.body;
@@ -619,7 +619,7 @@ router.post('/:id/reject', authenticate, async (req, res, next) => {
  * POST /api/ib-requests/:id/status
  * Change IB request status
  */
-router.post('/:id/status', authenticate, async (req, res, next) => {
+router.post('/:id/status', authenticateAdmin, async (req, res, next) => {
   try {
     const requestId = parseInt(req.params.id);
     const { status } = req.body;
@@ -678,7 +678,7 @@ router.post('/:id/status', authenticate, async (req, res, next) => {
  * POST /api/ib-requests/:id/ban
  * Ban or unban an IB user
  */
-router.post('/:id/ban', authenticate, async (req, res, next) => {
+router.post('/:id/ban', authenticateAdmin, async (req, res, next) => {
   try {
     const requestId = parseInt(req.params.id);
     const { user_id, is_banned } = req.body;
@@ -769,7 +769,7 @@ router.post('/:id/ban', authenticate, async (req, res, next) => {
  * POST /api/ib-requests/:id/ib-type
  * Update IB type for an approved IB request
  */
-router.post('/:id/ib-type', authenticate, async (req, res, next) => {
+router.post('/:id/ib-type', authenticateAdmin, async (req, res, next) => {
   try {
     const requestId = parseInt(req.params.id);
     const { ib_type, referrer_ib_id } = req.body;
@@ -882,6 +882,2789 @@ router.post('/:id/ib-type', authenticate, async (req, res, next) => {
     });
   } catch (error) {
     console.error('Update IB type error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/ib-requests/:id/pip-rates
+ * Update pip rates for an approved IB request (admin only)
+ */
+router.post('/:id/pip-rates', authenticateAdmin, async (req, res, next) => {
+  try {
+    const requestId = parseInt(req.params.id);
+    const { group_pip_commissions } = req.body;
+    
+    if (!requestId || isNaN(requestId) || requestId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request ID'
+      });
+    }
+    
+    // Check if request exists and is approved
+    const requestCheck = await pool.query(
+      `SELECT id, status FROM ib_requests WHERE id = $1`,
+      [requestId]
+    );
+    
+    if (requestCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'IB request not found'
+      });
+    }
+    
+    if (requestCheck.rows[0].status !== 'approved') {
+      return res.status(400).json({
+        success: false,
+        message: 'Can only update pip rates for approved requests'
+      });
+    }
+    
+    // Validate group_pip_commissions is an object
+    if (!group_pip_commissions || typeof group_pip_commissions !== 'object' || Array.isArray(group_pip_commissions)) {
+      return res.status(400).json({
+        success: false,
+        message: 'group_pip_commissions must be an object'
+      });
+    }
+    
+    // Validate all pip values are numeric
+    const cleanedCommissions = {};
+    for (const [groupId, pipValue] of Object.entries(group_pip_commissions)) {
+      if (pipValue !== null && pipValue !== '' && pipValue !== undefined) {
+        const numValue = parseFloat(pipValue);
+        if (isNaN(numValue) || numValue < 0) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid pip value for group ${groupId}: must be a non-negative number`
+          });
+        }
+        cleanedCommissions[groupId] = numValue;
+      }
+    }
+    
+    // Check if group_pip_commissions column exists
+    const colsRes = await pool.query(
+      `SELECT column_name FROM information_schema.columns 
+       WHERE table_name = 'ib_requests' AND column_name = 'group_pip_commissions' AND table_schema = 'public'`
+    );
+    
+    if (colsRes.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'group_pip_commissions column does not exist. Please run the migration.'
+      });
+    }
+    
+    // Update the pip commissions
+    const updateResult = await pool.query(
+      `UPDATE ib_requests 
+       SET group_pip_commissions = $1,
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [JSON.stringify(cleanedCommissions), requestId]
+    );
+    
+    res.json({
+      success: true,
+      message: 'Pip rates updated successfully',
+      data: {
+        request: updateResult.rows[0]
+      }
+    });
+  } catch (error) {
+    console.error('Update pip rates error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/profiles-by-groups
+ * Get approved IBs with their accounts grouped by active MT5 groups (admin only)
+ */
+router.get('/profiles-by-groups', authenticateAdmin, async (req, res, next) => {
+  try {
+    // First, get all active MT5 groups
+    const activeGroupsResult = await pool.query(
+      `SELECT 
+        id, group_name, dedicated_name, currency, is_active
+       FROM mt5_groups
+       WHERE is_active = TRUE 
+         AND LOWER(group_name) NOT LIKE '%demo%'
+       ORDER BY dedicated_name NULLS LAST, group_name ASC`
+    );
+    
+    const activeGroups = activeGroupsResult.rows;
+    const groupMap = new Map();
+    activeGroups.forEach(group => {
+      groupMap.set(group.id, {
+        id: group.id,
+        groupName: group.group_name,
+        dedicatedName: group.dedicated_name || group.group_name,
+        currency: group.currency,
+        ibs: []
+      });
+    });
+    
+    // Get all approved IBs
+    const approvedIbsResult = await pool.query(
+      `SELECT 
+        ir.id as ib_request_id,
+        ir.user_id,
+        ir.ib_type,
+        ir.referrer_ib_id,
+        ir.group_pip_commissions,
+        ir.approved_at,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.referral_code,
+        u.referred_by
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       WHERE ir.status = 'approved'
+       ORDER BY u.first_name, u.last_name`
+    );
+    
+    // Check which columns exist in trading_accounts table
+    const accountColsRes = await pool.query(
+      `SELECT column_name FROM information_schema.columns 
+       WHERE table_name = 'trading_accounts' AND table_schema = 'public'`
+    );
+    const accountCols = new Set(accountColsRes.rows.map(r => r.column_name));
+    const hasMt5GroupId = accountCols.has('mt5_group_id');
+    const hasMt5GroupName = accountCols.has('mt5_group_name');
+    const hasGroup = accountCols.has('group');
+    
+    // Build select columns dynamically
+    let selectCols = [
+      'ta.id',
+      'ta.account_number',
+      'ta.platform',
+      'ta.account_type',
+      'ta.currency',
+      'ta.leverage',
+      'ta.account_status',
+      'ta.is_demo',
+      'ta.created_at'
+    ];
+    
+    // Add optional columns if they exist
+    if (accountCols.has('balance')) selectCols.push('ta.balance');
+    if (accountCols.has('equity')) selectCols.push('ta.equity');
+    if (hasMt5GroupId) selectCols.push('ta.mt5_group_id');
+    if (hasMt5GroupName) selectCols.push('ta.mt5_group_name');
+    if (hasGroup) selectCols.push('ta.group');
+    
+    // Build WHERE conditions for group filtering
+    let groupConditions = [];
+    if (hasMt5GroupId) {
+      groupConditions.push(`ta.mt5_group_id IN (SELECT id FROM mt5_groups WHERE is_active = TRUE AND LOWER(group_name) NOT LIKE '%demo%')`);
+    }
+    if (hasMt5GroupName) {
+      groupConditions.push(`ta.mt5_group_name IN (SELECT group_name FROM mt5_groups WHERE is_active = TRUE AND LOWER(group_name) NOT LIKE '%demo%')`);
+    }
+    if (hasGroup) {
+      groupConditions.push(`ta.group IN (SELECT group_name FROM mt5_groups WHERE is_active = TRUE AND LOWER(group_name) NOT LIKE '%demo%')`);
+    }
+    
+    // For each approved IB, get their MT5 accounts grouped by group
+    for (const ib of approvedIbsResult.rows) {
+      let accountsQuery = `
+        SELECT ${selectCols.join(', ')}
+        FROM trading_accounts ta
+        WHERE ta.user_id = $1 
+          AND ta.platform = 'MT5'
+          AND ta.is_demo = FALSE
+          AND ta.account_status = 'active'
+      `;
+      
+      // Add group filtering if we have any group columns
+      if (groupConditions.length > 0) {
+        accountsQuery += ` AND (${groupConditions.join(' OR ')})`;
+      }
+      
+      accountsQuery += ` ORDER BY ta.created_at DESC`;
+      
+      const accountsResult = await pool.query(accountsQuery, [ib.user_id]);
+      
+      const ibData = {
+        ibRequestId: ib.ib_request_id,
+        userId: ib.user_id,
+        name: `${ib.first_name || ''} ${ib.last_name || ''}`.trim() || `User #${ib.user_id}`,
+        email: ib.email,
+        ibType: ib.ib_type || 'normal',
+        referralCode: ib.referral_code,
+        referredBy: ib.referred_by,
+        approvedAt: ib.approved_at,
+        groupPipCommissions: (() => {
+          if (!ib.group_pip_commissions) return {};
+          if (typeof ib.group_pip_commissions === 'string') {
+            try {
+              return JSON.parse(ib.group_pip_commissions);
+            } catch (e) {
+              return {};
+            }
+          }
+          return ib.group_pip_commissions;
+        })(),
+        accounts: accountsResult.rows.map(acc => ({
+          id: acc.id,
+          accountNumber: acc.account_number,
+          platform: acc.platform,
+          accountType: acc.account_type,
+          currency: acc.currency,
+          leverage: acc.leverage,
+          accountStatus: acc.account_status,
+          balance: parseFloat(acc.balance || 0),
+          equity: parseFloat(acc.equity || 0),
+          mt5GroupId: acc.mt5_group_id || null,
+          mt5GroupName: acc.mt5_group_name || acc.group || null,
+          createdAt: acc.created_at
+        }))
+      };
+      
+      // Group IBs by their configured pip commission groups (from group_pip_commissions)
+      // This way IBs show up in groups they have pip rates configured for, even without accounts
+      const groupsWithPipCommissions = new Set();
+      
+      // Check which groups this IB has pip commissions configured for
+      if (ibData.groupPipCommissions && Object.keys(ibData.groupPipCommissions).length > 0) {
+        Object.keys(ibData.groupPipCommissions).forEach(groupIdStr => {
+          const groupId = parseInt(groupIdStr);
+          if (!isNaN(groupId) && groupMap.has(groupId)) {
+            groupsWithPipCommissions.add(groupId);
+          }
+        });
+      }
+      
+      // Also group accounts by MT5 group (for showing accounts in the right group)
+      const accountsByGroup = new Map();
+      ibData.accounts.forEach(account => {
+        let groupId = account.mt5GroupId;
+        let groupName = account.mt5GroupName;
+        
+        // If we don't have groupId, try to find it by group name
+        if (!groupId && groupName) {
+          const foundGroup = activeGroups.find(g => 
+            g.group_name === groupName || g.dedicated_name === groupName
+          );
+          if (foundGroup) {
+            groupId = foundGroup.id;
+          }
+        }
+        
+        // Only group if we have a valid groupId and it exists in our active groups
+        if (groupId && groupMap.has(groupId)) {
+          if (!accountsByGroup.has(groupId)) {
+            accountsByGroup.set(groupId, []);
+          }
+          accountsByGroup.get(groupId).push(account);
+          // Also add to groupsWithPipCommissions if not already there
+          groupsWithPipCommissions.add(groupId);
+        }
+      });
+      
+      // Add IB to each group they have pip commissions configured for OR accounts in
+      groupsWithPipCommissions.forEach(groupId => {
+        if (groupMap.has(groupId)) {
+          // Get accounts for this specific group, or empty array if none
+          const accountsForThisGroup = accountsByGroup.get(groupId) || [];
+          
+          // Check if IB already exists in this group (avoid duplicates)
+          const existingIb = groupMap.get(groupId).ibs.find(ib => ib.userId === ibData.userId);
+          if (!existingIb) {
+            groupMap.get(groupId).ibs.push({
+              ...ibData,
+              accounts: accountsForThisGroup
+            });
+          }
+        }
+      });
+    }
+    
+    // Convert map to array format
+    // Show all active groups, even if they have no IBs (so user can see which groups exist)
+    const groupsWithIbs = Array.from(groupMap.values())
+      .map(group => ({
+        ...group,
+        ibCount: group.ibs.length
+      }));
+      // Removed filter - show all active groups, even with 0 IBs
+    
+    res.json({
+      success: true,
+      data: {
+        groups: groupsWithIbs,
+        totalGroups: groupsWithIbs.length,
+        totalIbs: approvedIbsResult.rows.length
+      }
+    });
+  } catch (error) {
+    console.error('Get IB profiles by groups error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/:id/referred-users
+ * Get all users referred by an IB with their MT5 accounts and trade history (admin only)
+ */
+router.get('/:id/referred-users', authenticateAdmin, async (req, res, next) => {
+  try {
+    const ibRequestId = parseInt(req.params.id);
+    
+    if (!ibRequestId || isNaN(ibRequestId) || ibRequestId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid IB request ID'
+      });
+    }
+    
+    // Get the IB request and user details
+    const ibRequestResult = await pool.query(
+      `SELECT ir.id, ir.user_id, u.referral_code
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       WHERE ir.id = $1 AND ir.status = 'approved'`,
+      [ibRequestId]
+    );
+    
+    if (ibRequestResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'IB request not found or not approved'
+      });
+    }
+    
+    const ib = ibRequestResult.rows[0];
+    const ibReferralCode = ib.referral_code;
+    
+    if (!ibReferralCode) {
+      return res.json({
+        success: true,
+        data: {
+          referredUsers: [],
+          totalUsers: 0,
+          ibReferralCode: null
+        }
+      });
+    }
+    
+    // Get all users referred by this IB (using referred_by field)
+    const referredUsersResult = await pool.query(
+      `SELECT 
+        u.id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.phone_code,
+        u.phone_number,
+        u.country,
+        u.referral_code,
+        u.referred_by,
+        u.created_at
+       FROM users u
+       WHERE u.referred_by = $1
+       ORDER BY u.created_at DESC`,
+      [ibReferralCode]
+    );
+    
+    const referredUsers = [];
+    
+    // Check which columns exist in trading_accounts (do this once before the loop)
+    const accountColsRes = await pool.query(
+      `SELECT column_name FROM information_schema.columns 
+       WHERE table_name = 'trading_accounts' AND table_schema = 'public'`
+    );
+    const accountCols = new Set(accountColsRes.rows.map(r => r.column_name));
+    
+    // Build account select columns dynamically
+    let accountSelectCols = [
+      'ta.id',
+      'ta.account_number',
+      'ta.platform',
+      'ta.account_type',
+      'ta.currency',
+      'ta.leverage',
+      'ta.account_status',
+      'ta.is_demo',
+      'ta.created_at'
+    ];
+    
+    if (accountCols.has('balance')) accountSelectCols.push('ta.balance');
+    if (accountCols.has('equity')) accountSelectCols.push('ta.equity');
+    if (accountCols.has('mt5_group_id')) accountSelectCols.push('ta.mt5_group_id');
+    if (accountCols.has('mt5_group_name')) accountSelectCols.push('ta.mt5_group_name');
+    if (accountCols.has('group')) accountSelectCols.push('ta.group');
+    
+    // For each referred user, get their MT5 accounts
+    for (const user of referredUsersResult.rows) {
+      // Get MT5 accounts for this user
+      const accountsResult = await pool.query(
+        `SELECT ${accountSelectCols.join(', ')}
+         FROM trading_accounts ta
+         WHERE ta.user_id = $1 
+           AND ta.platform = 'MT5'
+           AND ta.is_demo = FALSE
+         ORDER BY ta.created_at DESC`,
+        [user.id]
+      );
+      
+      const accounts = accountsResult.rows.map(acc => ({
+        id: acc.id,
+        accountNumber: acc.account_number,
+        platform: acc.platform,
+        accountType: acc.account_type,
+        currency: acc.currency,
+        leverage: acc.leverage,
+        accountStatus: acc.account_status,
+        balance: parseFloat(acc.balance || 0),
+        equity: parseFloat(acc.equity || 0),
+        mt5GroupId: acc.mt5_group_id,
+        mt5GroupName: acc.mt5_group_name || acc.group,
+        createdAt: acc.created_at
+      }));
+      
+      referredUsers.push({
+        userId: user.id,
+        name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || `User #${user.id}`,
+        email: user.email,
+        phone: user.phone_code && user.phone_number ? `${user.phone_code}${user.phone_number}` : null,
+        country: user.country,
+        referralCode: user.referral_code,
+        referredBy: user.referred_by,
+        createdAt: user.created_at,
+        accounts: accounts,
+        accountCount: accounts.length,
+        // Trade history will be fetched separately via MT5 API when needed
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        referredUsers: referredUsers,
+        totalUsers: referredUsers.length,
+        ibReferralCode: ibReferralCode
+      }
+    });
+  } catch (error) {
+    console.error('Get referred users error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/:id/ib-tree
+ * Get IB tree structure (hierarchical view of IB network) (admin only)
+ * NOTE: This must come before /:id route to avoid route conflicts
+ */
+router.get('/:id/ib-tree', authenticateAdmin, async (req, res, next) => {
+  try {
+    const ibRequestId = parseInt(req.params.id);
+    
+    if (!ibRequestId || isNaN(ibRequestId) || ibRequestId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid IB request ID'
+      });
+    }
+    
+    // Get the IB request and user details
+    const ibRequestResult = await pool.query(
+      `SELECT ir.id, ir.user_id, ir.ib_type, u.referral_code, u.first_name, u.last_name, u.email
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       WHERE ir.id = $1 AND ir.status = 'approved'`,
+      [ibRequestId]
+    );
+    
+    if (ibRequestResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'IB request not found or not approved'
+      });
+    }
+    
+    const ib = ibRequestResult.rows[0];
+    const ibReferralCode = ib.referral_code;
+    
+    // Recursive function to build tree
+    const buildTree = async (referralCode, level = 1, maxLevel = 3) => {
+      if (level > maxLevel || !referralCode) return null;
+      
+      // Get users referred by this referral code
+      const usersResult = await pool.query(
+        `SELECT 
+          u.id,
+          u.first_name,
+          u.last_name,
+          u.email,
+          u.referral_code,
+          u.referred_by,
+          ir.id as ib_request_id,
+          ir.ib_type,
+          ir.status
+         FROM users u
+         LEFT JOIN ib_requests ir ON u.id = ir.user_id AND ir.status = 'approved'
+         WHERE u.referred_by = $1
+         ORDER BY u.created_at DESC`,
+        [referralCode]
+      );
+      
+      if (usersResult.rows.length === 0) return null;
+      
+      const children = [];
+      
+      for (const user of usersResult.rows) {
+        const isIB = user.ib_request_id !== null;
+        const childTree = user.referral_code 
+          ? await buildTree(user.referral_code, level + 1, maxLevel)
+          : null;
+        
+        // Get accounts for this user
+        const accountsResult = await pool.query(
+          `SELECT COUNT(*) as count, SUM(balance) as total_balance
+           FROM trading_accounts
+           WHERE user_id = $1 AND platform = 'MT5' AND is_demo = FALSE`,
+          [user.id]
+        );
+        
+        const accountCount = parseInt(accountsResult.rows[0]?.count || 0);
+        const totalBalance = parseFloat(accountsResult.rows[0]?.total_balance || 0);
+        
+        // Get group_pip_commissions for this IB if they are an IB
+        let groupPipCommissions = {};
+        if (isIB && user.ib_request_id) {
+          const pipCommissionsResult = await pool.query(
+            `SELECT group_pip_commissions FROM ib_requests WHERE id = $1`,
+            [user.ib_request_id]
+          );
+          if (pipCommissionsResult.rows.length > 0 && pipCommissionsResult.rows[0].group_pip_commissions) {
+            const pipComms = pipCommissionsResult.rows[0].group_pip_commissions;
+            if (typeof pipComms === 'string') {
+              try {
+                groupPipCommissions = JSON.parse(pipComms);
+              } catch (e) {
+                groupPipCommissions = {};
+              }
+            } else {
+              groupPipCommissions = pipComms;
+            }
+          }
+        }
+        
+        children.push({
+          userId: user.id,
+          ibRequestId: user.ib_request_id,
+          name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || `User #${user.id}`,
+          email: user.email,
+          referralCode: user.referral_code,
+          referredBy: user.referred_by,
+          type: isIB ? (user.ib_type || 'IB') : 'Client',
+          level: `L${level}`,
+          accountCount: accountCount,
+          totalBalance: totalBalance,
+          groupPipCommissions: groupPipCommissions,
+          children: childTree || []
+        });
+      }
+      
+      return children;
+    };
+    
+    // Build the tree starting from the IB
+    const tree = await buildTree(ibReferralCode);
+    
+    // Get IB's own accounts
+    const ibAccountsResult = await pool.query(
+      `SELECT COUNT(*) as count, SUM(balance) as total_balance
+       FROM trading_accounts
+       WHERE user_id = $1 AND platform = 'MT5' AND is_demo = FALSE`,
+      [ib.user_id]
+    );
+    
+    const ibAccountCount = parseInt(ibAccountsResult.rows[0]?.count || 0);
+    const ibTotalBalance = parseFloat(ibAccountsResult.rows[0]?.total_balance || 0);
+    
+    // Get group_pip_commissions for the root IB
+    let rootGroupPipCommissions = {};
+    const rootPipCommissionsResult = await pool.query(
+      `SELECT group_pip_commissions FROM ib_requests WHERE id = $1`,
+      [ib.id]
+    );
+    if (rootPipCommissionsResult.rows.length > 0 && rootPipCommissionsResult.rows[0].group_pip_commissions) {
+      const pipComms = rootPipCommissionsResult.rows[0].group_pip_commissions;
+      if (typeof pipComms === 'string') {
+        try {
+          rootGroupPipCommissions = JSON.parse(pipComms);
+        } catch (e) {
+          rootGroupPipCommissions = {};
+        }
+      } else {
+        rootGroupPipCommissions = pipComms;
+      }
+    }
+    
+    const ibTreeData = {
+      userId: ib.user_id,
+      ibRequestId: ib.id,
+      name: `${ib.first_name || ''} ${ib.last_name || ''}`.trim() || `User #${ib.user_id}`,
+      email: ib.email,
+      referralCode: ibReferralCode,
+      type: ib.ib_type || 'IB',
+      level: 'L1',
+      accountCount: ibAccountCount,
+      totalBalance: ibTotalBalance,
+      groupPipCommissions: rootGroupPipCommissions,
+      children: tree || []
+    };
+    
+    res.json({
+      success: true,
+      data: ibTreeData
+    });
+  } catch (error) {
+    console.error('Get IB tree error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/:id
+ * Get a single IB request with full details (admin only)
+ * NOTE: This must come after all /:id/* routes to avoid route conflicts
+ */
+router.get('/:id', authenticateAdmin, async (req, res, next) => {
+  try {
+    const requestId = parseInt(req.params.id);
+    
+    if (!requestId || isNaN(requestId) || requestId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request ID'
+      });
+    }
+    
+    // Check which columns exist in ib_requests
+    const colsRes = await pool.query(
+      `SELECT column_name FROM information_schema.columns 
+       WHERE table_name = 'ib_requests' AND table_schema = 'public'`
+    );
+    const ibCols = new Set(colsRes.rows.map(r => r.column_name));
+    
+    // Build select columns dynamically
+    let selectCols = [
+      'ir.id',
+      'ir.user_id',
+      'ir.status',
+      'ir.created_at',
+      'ir.updated_at',
+      'u.first_name',
+      'u.last_name',
+      'u.email',
+      'u.phone_code',
+      'u.phone_number',
+      'u.country',
+      'u.referral_code',
+      'u.referred_by'
+    ];
+    
+    if (ibCols.has('ib_type')) selectCols.push('ir.ib_type');
+    if (ibCols.has('referrer_ib_id')) selectCols.push('ir.referrer_ib_id');
+    if (ibCols.has('group_pip_commissions')) selectCols.push('ir.group_pip_commissions');
+    if (ibCols.has('approved_at')) selectCols.push('ir.approved_at');
+    
+    // Get IB request with user details
+    const result = await pool.query(
+      `SELECT ${selectCols.join(', ')}
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       WHERE ir.id = $1`,
+      [requestId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'IB request not found'
+      });
+    }
+    
+    const ib = result.rows[0];
+    
+    // Get referrer info if exists
+    let referredBy = null;
+    if (ib.referrer_ib_id) {
+      const referrerResult = await pool.query(
+        `SELECT first_name, last_name, email FROM users WHERE id = $1`,
+        [ib.referrer_ib_id]
+      );
+      if (referrerResult.rows.length > 0) {
+        referredBy = referrerResult.rows[0];
+      }
+    }
+    
+    // Check which columns exist in trading_accounts
+    const accountColsRes = await pool.query(
+      `SELECT column_name FROM information_schema.columns 
+       WHERE table_name = 'trading_accounts' AND table_schema = 'public'`
+    );
+    const accountCols = new Set(accountColsRes.rows.map(r => r.column_name));
+    
+    // Build account select columns dynamically
+    let accountSelectCols = [
+      'ta.id',
+      'ta.account_number',
+      'ta.platform',
+      'ta.account_type',
+      'ta.currency',
+      'ta.leverage',
+      'ta.account_status',
+      'ta.is_demo',
+      'ta.created_at'
+    ];
+    
+    if (accountCols.has('balance')) accountSelectCols.push('ta.balance');
+    if (accountCols.has('equity')) accountSelectCols.push('ta.equity');
+    if (accountCols.has('mt5_group_id')) accountSelectCols.push('ta.mt5_group_id');
+    if (accountCols.has('mt5_group_name')) accountSelectCols.push('ta.mt5_group_name');
+    if (accountCols.has('group')) accountSelectCols.push('ta.group');
+    
+    // Get accounts for this IB
+    const accountsResult = await pool.query(
+      `SELECT ${accountSelectCols.join(', ')}
+       FROM trading_accounts ta
+       WHERE ta.user_id = $1 
+         AND ta.platform = 'MT5'
+         AND ta.is_demo = FALSE
+       ORDER BY ta.created_at DESC`,
+      [ib.user_id]
+    );
+    
+    const accounts = accountsResult.rows.map(acc => ({
+      id: acc.id,
+      accountNumber: acc.account_number,
+      platform: acc.platform,
+      accountType: acc.account_type,
+      currency: acc.currency,
+      leverage: acc.leverage,
+      accountStatus: acc.account_status,
+      balance: parseFloat(acc.balance || 0),
+      equity: parseFloat(acc.equity || 0),
+      mt5GroupId: acc.mt5_group_id,
+      mt5GroupName: acc.mt5_group_name || acc.group,
+      createdAt: acc.created_at
+    }));
+    
+    res.json({
+      success: true,
+      data: {
+        id: ib.id,
+        user_id: ib.user_id,
+        first_name: ib.first_name,
+        last_name: ib.last_name,
+        email: ib.email,
+        phone: ib.phone_code && ib.phone_number ? `${ib.phone_code}${ib.phone_number}` : null,
+        country: ib.country,
+        ib_type: ib.ib_type,
+        referrer_ib_id: ib.referrer_ib_id,
+        group_pip_commissions: (() => {
+          if (!ib.group_pip_commissions) return {};
+          if (typeof ib.group_pip_commissions === 'string') {
+            try {
+              return JSON.parse(ib.group_pip_commissions);
+            } catch (e) {
+              return {};
+            }
+          }
+          return ib.group_pip_commissions;
+        })(),
+        approved_at: ib.approved_at,
+        status: ib.status,
+        created_at: ib.created_at,
+        updated_at: ib.updated_at,
+        referral_code: ib.referral_code,
+        referred_by: ib.referred_by,
+        referred_by_name: referredBy ? `${referredBy.first_name || ''} ${referredBy.last_name || ''}`.trim() : null,
+        referred_by_email: referredBy?.email || null,
+        accounts: accounts
+      }
+    });
+  } catch (error) {
+    console.error('Get IB request error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/dashboard/stats
+ * Get dashboard statistics (admin only)
+ */
+router.get('/dashboard/stats', authenticateAdmin, async (req, res, next) => {
+  try {
+    // Total Users
+    const totalUsersResult = await pool.query('SELECT COUNT(*) as count FROM users');
+    const totalUsers = parseInt(totalUsersResult.rows[0]?.count || 0);
+
+    // Active IBs (approved IB requests)
+    const activeIBsResult = await pool.query(
+      `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'approved'`
+    );
+    const activeIBs = parseInt(activeIBsResult.rows[0]?.count || 0);
+
+    // Active Users (30 days) - users who logged in or had activity in last 30 days
+    // For now, we'll use users created in last 30 days as a proxy
+    const activeUsers30DaysResult = await pool.query(
+      `SELECT COUNT(DISTINCT u.id) as count
+       FROM users u
+       WHERE u.created_at >= NOW() - INTERVAL '30 days'
+         OR EXISTS (
+           SELECT 1 FROM trading_accounts ta 
+           WHERE ta.user_id = u.id 
+           AND ta.created_at >= NOW() - INTERVAL '30 days'
+         )`
+    );
+    const activeUsers30Days = parseInt(activeUsers30DaysResult.rows[0]?.count || 0);
+
+    // Trading Accounts (active, non-demo)
+    const tradingAccountsResult = await pool.query(
+      `SELECT COUNT(*) as count 
+       FROM trading_accounts 
+       WHERE platform = 'MT5' AND is_demo = FALSE AND account_status = 'active'`
+    );
+    const tradingAccounts = parseInt(tradingAccountsResult.rows[0]?.count || 0);
+
+    // Total Commission - check if commission table exists
+    let totalCommission = 0;
+    let commissionFromIbs = 0;
+    let commissionBreakdown = '';
+    
+    // Try to get commission data if table exists
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (commissionTableCheck.rows[0]?.exists) {
+      const commissionResult = await pool.query(
+        `SELECT 
+          COALESCE(SUM(amount), 0) as total,
+          COUNT(DISTINCT ib_id) as ib_count
+         FROM ib_commissions`
+      );
+      totalCommission = parseFloat(commissionResult.rows[0]?.total || 0);
+      commissionFromIbs = parseInt(commissionResult.rows[0]?.ib_count || 0);
+      commissionBreakdown = `From ${commissionFromIbs} IBs (aggregated)`;
+    } else {
+      // If no commission table, return 0
+      commissionBreakdown = 'Commission tracking not available';
+    }
+
+    res.json({
+      success: true,
+      data: {
+        totalUsers,
+        activeIBs,
+        activeUsers30Days,
+        tradingAccounts,
+        totalCommission: totalCommission.toFixed(2),
+        commissionFromIbs,
+        commissionBreakdown
+      }
+    });
+  } catch (error) {
+    console.error('Get dashboard stats error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/dashboard/commission-by-group
+ * Get commission breakdown by account group (admin only)
+ */
+router.get('/dashboard/commission-by-group', authenticateAdmin, async (req, res, next) => {
+  try {
+    // Check if commission table exists
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (!commissionTableCheck.rows[0]?.exists) {
+      // Return empty data if table doesn't exist
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    // Get commission by group from mt5_groups
+    const result = await pool.query(
+      `SELECT 
+        mg.id,
+        mg.dedicated_name,
+        mg.group_name,
+        COALESCE(SUM(ic.amount), 0) as total_commission,
+        COUNT(DISTINCT ic.ib_id) as ib_count
+       FROM mt5_groups mg
+       LEFT JOIN ib_commissions ic ON ic.group_id = mg.id
+       WHERE mg.is_active = TRUE 
+         AND LOWER(mg.group_name) NOT LIKE '%demo%'
+       GROUP BY mg.id, mg.dedicated_name, mg.group_name
+       ORDER BY total_commission DESC`
+    );
+
+    // Calculate total for percentage
+    const totalResult = await pool.query('SELECT COALESCE(SUM(amount), 0) as total FROM ib_commissions');
+    const totalCommission = parseFloat(totalResult.rows[0]?.total || 0);
+
+    const groups = result.rows.map(row => {
+      const amount = parseFloat(row.total_commission || 0);
+      const percentage = totalCommission > 0 ? ((amount / totalCommission) * 100).toFixed(1) : '0.0';
+      return {
+        id: row.id,
+        group: row.dedicated_name || row.group_name,
+        amount: amount.toFixed(2),
+        percentage: `${percentage}%`
+      };
+    });
+
+    res.json({
+      success: true,
+      data: groups
+    });
+  } catch (error) {
+    console.error('Get commission by group error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/dashboard/commission-chart
+ * Get commission data for charts (last 12 months) (admin only)
+ */
+router.get('/dashboard/commission-chart', authenticateAdmin, async (req, res, next) => {
+  try {
+    // Check if commission table exists
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (!commissionTableCheck.rows[0]?.exists) {
+      // Return empty data for last 12 months
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return res.json({
+        success: true,
+        data: months.map(() => 0)
+      });
+    }
+
+    // Get commission by month for last 12 months
+    const result = await pool.query(
+      `SELECT 
+        TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') as month,
+        EXTRACT(MONTH FROM DATE_TRUNC('month', created_at)) as month_num,
+        COALESCE(SUM(amount), 0) as total
+       FROM ib_commissions
+       WHERE created_at >= NOW() - INTERVAL '12 months'
+       GROUP BY DATE_TRUNC('month', created_at)
+       ORDER BY DATE_TRUNC('month', created_at) ASC`
+    );
+
+    // Create array for all 12 months
+    const monthMap = {
+      1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun',
+      7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
+    };
+    
+    const monthData = {};
+    result.rows.forEach(row => {
+      monthData[parseInt(row.month_num)] = parseFloat(row.total || 0);
+    });
+
+    // Fill in all 12 months
+    const chartData = [];
+    for (let i = 1; i <= 12; i++) {
+      chartData.push(monthData[i] || 0);
+    }
+
+    res.json({
+      success: true,
+      data: chartData
+    });
+  } catch (error) {
+    console.error('Get commission chart error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/dashboard/commission-by-category
+ * Get commission breakdown by category (admin only)
+ */
+router.get('/dashboard/commission-by-category', authenticateAdmin, async (req, res, next) => {
+  try {
+    // Check if commission table exists with category/symbol field
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (!commissionTableCheck.rows[0]?.exists) {
+      return res.json({
+        success: true,
+        data: {
+          Forex: 100,
+          Metals: 0,
+          Indices: 0,
+          Crypto: 0
+        }
+      });
+    }
+
+    // Check if symbol column exists
+    const symbolColumnCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+        AND column_name = 'symbol'
+      )`
+    );
+
+    if (!symbolColumnCheck.rows[0]?.exists) {
+      // Default to 100% Forex if no symbol column
+      return res.json({
+        success: true,
+        data: {
+          Forex: 100,
+          Metals: 0,
+          Indices: 0,
+          Crypto: 0
+        }
+      });
+    }
+
+    // Categorize symbols
+    const result = await pool.query(
+      `SELECT 
+        symbol,
+        SUM(amount) as total
+       FROM ib_commissions
+       WHERE symbol IS NOT NULL
+       GROUP BY symbol`
+    );
+
+    const categories = {
+      Forex: 0,
+      Metals: 0,
+      Indices: 0,
+      Crypto: 0
+    };
+
+    // Symbol categorization logic
+    const forexSymbols = ['EUR', 'USD', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD', 'USDCHF', 'NZDUSD'];
+    const metalsSymbols = ['XAU', 'XAG', 'GOLD', 'SILVER', 'XAUUSD', 'XAGUSD'];
+    const indicesSymbols = ['US30', 'US500', 'NAS100', 'UK100', 'GER30', 'SPX', 'DJI', 'NDX'];
+    const cryptoSymbols = ['BTC', 'ETH', 'BTCUSD', 'ETHUSD', 'XRP', 'LTC'];
+
+    result.rows.forEach(row => {
+      const symbol = (row.symbol || '').toUpperCase();
+      const amount = parseFloat(row.total || 0);
+      
+      if (forexSymbols.some(f => symbol.includes(f))) {
+        categories.Forex += amount;
+      } else if (metalsSymbols.some(m => symbol.includes(m))) {
+        categories.Metals += amount;
+      } else if (indicesSymbols.some(i => symbol.includes(i))) {
+        categories.Indices += amount;
+      } else if (cryptoSymbols.some(c => symbol.includes(c))) {
+        categories.Crypto += amount;
+      } else {
+        // Default to Forex for unknown symbols
+        categories.Forex += amount;
+      }
+    });
+
+    // Calculate percentages
+    const total = Object.values(categories).reduce((sum, val) => sum + val, 0);
+    const percentages = {};
+    Object.keys(categories).forEach(key => {
+      percentages[key] = total > 0 ? ((categories[key] / total) * 100).toFixed(1) : 0;
+    });
+
+    res.json({
+      success: true,
+      data: percentages
+    });
+  } catch (error) {
+    console.error('Get commission by category error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/dashboard/recent-requests
+ * Get recent IB requests (admin only)
+ */
+router.get('/dashboard/recent-requests', authenticateAdmin, async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit) || 5;
+    
+    const result = await pool.query(
+      `SELECT 
+        ir.id,
+        ir.status,
+        ir.ib_type,
+        ir.created_at,
+        u.first_name,
+        u.last_name,
+        u.email
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       ORDER BY ir.created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+
+    const requests = result.rows.map(row => ({
+      id: row.id,
+      applicant: `${row.first_name || ''} ${row.last_name || ''}`.trim() || `User #${row.user_id}`,
+      email: row.email,
+      requestedRate: '$1.00', // Default, can be calculated from group_pip_commissions if needed
+      type: row.ib_type || 'normal',
+      applied: new Date(row.created_at).toLocaleString('en-US', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      }).replace(',', ''),
+      status: row.status.charAt(0).toUpperCase() + row.status.slice(1)
+    }));
+
+    res.json({
+      success: true,
+      data: requests
+    });
+  } catch (error) {
+    console.error('Get recent requests error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/dashboard/recent-commissions
+ * Get recent commission ledger entries (admin only)
+ */
+router.get('/dashboard/recent-commissions', authenticateAdmin, async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit) || 5;
+    
+    // Check if commission table exists
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (!commissionTableCheck.rows[0]?.exists) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    // Get recent commissions with IB and group info
+    const result = await pool.query(
+      `SELECT 
+        ic.id,
+        ic.created_at,
+        ic.amount,
+        ic.symbol,
+        ic.lots,
+        mg.dedicated_name,
+        mg.group_name,
+        u.first_name,
+        u.last_name,
+        ir.id as ib_request_id
+       FROM ib_commissions ic
+       JOIN ib_requests ir ON ic.ib_id = ir.id
+       JOIN users u ON ir.user_id = u.id
+       LEFT JOIN mt5_groups mg ON ic.group_id = mg.id
+       ORDER BY ic.created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+
+    const commissions = result.rows.map(row => ({
+      id: row.id,
+      date: new Date(row.created_at).toLocaleString('en-US', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      }).replace(',', ''),
+      ib: `${row.first_name || ''} ${row.last_name || ''}`.trim() || `User #${row.ib_request_id}`,
+      symbol: row.symbol || 'N/A',
+      group: row.dedicated_name || row.group_name || 'N/A',
+      lots: parseFloat(row.lots || 0).toFixed(2),
+      commission: `$${parseFloat(row.amount || 0).toFixed(2)}`
+    }));
+
+    res.json({
+      success: true,
+      data: commissions
+    });
+  } catch (error) {
+    console.error('Get recent commissions error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/symbols-with-categories
+ * List symbols from symbols_with_categories with optional filters (admin only)
+ */
+router.get('/symbols-with-categories', authenticateAdmin, async (req, res, next) => {
+  try {
+    const {
+      search = '',
+      category,
+      group_name,
+      status,
+      page = '1',
+      pageSize = '25'
+    } = req.query;
+
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    const sizeNum = Math.min(Math.max(parseInt(pageSize) || 25, 1), 500);
+    const offset = (pageNum - 1) * sizeNum;
+
+    const whereParts = [];
+    const params = [];
+
+    if (search) {
+      params.push(`%${search.toLowerCase()}%`);
+      whereParts.push(
+        `(LOWER(symbol) LIKE $${params.length} OR LOWER(pair) LIKE $${params.length} OR LOWER(group_name) LIKE $${params.length} OR LOWER(category) LIKE $${params.length})`
+      );
+    }
+
+    if (category) {
+      params.push(category);
+      whereParts.push(`category = $${params.length}`);
+    }
+
+    if (group_name) {
+      params.push(group_name);
+      whereParts.push(`group_name = $${params.length}`);
+    }
+
+    if (status) {
+      params.push(status);
+      whereParts.push(`status = $${params.length}`);
+    }
+
+    const whereClause = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
+
+    // Total count
+    const countResult = await pool.query(
+      `SELECT COUNT(*) AS count FROM symbols_with_categories ${whereClause}`,
+      params
+    );
+    const total = parseInt(countResult.rows[0]?.count || 0);
+
+    // Paged rows
+    params.push(sizeNum);
+    params.push(offset);
+    const rowsResult = await pool.query(
+      `SELECT 
+        id,
+        symbol,
+        pair,
+        group_name,
+        category,
+        pip_per_lot,
+        pip_value,
+        commission,
+        currency,
+        status,
+        contract_size,
+        digits,
+        spread,
+        profit_mode,
+        is_override,
+        created_at,
+        updated_at
+       FROM symbols_with_categories
+       ${whereClause}
+       ORDER BY symbol ASC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+
+    res.json({
+      success: true,
+      data: {
+        rows: rowsResult.rows,
+        total,
+        page: pageNum,
+        pageSize: sizeNum
+      }
+    });
+  } catch (error) {
+    console.error('Get symbols_with_categories error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/symbols-summary
+ * Summary stats for symbols_with_categories (admin only)
+ */
+router.get('/symbols-summary', authenticateAdmin, async (req, res, next) => {
+  try {
+    const totalResult = await pool.query(
+      'SELECT COUNT(*) AS total FROM symbols_with_categories'
+    );
+    const configuredResult = await pool.query(
+      'SELECT COUNT(*) AS configured FROM symbols_with_categories WHERE pip_per_lot IS NOT NULL'
+    );
+    const overridesResult = await pool.query(
+      'SELECT COUNT(*) AS overrides FROM symbols_with_categories WHERE is_override = TRUE'
+    );
+    const categoriesResult = await pool.query(
+      `SELECT category, COUNT(*) AS count 
+       FROM symbols_with_categories 
+       GROUP BY category 
+       ORDER BY category ASC`
+    );
+
+    res.json({
+      success: true,
+      data: {
+        totalSymbols: parseInt(totalResult.rows[0]?.total || 0),
+        configuredPipLot: parseInt(configuredResult.rows[0]?.configured || 0),
+        overrides: parseInt(overridesResult.rows[0]?.overrides || 0),
+        categories: categoriesResult.rows
+      }
+    });
+  } catch (error) {
+    console.error('Get symbols summary error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/ib-requests/symbols/sync
+ * Trigger MT5 symbols sync into symbols_with_categories (admin only)
+ */
+router.post('/symbols/sync', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { default: runSync } = await import('../scripts/sync_symbols_from_mt5.js');
+
+    // runSync already handles both ECN and STANDARD tokens and upserts data
+    await runSync();
+
+    // Return updated counts
+    const totalResult = await pool.query(
+      'SELECT COUNT(*) AS total FROM symbols_with_categories'
+    );
+
+    res.json({
+      success: true,
+      data: {
+        message: 'Symbols sync triggered successfully',
+        totalSymbols: parseInt(totalResult.rows[0]?.total || 0)
+      }
+    });
+  } catch (error) {
+    console.error('Symbols sync API error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/overview/stats
+ * Get overview statistics (admin only)
+ */
+router.get('/overview/stats', authenticateAdmin, async (req, res, next) => {
+  try {
+    // Total IBs
+    const totalIBsResult = await pool.query('SELECT COUNT(*) as count FROM ib_requests');
+    const totalIBs = parseInt(totalIBsResult.rows[0]?.count || 0);
+
+    // Approved IBs
+    const approvedIBsResult = await pool.query(
+      `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'approved'`
+    );
+    const approvedIBs = parseInt(approvedIBsResult.rows[0]?.count || 0);
+
+    // Pending IBs
+    const pendingIBsResult = await pool.query(
+      `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'pending'`
+    );
+    const pendingIBs = parseInt(pendingIBsResult.rows[0]?.count || 0);
+
+    // Rejected IBs
+    const rejectedIBsResult = await pool.query(
+      `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'rejected'`
+    );
+    const rejectedIBs = parseInt(rejectedIBsResult.rows[0]?.count || 0);
+
+    // Approval rate
+    const approvalRate = totalIBs > 0 ? ((approvedIBs / totalIBs) * 100).toFixed(1) : '0.0';
+
+    // Total referrals (users referred by IBs)
+    const totalReferralsResult = await pool.query(
+      `SELECT COUNT(*) as count 
+       FROM users u
+       WHERE u.referred_by IS NOT NULL 
+         AND EXISTS (
+           SELECT 1 FROM ib_requests ir 
+           JOIN users ib_user ON ir.user_id = ib_user.id 
+           WHERE ir.status = 'approved' 
+             AND ib_user.referral_code = u.referred_by
+         )`
+    );
+    const totalReferrals = parseInt(totalReferralsResult.rows[0]?.count || 0);
+
+    // Total commission and lots
+    let totalCommission = 0;
+    let totalLots = 0;
+    let ibsEarning = 0;
+    
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (commissionTableCheck.rows[0]?.exists) {
+      const commissionResult = await pool.query(
+        `SELECT 
+          COALESCE(SUM(amount), 0) as total_commission,
+          COALESCE(SUM(lots), 0) as total_lots,
+          COUNT(DISTINCT ib_id) as ibs_count
+         FROM ib_commissions`
+      );
+      totalCommission = parseFloat(commissionResult.rows[0]?.total_commission || 0);
+      totalLots = parseFloat(commissionResult.rows[0]?.total_lots || 0);
+      ibsEarning = parseInt(commissionResult.rows[0]?.ibs_count || 0);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        totalIBs,
+        approvedIBs,
+        pendingIBs,
+        rejectedIBs,
+        approvalRate: `${approvalRate}%`,
+        totalReferrals,
+        totalCommission: totalCommission.toFixed(2),
+        totalLots: totalLots.toFixed(2),
+        ibsEarning
+      }
+    });
+  } catch (error) {
+    console.error('Get overview stats error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/overview/commission-by-group
+ * Get commission breakdown by group with lots (admin only)
+ */
+router.get('/overview/commission-by-group', authenticateAdmin, async (req, res, next) => {
+  try {
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (!commissionTableCheck.rows[0]?.exists) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    // Get total commission for percentage calculation
+    const totalResult = await pool.query('SELECT COALESCE(SUM(amount), 0) as total FROM ib_commissions');
+    const totalCommission = parseFloat(totalResult.rows[0]?.total || 0);
+
+    // Get commission by group
+    const result = await pool.query(
+      `SELECT 
+        mg.id,
+        mg.dedicated_name,
+        mg.group_name,
+        COALESCE(SUM(ic.amount), 0) as total_commission,
+        COALESCE(SUM(ic.lots), 0) as total_lots
+       FROM mt5_groups mg
+       LEFT JOIN ib_commissions ic ON ic.group_id = mg.id
+       WHERE mg.is_active = TRUE 
+         AND LOWER(mg.group_name) NOT LIKE '%demo%'
+       GROUP BY mg.id, mg.dedicated_name, mg.group_name
+       ORDER BY total_commission DESC`
+    );
+
+    const groups = result.rows.map(row => {
+      const amount = parseFloat(row.total_commission || 0);
+      const lots = parseFloat(row.total_lots || 0);
+      const percentage = totalCommission > 0 ? ((amount / totalCommission) * 100).toFixed(1) : '0.0';
+      return {
+        id: row.id,
+        group: row.dedicated_name || row.group_name,
+        amount: amount.toFixed(2),
+        percentage: `${percentage}% of total`,
+        lots: `${lots.toFixed(2)} lots`
+      };
+    });
+
+    res.json({
+      success: true,
+      data: groups
+    });
+  } catch (error) {
+    console.error('Get overview commission by group error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/overview/ib-activity
+ * Get IB activity statistics (admin only)
+ */
+router.get('/overview/ib-activity', authenticateAdmin, async (req, res, next) => {
+  try {
+    // Approved IBs
+    const approvedIBsResult = await pool.query(
+      `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'approved'`
+    );
+    const approvedIBs = parseInt(approvedIBsResult.rows[0]?.count || 0);
+
+    // Total volume and trades from commission table
+    let totalVolume = 0;
+    let totalTrades = 0;
+    let avgCommissionLot = 0;
+    
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (commissionTableCheck.rows[0]?.exists) {
+      const activityResult = await pool.query(
+        `SELECT 
+          COALESCE(SUM(lots), 0) as total_volume,
+          COUNT(*) as total_trades,
+          COALESCE(SUM(amount), 0) as total_commission
+         FROM ib_commissions`
+      );
+      totalVolume = parseFloat(activityResult.rows[0]?.total_volume || 0);
+      totalTrades = parseInt(activityResult.rows[0]?.total_trades || 0);
+      const totalCommission = parseFloat(activityResult.rows[0]?.total_commission || 0);
+      avgCommissionLot = totalVolume > 0 ? (totalCommission / totalVolume) : 0;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        approvedIBs,
+        totalVolume: totalVolume.toFixed(2),
+        totalTrades: totalTrades.toLocaleString(),
+        avgCommissionLot: `$${avgCommissionLot.toFixed(2)}`
+      }
+    });
+  } catch (error) {
+    console.error('Get IB activity error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/overview/recent-requests
+ * Get recent IB requests with rate info (admin only)
+ */
+router.get('/overview/recent-requests', authenticateAdmin, async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit) || 5;
+    
+    const result = await pool.query(
+      `SELECT 
+        ir.id,
+        ir.status,
+        ir.ib_type,
+        ir.group_pip_commissions,
+        ir.created_at,
+        ir.approved_at,
+        u.first_name,
+        u.last_name,
+        u.email
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       ORDER BY ir.created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+
+    // Get groups for rate display
+    const groupsResult = await pool.query(
+      `SELECT id, dedicated_name, group_name 
+       FROM mt5_groups 
+       WHERE is_active = TRUE AND LOWER(group_name) NOT LIKE '%demo%'`
+    );
+    const groupsMap = new Map();
+    groupsResult.rows.forEach(g => {
+      groupsMap.set(g.id, g.dedicated_name || g.group_name);
+    });
+
+    const requests = result.rows.map(row => {
+      let rate = 'Not configured';
+      let rateGroups = '';
+      
+      if (row.group_pip_commissions) {
+        let pipComms = row.group_pip_commissions;
+        if (typeof pipComms === 'string') {
+          try {
+            pipComms = JSON.parse(pipComms);
+          } catch (e) {
+            pipComms = {};
+          }
+        }
+        
+        const rates = [];
+        Object.entries(pipComms).forEach(([groupId, pipValue]) => {
+          if (pipValue !== null && pipValue !== '' && pipValue !== undefined) {
+            const numValue = parseFloat(pipValue);
+            if (!isNaN(numValue) && numValue >= 0) {
+              rates.push(numValue);
+            }
+          }
+        });
+        
+        if (rates.length > 0) {
+          const avgRate = rates.reduce((sum, val) => sum + val, 0) / rates.length;
+          rate = `${avgRate.toFixed(2)} pip/lot`;
+          rateGroups = `${rates.length} group${rates.length > 1 ? 's' : ''}`;
+        }
+      }
+
+      return {
+        id: row.id,
+        name: `${row.first_name || ''} ${row.last_name || ''}`.trim() || `User #${row.user_id}`,
+        email: row.email,
+        rate,
+        rateGroups,
+        status: row.status.charAt(0).toUpperCase() + row.status.slice(1),
+        date: row.approved_at 
+          ? new Date(row.approved_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' })
+          : new Date(row.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' })
+      };
+    });
+
+    res.json({
+      success: true,
+      data: requests
+    });
+  } catch (error) {
+    console.error('Get recent requests error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/overview/top-earners
+ * Get top commission earners (admin only)
+ */
+router.get('/overview/top-earners', authenticateAdmin, async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit) || 5;
+    
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (!commissionTableCheck.rows[0]?.exists) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    // Get top earners with referral count
+    const result = await pool.query(
+      `SELECT 
+        ir.id as ib_request_id,
+        ir.user_id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.referral_code,
+        COALESCE(SUM(ic.amount), 0) as total_commission,
+        COALESCE(SUM(ic.lots), 0) as total_volume
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       LEFT JOIN ib_commissions ic ON ic.ib_id = ir.id
+       WHERE ir.status = 'approved'
+       GROUP BY ir.id, ir.user_id, u.first_name, u.last_name, u.email, u.referral_code
+       HAVING COALESCE(SUM(ic.amount), 0) > 0
+       ORDER BY total_commission DESC
+       LIMIT $1`,
+      [limit]
+    );
+
+    // Get referral counts for each IB
+    const earners = await Promise.all(result.rows.map(async (row) => {
+      const referralsResult = await pool.query(
+        `SELECT COUNT(*) as count FROM users WHERE referred_by = $1`,
+        [row.referral_code]
+      );
+      const referrals = parseInt(referralsResult.rows[0]?.count || 0);
+
+      return {
+        id: row.ib_request_id,
+        name: `${row.first_name || ''} ${row.last_name || ''}`.trim() || `User #${row.user_id}`,
+        email: row.email,
+        referrals: `${referrals} referral${referrals !== 1 ? 's' : ''}`,
+        commission: `$${parseFloat(row.total_commission || 0).toFixed(2)}`,
+        volume: `${parseFloat(row.total_volume || 0).toFixed(2)} lots`
+      };
+    }));
+
+    res.json({
+      success: true,
+      data: earners
+    });
+  } catch (error) {
+    console.error('Get top earners error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/overview/recent-activity
+ * Get recent activity (last 7 days) (admin only)
+ */
+router.get('/overview/recent-activity', authenticateAdmin, async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit) || 5;
+    
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (!commissionTableCheck.rows[0]?.exists) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    // Get recent activity (last 7 days) grouped by IB
+    const result = await pool.query(
+      `SELECT 
+        ir.id as ib_request_id,
+        ir.user_id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        COALESCE(SUM(ic.amount), 0) as total_commission,
+        COALESCE(SUM(ic.lots), 0) as total_volume
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       LEFT JOIN ib_commissions ic ON ic.ib_id = ir.id 
+         AND ic.created_at >= NOW() - INTERVAL '7 days'
+       WHERE ir.status = 'approved'
+       GROUP BY ir.id, ir.user_id, u.first_name, u.last_name, u.email
+       HAVING COALESCE(SUM(ic.amount), 0) > 0
+       ORDER BY total_commission DESC
+       LIMIT $1`,
+      [limit]
+    );
+
+    const activity = result.rows.map(row => ({
+      id: row.ib_request_id,
+      name: `${row.first_name || ''} ${row.last_name || ''}`.trim() || `User #${row.user_id}`,
+      email: row.email,
+      commission: `$${parseFloat(row.total_commission || 0).toFixed(2)}`,
+      period: 'Last 7 days',
+      volume: `${parseFloat(row.total_volume || 0).toFixed(2)} lots`
+    }));
+
+    res.json({
+      success: true,
+      data: activity
+    });
+  } catch (error) {
+    console.error('Get recent activity error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/overview/system-summary
+ * Get complete system summary statistics (admin only)
+ */
+router.get('/overview/system-summary', authenticateAdmin, async (req, res, next) => {
+  try {
+    // IB Statistics
+    const totalIBsResult = await pool.query('SELECT COUNT(*) as count FROM ib_requests');
+    const totalIBs = parseInt(totalIBsResult.rows[0]?.count || 0);
+    
+    const approvedResult = await pool.query(
+      `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'approved'`
+    );
+    const approved = parseInt(approvedResult.rows[0]?.count || 0);
+    
+    const pendingResult = await pool.query(
+      `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'pending'`
+    );
+    const pending = parseInt(pendingResult.rows[0]?.count || 0);
+    
+    const rejectedResult = await pool.query(
+      `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'rejected'`
+    );
+    const rejected = parseInt(rejectedResult.rows[0]?.count || 0);
+    
+    const approvalRate = totalIBs > 0 ? ((approved / totalIBs) * 100).toFixed(1) : '0.0';
+
+    // IBs earning commission
+    let ibsEarning = 0;
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (commissionTableCheck.rows[0]?.exists) {
+      const earningResult = await pool.query(
+        `SELECT COUNT(DISTINCT ib_id) as count FROM ib_commissions WHERE amount > 0`
+      );
+      ibsEarning = parseInt(earningResult.rows[0]?.count || 0);
+    }
+
+    // Trading Statistics
+    let totalVolume = '0.00';
+    let totalTrades = '0';
+    let avgVolumePerTrade = '0.00';
+    let totalReferrals = 0;
+    let totalClients = 0;
+    let ibsWithReferrals = 0;
+    
+    if (commissionTableCheck.rows[0]?.exists) {
+      const tradingResult = await pool.query(
+        `SELECT 
+          COALESCE(SUM(lots), 0) as volume,
+          COUNT(*) as trades
+         FROM ib_commissions`
+      );
+      totalVolume = parseFloat(tradingResult.rows[0]?.volume || 0).toFixed(2);
+      totalTrades = parseInt(tradingResult.rows[0]?.trades || 0).toLocaleString();
+      const tradesCount = parseInt(tradingResult.rows[0]?.trades || 0);
+      avgVolumePerTrade = tradesCount > 0 ? (parseFloat(totalVolume) / tradesCount).toFixed(2) : '0.00';
+    }
+
+    // Total referrals
+    const referralsResult = await pool.query(
+      `SELECT COUNT(*) as count 
+       FROM users u
+       WHERE u.referred_by IS NOT NULL 
+         AND EXISTS (
+           SELECT 1 FROM ib_requests ir 
+           JOIN users ib_user ON ir.user_id = ib_user.id 
+           WHERE ir.status = 'approved' 
+             AND ib_user.referral_code = u.referred_by
+         )`
+    );
+    totalReferrals = parseInt(referralsResult.rows[0]?.count || 0);
+
+    // Total clients (users with trading accounts)
+    const clientsResult = await pool.query(
+      `SELECT COUNT(DISTINCT user_id) as count 
+       FROM trading_accounts 
+       WHERE platform = 'MT5' AND is_demo = FALSE`
+    );
+    totalClients = parseInt(clientsResult.rows[0]?.count || 0);
+
+    // IBs with referrals
+    const ibsWithRefsResult = await pool.query(
+      `SELECT COUNT(DISTINCT ir.id) as count
+       FROM ib_requests ir
+       JOIN users ib_user ON ir.user_id = ib_user.id
+       WHERE ir.status = 'approved'
+         AND EXISTS (
+           SELECT 1 FROM users u 
+           WHERE u.referred_by = ib_user.referral_code
+         )`
+    );
+    ibsWithReferrals = parseInt(ibsWithRefsResult.rows[0]?.count || 0);
+
+    // Commission Statistics
+    let totalCommission = '$0.00';
+    let avgCommissionPerLot = '$0.00';
+    let commissionPerTrade = '$0.00';
+    let avgPerEarningIB = '$0.00';
+    
+    if (commissionTableCheck.rows[0]?.exists) {
+      const commStatsResult = await pool.query(
+        `SELECT 
+          COALESCE(SUM(amount), 0) as total,
+          COALESCE(SUM(lots), 0) as lots,
+          COUNT(*) as trades
+         FROM ib_commissions`
+      );
+      const commTotal = parseFloat(commStatsResult.rows[0]?.total || 0);
+      const commLots = parseFloat(commStatsResult.rows[0]?.lots || 0);
+      const commTrades = parseInt(commStatsResult.rows[0]?.trades || 0);
+      
+      totalCommission = `$${commTotal.toFixed(2)}`;
+      avgCommissionPerLot = commLots > 0 ? `$${(commTotal / commLots).toFixed(2)}` : '$0.00';
+      commissionPerTrade = commTrades > 0 ? `$${(commTotal / commTrades).toFixed(2)}` : '$0.00';
+      avgPerEarningIB = ibsEarning > 0 ? `$${(commTotal / ibsEarning).toFixed(2)}` : '$0.00';
+    }
+
+    // Performance Metrics
+    const volumePerIB = approved > 0 ? (parseFloat(totalVolume) / approved).toFixed(2) : '0.00';
+    const commissionPerIB = approved > 0 ? (parseFloat(totalCommission.replace('$', '')) / approved).toFixed(2) : '0.00';
+    const referralsPerIB = approved > 0 ? (totalReferrals / approved).toFixed(1) : '0.0';
+    const avgReferralsActive = ibsWithReferrals > 0 ? (totalReferrals / ibsWithReferrals).toFixed(1) : '0.0';
+
+    res.json({
+      success: true,
+      data: {
+        ibStatistics: {
+          totalIBs: totalIBs.toString(),
+          approved: approved.toString(),
+          pending: pending.toString(),
+          rejected: rejected.toString(),
+          approvalRate: `${approvalRate}%`,
+          ibsEarning: ibsEarning.toString()
+        },
+        tradingStatistics: {
+          totalVolume: `${totalVolume} lots`,
+          totalTrades,
+          avgVolumePerTrade: `${avgVolumePerTrade} lots`,
+          totalReferrals: totalReferrals.toString(),
+          totalClients: totalClients.toString(),
+          ibsWithReferrals: ibsWithReferrals.toString()
+        },
+        commissionStatistics: {
+          totalCommission,
+          avgCommissionPerLot,
+          commissionPerTrade,
+          ibsEarning: `${ibsEarning}/${approved}`,
+          avgPerEarningIB
+        },
+        performanceMetrics: {
+          activeIBs: approved.toString(),
+          volumePerIB: `${volumePerIB} lots`,
+          commissionPerIB: `$${commissionPerIB}`,
+          referralsPerIB,
+          avgReferralsActive
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get system summary error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/commission-distribution/summary
+ * Get commission distribution summary stats (admin only)
+ */
+router.get('/commission-distribution/summary', authenticateAdmin, async (req, res, next) => {
+  try {
+    // Total approved IBs
+    const approvedIBsResult = await pool.query(
+      `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'approved'`
+    );
+    const totalApprovedIBs = parseInt(approvedIBsResult.rows[0]?.count || 0);
+
+    // Total direct clients (users referred by IBs who are not IBs themselves)
+    const directClientsResult = await pool.query(
+      `SELECT COUNT(DISTINCT u.id) as count
+       FROM users u
+       JOIN ib_requests ir ON ir.user_id = (
+         SELECT ib_user.id FROM users ib_user 
+         WHERE ib_user.referral_code = u.referred_by
+         LIMIT 1
+       )
+       WHERE u.referred_by IS NOT NULL
+         AND ir.status = 'approved'
+         AND NOT EXISTS (
+           SELECT 1 FROM ib_requests ir2 
+           WHERE ir2.user_id = u.id AND ir2.status = 'approved'
+         )`
+    );
+    const totalDirectClients = parseInt(directClientsResult.rows[0]?.count || 0);
+
+    // Total Sub-IBs (IBs with referrer_ib_id set)
+    const subIBsResult = await pool.query(
+      `SELECT COUNT(*) as count 
+       FROM ib_requests 
+       WHERE status = 'approved' 
+         AND referrer_ib_id IS NOT NULL`
+    );
+    const totalSubIBs = parseInt(subIBsResult.rows[0]?.count || 0);
+
+    // Total IB balance (sum of all commission from commission table)
+    let totalIBBalance = 0;
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (commissionTableCheck.rows[0]?.exists) {
+      const balanceResult = await pool.query(
+        `SELECT COALESCE(SUM(amount), 0) as total FROM ib_commissions`
+      );
+      totalIBBalance = parseFloat(balanceResult.rows[0]?.total || 0);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        totalApprovedIBs,
+        totalDirectClients,
+        totalSubIBs,
+        totalIBBalance: totalIBBalance.toFixed(2)
+      }
+    });
+  } catch (error) {
+    console.error('Get commission distribution summary error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/commission-distribution/list
+ * Get all IBs with commission distribution data (admin only)
+ */
+router.get('/commission-distribution/list', authenticateAdmin, async (req, res, next) => {
+  try {
+    // Get all approved IBs with their details
+    const ibsResult = await pool.query(
+      `SELECT 
+        ir.id,
+        ir.status,
+        ir.ib_type,
+        ir.referrer_ib_id,
+        ir.group_pip_commissions,
+        ir.approved_at,
+        ir.created_at,
+        u.id as user_id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.phone_code,
+        u.phone_number,
+        u.referral_code
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       WHERE ir.status = 'approved'
+       ORDER BY ir.approved_at DESC, ir.created_at DESC`
+    );
+
+    // Get groups for rate calculation
+    const groupsResult = await pool.query(
+      `SELECT id, dedicated_name, group_name 
+       FROM mt5_groups 
+       WHERE is_active = TRUE AND LOWER(group_name) NOT LIKE '%demo%'`
+    );
+    const groupsMap = new Map();
+    groupsResult.rows.forEach(g => {
+      groupsMap.set(g.id, g.dedicated_name || g.group_name);
+    });
+
+    // Check if commission table exists
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    const hasCommissionTable = commissionTableCheck.rows[0]?.exists;
+
+    // Process each IB
+    const ibs = await Promise.all(ibsResult.rows.map(async (ib) => {
+      // Calculate IB rate (average from group_pip_commissions)
+      let ibRate = '0.00';
+      if (ib.group_pip_commissions) {
+        let pipComms = ib.group_pip_commissions;
+        if (typeof pipComms === 'string') {
+          try {
+            pipComms = JSON.parse(pipComms);
+          } catch (e) {
+            pipComms = {};
+          }
+        }
+        
+        const rates = [];
+        Object.entries(pipComms).forEach(([groupId, pipValue]) => {
+          if (pipValue !== null && pipValue !== '' && pipValue !== undefined) {
+            const numValue = parseFloat(pipValue);
+            if (!isNaN(numValue) && numValue >= 0) {
+              rates.push(numValue);
+            }
+          }
+        });
+        
+        if (rates.length > 0) {
+          const avgRate = rates.reduce((sum, val) => sum + val, 0) / rates.length;
+          ibRate = avgRate.toFixed(2);
+        }
+      }
+
+      // Count direct clients (users referred by this IB who are not IBs)
+      const directClientsResult = await pool.query(
+        `SELECT COUNT(DISTINCT u.id) as count
+         FROM users u
+         WHERE u.referred_by = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM ib_requests ir2 
+             WHERE ir2.user_id = u.id AND ir2.status = 'approved'
+           )`,
+        [ib.referral_code]
+      );
+      const directClients = parseInt(directClientsResult.rows[0]?.count || 0);
+
+      // Count sub-IBs (IBs with this IB as referrer)
+      const subIBsResult = await pool.query(
+        `SELECT COUNT(*) as count 
+         FROM ib_requests 
+         WHERE referrer_ib_id = $1 AND status = 'approved'`,
+        [ib.id]
+      );
+      const subIBs = parseInt(subIBsResult.rows[0]?.count || 0);
+
+      // Total referrals (direct clients + sub-IBs)
+      const totalReferrals = directClients + subIBs;
+
+      // Get commission data if table exists
+      let totalBalance = 0;
+      let commission = 0;
+      let totalLots = 0;
+      let totalTrades = 0;
+
+      if (hasCommissionTable) {
+        const commissionResult = await pool.query(
+          `SELECT 
+            COALESCE(SUM(amount), 0) as total_commission,
+            COALESCE(SUM(lots), 0) as total_lots,
+            COUNT(*) as total_trades
+           FROM ib_commissions
+           WHERE ib_id = $1`,
+          [ib.id]
+        );
+        commission = parseFloat(commissionResult.rows[0]?.total_commission || 0);
+        totalBalance = commission; // For now, balance = commission
+        totalLots = parseFloat(commissionResult.rows[0]?.total_lots || 0);
+        totalTrades = parseInt(commissionResult.rows[0]?.total_trades || 0);
+      } else {
+        // Calculate estimated commission from trading accounts of referred users
+        const referredUsersResult = await pool.query(
+          `SELECT u.id
+           FROM users u
+           WHERE u.referred_by = $1`,
+          [ib.referral_code]
+        );
+        
+        if (referredUsersResult.rows.length > 0) {
+          const userIds = referredUsersResult.rows.map(r => r.id);
+          const placeholders = userIds.map((_, i) => `$${i + 1}`).join(',');
+          
+          // Get total balance from trading accounts
+          const balanceResult = await pool.query(
+            `SELECT 
+              COALESCE(SUM(balance), 0) as total_balance
+             FROM trading_accounts
+             WHERE user_id IN (${placeholders})
+               AND platform = 'MT5'
+               AND is_demo = FALSE
+               AND account_status = 'active'`,
+            userIds
+          );
+          totalBalance = parseFloat(balanceResult.rows[0]?.total_balance || 0);
+          
+          // Estimate commission (simplified: 0.1% of balance as placeholder)
+          commission = totalBalance * 0.001;
+        }
+      }
+
+      // Format phone
+      const phone = ib.phone_code && ib.phone_number 
+        ? `${ib.phone_code}${ib.phone_number}` 
+        : 'N/A';
+
+      // Format dates
+      const approvedDate = ib.approved_at 
+        ? new Date(ib.approved_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' })
+        : new Date(ib.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' });
+      
+      const memberSince = new Date(ib.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' });
+
+      return {
+        id: ib.id,
+        name: `${ib.first_name || ''} ${ib.last_name || ''}`.trim() || `User #${ib.user_id}`,
+        email: ib.email,
+        approvedDate,
+        ibRate,
+        directClients,
+        subIBs,
+        totalReferrals,
+        totalBalance: `$${totalBalance.toFixed(2)}`,
+        commission: `$${commission.toFixed(2)}`,
+        phone,
+        memberSince,
+        totalLots: totalLots.toFixed(2),
+        totalTrades
+      };
+    }));
+
+    res.json({
+      success: true,
+      data: ibs
+    });
+  } catch (error) {
+    console.error('Get commission distribution list error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/commission-distribution/:id/calculation
+ * Get detailed commission calculation for a specific IB (admin only)
+ */
+router.get('/commission-distribution/:id/calculation', authenticateAdmin, async (req, res, next) => {
+  try {
+    const ibRequestId = parseInt(req.params.id);
+
+    // Get IB details
+    const ibResult = await pool.query(
+      `SELECT 
+        ir.id,
+        ir.user_id,
+        ir.ib_type,
+        ir.referrer_ib_id,
+        ir.group_pip_commissions,
+        u.referral_code,
+        u.first_name,
+        u.last_name,
+        u.email
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       WHERE ir.id = $1 AND ir.status = 'approved'`,
+      [ibRequestId]
+    );
+
+    if (ibResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'IB not found'
+      });
+    }
+
+    const ib = ibResult.rows[0];
+
+    // Get IB rate
+    let ibRate = 0;
+    if (ib.group_pip_commissions) {
+      let pipComms = ib.group_pip_commissions;
+      if (typeof pipComms === 'string') {
+        try {
+          pipComms = JSON.parse(pipComms);
+        } catch (e) {
+          pipComms = {};
+        }
+      }
+      
+      const rates = [];
+      Object.entries(pipComms).forEach(([groupId, pipValue]) => {
+        if (pipValue !== null && pipValue !== '' && pipValue !== undefined) {
+          const numValue = parseFloat(pipValue);
+          if (!isNaN(numValue) && numValue >= 0) {
+            rates.push(numValue);
+          }
+        }
+      });
+      
+      if (rates.length > 0) {
+        ibRate = rates.reduce((sum, val) => sum + val, 0) / rates.length;
+      }
+    }
+
+    // Check if commission table exists
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    const hasCommissionTable = commissionTableCheck.rows[0]?.exists;
+
+    // Direct client commission
+    let directCommission = 0;
+    let directLots = 0;
+    let directTrades = 0;
+    const directClientsData = [];
+
+    if (hasCommissionTable) {
+      // Get commission from direct clients (non-IB users)
+      const directResult = await pool.query(
+        `SELECT 
+          ic.id,
+          ic.symbol,
+          ic.lots,
+          ic.amount,
+          ic.created_at,
+          u.first_name,
+          u.last_name,
+          u.email
+         FROM ib_commissions ic
+         JOIN users u ON ic.user_id = u.id
+         WHERE ic.ib_id = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM ib_requests ir2 
+             WHERE ir2.user_id = u.id AND ir2.status = 'approved'
+           )`,
+        [ibRequestId]
+      );
+
+      directResult.rows.forEach(row => {
+        directCommission += parseFloat(row.amount || 0);
+        directLots += parseFloat(row.lots || 0);
+        directTrades += 1;
+        directClientsData.push({
+          client: `${row.first_name || ''} ${row.last_name || ''}`.trim() || row.email,
+          email: row.email,
+          trades: 1,
+          lots: parseFloat(row.lots || 0).toFixed(2),
+          commission: `$${parseFloat(row.amount || 0).toFixed(2)}`
+        });
+      });
+    } else {
+      // Calculate from trading accounts of direct clients
+      const directClientsResult = await pool.query(
+        `SELECT u.id, u.first_name, u.last_name, u.email
+         FROM users u
+         WHERE u.referred_by = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM ib_requests ir2 
+             WHERE ir2.user_id = u.id AND ir2.status = 'approved'
+           )`,
+        [ib.referral_code]
+      );
+
+      for (const client of directClientsResult.rows) {
+        const accountsResult = await pool.query(
+          `SELECT 
+            COALESCE(SUM(balance), 0) as total_balance
+           FROM trading_accounts
+           WHERE user_id = $1
+             AND platform = 'MT5'
+             AND is_demo = FALSE
+             AND account_status = 'active'`,
+          [client.id]
+        );
+        
+        const balance = parseFloat(accountsResult.rows[0]?.total_balance || 0);
+        const estimatedCommission = balance * 0.001; // Placeholder calculation
+        
+        directCommission += estimatedCommission;
+        directClientsData.push({
+          client: `${client.first_name || ''} ${client.last_name || ''}`.trim() || client.email,
+          email: client.email,
+          trades: 0,
+          lots: '0.00',
+          commission: `$${estimatedCommission.toFixed(2)}`
+        });
+      }
+    }
+
+    // Residual commission from Sub-IBs
+    let residualCommission = 0;
+    let residualLots = 0;
+    const subIBsData = [];
+
+    // Get sub-IBs
+    const subIBsResult = await pool.query(
+      `SELECT 
+        ir2.id,
+        ir2.group_pip_commissions,
+        u2.first_name,
+        u2.last_name,
+        u2.email
+       FROM ib_requests ir2
+       JOIN users u2 ON ir2.user_id = u2.id
+       WHERE ir2.referrer_ib_id = $1 AND ir2.status = 'approved'`,
+      [ibRequestId]
+    );
+
+    for (const subIB of subIBsResult.rows) {
+      // Get sub-IB rate
+      let subIBRate = 0;
+      if (subIB.group_pip_commissions) {
+        let pipComms = subIB.group_pip_commissions;
+        if (typeof pipComms === 'string') {
+          try {
+            pipComms = JSON.parse(pipComms);
+          } catch (e) {
+            pipComms = {};
+          }
+        }
+        
+        const rates = [];
+        Object.entries(pipComms).forEach(([groupId, pipValue]) => {
+          if (pipValue !== null && pipValue !== '' && pipValue !== undefined) {
+            const numValue = parseFloat(pipValue);
+            if (!isNaN(numValue) && numValue >= 0) {
+              rates.push(numValue);
+            }
+          }
+        });
+        
+        if (rates.length > 0) {
+          subIBRate = rates.reduce((sum, val) => sum + val, 0) / rates.length;
+        }
+      }
+
+      // Calculate residual (difference between master IB rate and sub-IB rate)
+      const residualRate = Math.max(0, ibRate - subIBRate);
+
+      // Get sub-IB commission data
+      let subIBCommission = 0;
+      let subIBLots = 0;
+      let subIBTrades = 0;
+
+      if (hasCommissionTable) {
+        const subIBCommResult = await pool.query(
+          `SELECT 
+            COALESCE(SUM(amount), 0) as total_commission,
+            COALESCE(SUM(lots), 0) as total_lots,
+            COUNT(*) as total_trades
+           FROM ib_commissions
+           WHERE ib_id = $1`,
+          [subIB.id]
+        );
+        subIBCommission = parseFloat(subIBCommResult.rows[0]?.total_commission || 0);
+        subIBLots = parseFloat(subIBCommResult.rows[0]?.total_lots || 0);
+        subIBTrades = parseInt(subIBCommResult.rows[0]?.total_trades || 0);
+      }
+
+      // Calculate residual commission
+      const residual = subIBLots > 0 ? (subIBLots * residualRate) : 0;
+      residualCommission += residual;
+      residualLots += subIBLots;
+
+      subIBsData.push({
+        subIB: `${subIB.first_name || ''} ${subIB.last_name || ''}`.trim() || subIB.email,
+        email: subIB.email,
+        rate: subIBRate.toFixed(2),
+        trades: subIBTrades,
+        lots: subIBLots.toFixed(2),
+        residual: `$${residual.toFixed(2)}`
+      });
+    }
+
+    // Total commission
+    const totalCommission = directCommission + residualCommission;
+    const totalLots = directLots + residualLots;
+    const totalTrades = directTrades;
+
+    // Distributed commission (if tracking table exists)
+    let distributedCommission = 0;
+    // TODO: Add distributed commission tracking if needed
+
+    res.json({
+      success: true,
+      data: {
+        ibId: ibRequestId,
+        ibName: `${ib.first_name || ''} ${ib.last_name || ''}`.trim() || ib.email,
+        ibRate: ibRate.toFixed(2),
+        directCommission: directCommission.toFixed(2),
+        residualCommission: residualCommission.toFixed(2),
+        totalCommission: totalCommission.toFixed(2),
+        distributedCommission: distributedCommission.toFixed(2),
+        totalLots: totalLots.toFixed(2),
+        totalTrades,
+        directClients: directClientsData,
+        subIBs: subIBsData
+      }
+    });
+  } catch (error) {
+    console.error('Get commission calculation error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/commission-distribution/:id/details
+ * Get detailed IB information for commission distribution (admin only)
+ */
+router.get('/commission-distribution/:id/details', authenticateAdmin, async (req, res, next) => {
+  try {
+    const ibRequestId = parseInt(req.params.id);
+
+    // Get IB details
+    const ibResult = await pool.query(
+      `SELECT 
+        ir.id,
+        ir.user_id,
+        ir.ib_type,
+        ir.referrer_ib_id,
+        ir.group_pip_commissions,
+        ir.approved_at,
+        ir.created_at,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.phone_code,
+        u.phone_number,
+        u.referral_code
+       FROM ib_requests ir
+       JOIN users u ON ir.user_id = u.id
+       WHERE ir.id = $1 AND ir.status = 'approved'`,
+      [ibRequestId]
+    );
+
+    if (ibResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'IB not found'
+      });
+    }
+
+    const ib = ibResult.rows[0];
+
+    // Get IB rate
+    let ibRate = '0.00';
+    if (ib.group_pip_commissions) {
+      let pipComms = ib.group_pip_commissions;
+      if (typeof pipComms === 'string') {
+        try {
+          pipComms = JSON.parse(pipComms);
+        } catch (e) {
+          pipComms = {};
+        }
+      }
+      
+      const rates = [];
+      Object.entries(pipComms).forEach(([groupId, pipValue]) => {
+        if (pipValue !== null && pipValue !== '' && pipValue !== undefined) {
+          const numValue = parseFloat(pipValue);
+          if (!isNaN(numValue) && numValue >= 0) {
+            rates.push(numValue);
+          }
+        }
+      });
+      
+      if (rates.length > 0) {
+        const avgRate = rates.reduce((sum, val) => sum + val, 0) / rates.length;
+        ibRate = avgRate.toFixed(2);
+      }
+    }
+
+    // Get commission stats
+    let totalTrades = 0;
+    let totalLots = 0;
+    let totalCommission = 0;
+    let estimatedEarnings = 0;
+
+    const commissionTableCheck = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'ib_commissions'
+      )`
+    );
+    
+    if (commissionTableCheck.rows[0]?.exists) {
+      const commResult = await pool.query(
+        `SELECT 
+          COALESCE(SUM(amount), 0) as total_commission,
+          COALESCE(SUM(lots), 0) as total_lots,
+          COUNT(*) as total_trades
+         FROM ib_commissions
+         WHERE ib_id = $1`,
+        [ibRequestId]
+      );
+      totalCommission = parseFloat(commResult.rows[0]?.total_commission || 0);
+      totalLots = parseFloat(commResult.rows[0]?.total_lots || 0);
+      totalTrades = parseInt(commResult.rows[0]?.total_trades || 0);
+      estimatedEarnings = totalCommission;
+    }
+
+    // Get direct clients
+    const directClientsResult = await pool.query(
+      `SELECT 
+        u.id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        COUNT(DISTINCT ta.id) as account_count,
+        COALESCE(SUM(ta.balance), 0) as total_balance
+       FROM users u
+       LEFT JOIN trading_accounts ta ON ta.user_id = u.id 
+         AND ta.platform = 'MT5' 
+         AND ta.is_demo = FALSE 
+         AND ta.account_status = 'active'
+       WHERE u.referred_by = $1
+         AND NOT EXISTS (
+           SELECT 1 FROM ib_requests ir2 
+           WHERE ir2.user_id = u.id AND ir2.status = 'approved'
+         )
+       GROUP BY u.id, u.first_name, u.last_name, u.email`,
+      [ib.referral_code]
+    );
+
+    const directClients = directClientsResult.rows.map(row => ({
+      name: `${row.first_name || ''} ${row.last_name || ''}`.trim() || row.email,
+      email: row.email,
+      accounts: parseInt(row.account_count || 0),
+      balance: `$${parseFloat(row.total_balance || 0).toFixed(2)}`
+    }));
+
+    // Get sub-IBs
+    const subIBsResult = await pool.query(
+      `SELECT 
+        ir2.id,
+        ir2.group_pip_commissions,
+        u2.first_name,
+        u2.last_name,
+        u2.email,
+        COUNT(DISTINCT ta.id) as account_count
+       FROM ib_requests ir2
+       JOIN users u2 ON ir2.user_id = u2.id
+       LEFT JOIN trading_accounts ta ON ta.user_id = u2.id 
+         AND ta.platform = 'MT5' 
+         AND ta.is_demo = FALSE 
+         AND ta.account_status = 'active'
+       WHERE ir2.referrer_ib_id = $1 AND ir2.status = 'approved'
+       GROUP BY ir2.id, ir2.group_pip_commissions, u2.first_name, u2.last_name, u2.email`,
+      [ibRequestId]
+    );
+
+    const subIBs = subIBsResult.rows.map(row => {
+      let subIBRate = '0.00';
+      if (row.group_pip_commissions) {
+        let pipComms = row.group_pip_commissions;
+        if (typeof pipComms === 'string') {
+          try {
+            pipComms = JSON.parse(pipComms);
+          } catch (e) {
+            pipComms = {};
+          }
+        }
+        
+        const rates = [];
+        Object.entries(pipComms).forEach(([groupId, pipValue]) => {
+          if (pipValue !== null && pipValue !== '' && pipValue !== undefined) {
+            const numValue = parseFloat(pipValue);
+            if (!isNaN(numValue) && numValue >= 0) {
+              rates.push(numValue);
+            }
+          }
+        });
+        
+        if (rates.length > 0) {
+          const avgRate = rates.reduce((sum, val) => sum + val, 0) / rates.length;
+          subIBRate = avgRate.toFixed(2);
+        }
+      }
+
+      return {
+        name: `${row.first_name || ''} ${row.last_name || ''}`.trim() || row.email,
+        email: row.email,
+        ibRate: subIBRate,
+        accounts: parseInt(row.account_count || 0)
+      };
+    });
+
+    // Format phone
+    const phone = ib.phone_code && ib.phone_number 
+      ? `${ib.phone_code}${ib.phone_number}` 
+      : 'N/A';
+
+    // Format dates
+    const approvedDate = ib.approved_at 
+      ? new Date(ib.approved_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' })
+      : new Date(ib.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' });
+    
+    const memberSince = new Date(ib.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' });
+
+    res.json({
+      success: true,
+      data: {
+        id: ib.id,
+        name: `${ib.first_name || ''} ${ib.last_name || ''}`.trim() || ib.email,
+        email: ib.email,
+        phone,
+        ibRate,
+        approvedDate,
+        memberSince,
+        totalTrades,
+        totalLots: totalLots.toFixed(2),
+        totalCommission: `$${totalCommission.toFixed(2)}`,
+        estimatedEarnings: `$${estimatedEarnings.toFixed(2)}`,
+        directClients,
+        subIBs
+      }
+    });
+  } catch (error) {
+    console.error('Get IB details error:', error);
     next(error);
   }
 });

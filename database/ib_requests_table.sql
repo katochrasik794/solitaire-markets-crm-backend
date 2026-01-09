@@ -33,3 +33,6 @@ CREATE INDEX IF NOT EXISTS idx_ib_requests_created_at ON ib_requests(created_at 
 -- ALTER TABLE users ADD COLUMN IF NOT EXISTS is_ib BOOLEAN DEFAULT FALSE;
 -- CREATE INDEX IF NOT EXISTS idx_users_is_ib ON users(is_ib);
 
+
+
+
