@@ -1,7 +1,12 @@
 import dotenv from 'dotenv';
+import path from 'path';
 import pool from '../config/database.js';
+import { fileURLToPath } from 'url';
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, '../.env') });
 
 // Base MT5 URL (same as mt5.service.js)
 const MT5_API_URL = process.env.MT5_API_URL || 'http://13.43.216.232:5003/api';
@@ -16,15 +21,46 @@ const STANDARD_TOKEN =
   process.env.MT5_STANDARD_SYMBOLS_TOKEN ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRfaWQiOiJjbGllbnRfNjM5MDMzNjYxNzg0MDMxNDE3XzI1NTUiLCJhY2NvdW50X2lkIjoiNzk1MDQ0IiwiZW1haWwiOiIiLCJ1bmlxdWVfbmFtZSI6Ik1UNSBBY2NvdW50IDc5NTA0NCIsInJvbGUiOiJDbGllbnQiLCJ0b2tlbl90eXBlIjoiY2xpZW50IiwibmJmIjoxNzY3NzY5Mzc4LCJleHAiOjE3OTkzMDUzNzgsImlhdCI6MTc2Nzc2OTM3OCwiaXNzIjoiTVQ1TWFuYWdlckFQSSIsImF1ZCI6Ik1UNU1hbmFnZXJBUElVc2VycyJ9.hX1WdaqZqNkAEmxJGWGscBgACgF3MLLnSfl5i5xxAIc';
 
-const ACCOUNT_TYPES = {
-  ECN: ECN_TOKEN,
-  STANDARD: STANDARD_TOKEN
+const ACCOUNT_CREDENTIALS = {
+  ECN: {
+    accountId: 795049,
+    password: 'Finovo@123'
+  },
+  STANDARD: {
+    accountId: 795050,
+    password: 'Finovo@123'
+  }
 };
 
 const forexSymbols = ['EUR', 'USD', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD'];
 const metalsSymbols = ['XAU', 'XAG', 'GOLD', 'SILVER'];
 const indicesSymbols = ['US30', 'US500', 'NAS100', 'UK100', 'GER30', 'SPX', 'DJI', 'NDX'];
 const cryptoSymbols = ['BTC', 'ETH', 'XRP', 'LTC', 'ADA', 'DOGE', 'SOL', 'BNB'];
+
+async function getMT5Token(accountId, password) {
+  console.log(`🔑 Logging in to MT5 for account ${accountId}...`);
+  try {
+    const res = await fetch(`${MT5_API_URL}/client/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId, password })
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || 'Login failed');
+    }
+
+    if (data.Token) return data.Token;
+    if (data.data && data.data.token) return data.data.token;
+    if (data.data && typeof data.data === 'string') return data.data;
+
+    throw new Error('No token returned from MT5 login');
+  } catch (error) {
+    console.error(`❌ MT5 Login failed for ${accountId}:`, error.message);
+    throw error;
+  }
+}
 
 function categorizeSymbol(symbol = '') {
   const s = symbol.toUpperCase();
@@ -34,7 +70,7 @@ function categorizeSymbol(symbol = '') {
   if (indicesSymbols.some((i) => s.includes(i))) return 'Indices';
 
   // Simple forex detection: contains '/' or is 6 letters currency pair
-  if (s.includes('/') || (s.length === 6 && forexSymbols.some((c) => s.startsWith(c)))) {
+  if (s.includes('/') || (s.length >= 6 && forexSymbols.some((c) => s.startsWith(c)))) {
     return 'Forex';
   }
 
@@ -70,116 +106,97 @@ async function fetchSymbolsForToken(accountType, token) {
   return symbols;
 }
 
-async function upsertSymbols(accountType, symbols) {
+async function upsertSymbols(accountType, symbols, onProgress = null) {
   const client = await pool.connect();
+  let inserted = 0;
+  let skipped = 0;
+  const total = symbols.length;
 
   try {
-    await client.query('BEGIN');
+    const batchSize = 50;
+    for (let i = 0; i < symbols.length; i += batchSize) {
+      const batch = symbols.slice(i, i + batchSize);
+      await client.query('BEGIN');
 
-    for (const sym of symbols) {
-      const symbol = sym.symbol || sym.Symbol || sym.name;
-      if (!symbol) continue;
+      for (const sym of batch) {
+        const symbol = sym.symbol || sym.Symbol || sym.name;
+        if (!symbol) continue;
 
-      const pair =
-        sym.pair || sym.Pair || sym.description || sym.Description || sym.SymbolDescription || null;
+        let groupName = accountType.toUpperCase() === 'ECN' ? 'ECN' : 'Standard';
+        if (sym.Path) {
+          const upPath = sym.Path.toUpperCase();
+          if (upPath.includes('ECN')) groupName = 'ECN';
+          else if (upPath.includes('STD')) groupName = 'Standard';
+        }
 
-      // Group from API if present; otherwise fall back to accountType
-      const groupName =
-        sym.group_name || sym.Group || sym.group || sym.symbolGroup || accountType;
-
-      const category = sym.category || categorizeSymbol(symbol);
-
-      const pipPerLotRaw = sym.pip_per_lot ?? sym.PipPerLot ?? null;
-      const pipValueRaw = sym.pip_value ?? sym.PipValue ?? null;
-      const commissionRaw = sym.commission ?? sym.Commission ?? null;
-
-      const pip_per_lot =
-        pipPerLotRaw !== null && pipPerLotRaw !== undefined
-          ? Number(pipPerLotRaw) || 0
-          : null;
-      const pip_value =
-        pipValueRaw !== null && pipValueRaw !== undefined ? Number(pipValueRaw) || 0 : null;
-      const commission =
-        commissionRaw !== null && commissionRaw !== undefined
-          ? Number(commissionRaw) || 0
-          : null;
-
-      const currency = sym.currency || sym.Currency || 'USD';
-      const status = sym.status || sym.Status || 'active';
-
-      const contract_size =
-        sym.contract_size ?? sym.ContractSize ?? sym.VolumeStep ?? null;
-      const digits = sym.digits ?? sym.Digits ?? null;
-      const spread = sym.spread ?? sym.Spread ?? null;
-      const profit_mode = sym.profit_mode || sym.ProfitMode || null;
-
-      // Upsert into symbols_with_categories without relying on a DB UNIQUE constraint
-      // First try to find an existing row by natural key (symbol + group_name)
-      const existing = await client.query(
-        `SELECT id FROM symbols_with_categories WHERE symbol = $1 AND group_name = $2 LIMIT 1`,
-        [symbol, groupName]
-      );
-
-      if (existing.rows.length > 0) {
-        const id = existing.rows[0].id;
-        await client.query(
-          `UPDATE symbols_with_categories
-             SET pair = $2,
-                 category = $3,
-                 pip_per_lot = $4,
-                 pip_value = $5,
-                 commission = $6,
-                 currency = $7,
-                 status = $8,
-                 contract_size = $9,
-                 digits = $10,
-                 spread = $11,
-                 profit_mode = $12,
-                 updated_at = NOW()
-           WHERE id = $1`,
-          [
-            id,
-            pair,
-            category,
-            pip_per_lot,
-            pip_value,
-            commission,
-            currency,
-            status,
-            contract_size,
-            digits,
-            spread,
-            profit_mode
-          ]
+        const existingQuery = await client.query(
+          `SELECT id FROM symbols_with_categories WHERE symbol = $1 AND group_name = $2 LIMIT 1`,
+          [symbol, groupName]
         );
-      } else {
+
+        if (existingQuery.rows.length > 0) {
+          skipped++;
+          if (onProgress) {
+            onProgress({
+              status: 'inserting',
+              current: inserted + skipped,
+              total,
+              symbol,
+              accountType,
+              skipped,
+              msg: 'already found'
+            });
+          }
+          continue;
+        }
+
+        const pair = sym.pair || sym.Pair || sym.description || sym.Description || sym.SymbolDescription || null;
+        const category = sym.category || sym.Category || categorizeSymbol(symbol);
+        const pipPerLotRaw = sym.pip_per_lot ?? sym.PipPerLot ?? 1.0;
+        const pipValueRaw = sym.pip_value ?? sym.PipValue ?? null;
+        const commissionRaw = sym.commission ?? sym.Commission ?? 0;
+
+        const pip_per_lot = Number(pipPerLotRaw) || 1.0;
+        const pip_value = pipValueRaw !== null && pipValueRaw !== undefined ? Number(pipValueRaw) : null;
+        const commission = Number(commissionRaw) || 0;
+
+        const currency = sym.currency || sym.Currency || sym.CurrencyProfit || 'USD';
+        const status = sym.status || sym.Status || 'active';
+
+        const contractSizeRaw = sym.contract_size ?? sym.ContractSize ?? sym.VolumeStep ?? null;
+        const digitsRaw = sym.digits ?? sym.Digits ?? null;
+        const spreadRaw = sym.spread ?? sym.Spread ?? null;
+
+        const contract_size = contractSizeRaw !== null && contractSizeRaw !== undefined ? Number(contractSizeRaw) : null;
+        const digits = digitsRaw !== null && digitsRaw !== undefined ? Number(digitsRaw) : null;
+        const spread = spreadRaw !== null && spreadRaw !== undefined ? Number(spreadRaw) : null;
+
+        const profit_mode = sym.profit_mode || sym.ProfitMode || null;
+
         await client.query(
           `INSERT INTO symbols_with_categories
             (symbol, pair, group_name, category, pip_per_lot, pip_value, commission, currency, status, contract_size, digits, spread, profit_mode, is_override, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false, NOW(), NOW())`,
-          [
-            symbol,
-            pair,
-            groupName,
-            category,
-            pip_per_lot,
-            pip_value,
-            commission,
-            currency,
-            status,
-            contract_size,
-            digits,
-            spread,
-            profit_mode
-          ]
+          [symbol, pair, groupName, category, pip_per_lot, pip_value, commission, currency, status, contract_size, digits, spread, profit_mode]
         );
-      }
-    }
 
-    await client.query('COMMIT');
-    console.log(`✅ Upserted ${symbols.length} symbols for ${accountType} into symbols_with_categories`);
+        inserted++;
+        if (onProgress) {
+          onProgress({
+            status: 'inserting',
+            current: inserted + skipped,
+            total,
+            symbol,
+            accountType,
+            skipped
+          });
+        }
+      }
+      await client.query('COMMIT');
+    }
+    console.log(`✅ Sync for ${accountType}: ${inserted} inserted, ${skipped} skipped (total ${total})`);
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK');
     console.error(`❌ Error upserting symbols for ${accountType}:`, error.message);
     throw error;
   } finally {
@@ -187,34 +204,55 @@ async function upsertSymbols(accountType, symbols) {
   }
 }
 
-async function main() {
+async function main(targetType = null, onProgress = null) {
   try {
-    for (const [accountType, token] of Object.entries(ACCOUNT_TYPES)) {
-      if (!token) {
-        console.warn(`⚠️  Skipping ${accountType} – no token configured`);
+    const targets = targetType
+      ? { [targetType.toUpperCase()]: ACCOUNT_CREDENTIALS[targetType.toUpperCase()] }
+      : ACCOUNT_CREDENTIALS;
+
+    for (const [accountType, creds] of Object.entries(targets)) {
+      if (!creds) {
+        console.warn(`⚠️  Skipping ${accountType} – no credentials configured or invalid type`);
         continue;
       }
-      const symbols = await fetchSymbolsForToken(accountType, token);
-      if (symbols.length === 0) {
-        console.warn(`⚠️  No symbols returned for ${accountType}`);
-        continue;
+      try {
+        if (onProgress) onProgress({ status: 'logging_in', accountType });
+        const token = await getMT5Token(creds.accountId, creds.password);
+
+        if (onProgress) onProgress({ status: 'fetching', accountType });
+        const symbols = await fetchSymbolsForToken(accountType, token);
+
+        if (symbols.length === 0) {
+          console.warn(`⚠️  No symbols returned for ${accountType}`);
+          if (onProgress) onProgress({ status: 'no_symbols', accountType });
+          continue;
+        }
+
+        await upsertSymbols(accountType, symbols, onProgress);
+      } catch (err) {
+        console.error(`❌ Failed sync for ${accountType}:`, err.message);
+        if (onProgress) onProgress({ status: 'error', accountType, message: err.message });
       }
-      await upsertSymbols(accountType, symbols);
     }
 
-    console.log('✅ Symbols sync completed for all configured account types.');
+    if (onProgress) onProgress({ status: 'completed' });
+    console.log('✅ Symbols sync completed.');
   } catch (error) {
     console.error('❌ Symbols sync failed:', error);
+    if (onProgress) onProgress({ status: 'failed', error: error.message });
     process.exitCode = 1;
   } finally {
-    // Allow pool to close
-    setTimeout(() => process.exit(process.exitCode || 0), 100);
+    // Note: If running from API, don't exit process
+    if (import.meta.url === `file://${process.argv[1]}`) {
+      setTimeout(() => process.exit(process.exitCode || 0), 100);
+    }
   }
 }
 
 // Run only when called directly via node
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main();
+  const argType = process.argv[2]; // e.g. node sync_symbols.js ECN
+  main(argType);
 }
 
 export default main;

@@ -56,15 +56,12 @@ export const authenticate = (req, res, next) => {
 export const authenticateAdmin = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({
-        success: false,
-        message: 'No token provided or invalid format'
-      });
+    let token = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7);
+    } else if (req.query && req.query.token) {
+      token = req.query.token;
     }
-
-    const token = authHeader.substring(7);
 
     if (!token) {
       return res.status(401).json({
@@ -85,7 +82,7 @@ export const authenticateAdmin = async (req, res, next) => {
 
     // Check if token is blacklisted
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    
+
     // Check for "logout all" marker first
     const logoutAllCheck = await pool.query(
       `SELECT id FROM admin_token_blacklist 

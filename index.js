@@ -20,7 +20,9 @@ import unifiedActionsRoutes from './routes/unifiedActions.js';
 import menusRoutes from './routes/menus.js';
 import sessionRoutes from './routes/session.js';
 import ibRequestsRoutes from './routes/ibRequests.js';
+import ibRoutes from './routes/ib.js';
 import pool from './config/database.js';
+import { syncAllCommissions } from './services/ib_commission.service.js';
 
 dotenv.config();
 
@@ -203,6 +205,10 @@ const cancelExpiredDeposits = async () => {
 // Run every 5 minutes (will skip if database is not ready)
 setInterval(cancelExpiredDeposits, 5 * 60 * 1000); // Every 5 minutes
 
+// Run IB Commission Sync every 15 minutes
+syncAllCommissions(); // Initial run
+setInterval(syncAllCommissions, 15 * 60 * 1000);
+
 // Middleware
 // CORS: fully open for all origins (including https://portal.solitairemarkets.com)
 // The request Origin will be reflected back in Access-Control-Allow-Origin.
@@ -271,6 +277,7 @@ app.use('/api/payment-details', paymentDetailsRoutes);
 app.use('/api/menus', menusRoutes);
 app.use('/api/session', sessionRoutes);
 app.use('/api/ib-requests', ibRequestsRoutes);
+app.use('/api/ib', ibRoutes);
 
 // Debug: Log registered routes
 console.log('✅ Routes registered:');

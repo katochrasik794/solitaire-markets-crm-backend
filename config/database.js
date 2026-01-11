@@ -1,7 +1,12 @@
 import pkg from 'pg';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, '../.env') });
 
 const { Pool } = pkg;
 
@@ -30,7 +35,7 @@ if (process.env.DATABASE_URL) {
       process.env.DATABASE_URL.includes('azure.com') ||
       process.env.DATABASE_URL.includes('heroku.com')
     );
-    
+
     if (isCloudDatabase || process.env.NODE_ENV === 'production') {
       poolConfig.ssl = { require: true, rejectUnauthorized: false };
     } else {

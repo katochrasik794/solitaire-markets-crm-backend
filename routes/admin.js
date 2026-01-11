@@ -3602,12 +3602,14 @@ router.get('/group-management', authenticateAdmin, async (req, res, next) => {
   try {
     const { is_active } = req.query;
     const params = [];
-    let whereClause = '';
+    let whereParts = ["LOWER(group_name) NOT LIKE '%demo%'"];
 
     if (typeof is_active === 'string' && is_active !== '') {
       params.push(is_active === 'true');
-      whereClause = 'WHERE is_active = $1';
+      whereParts.push(`is_active = $${params.length}`);
     }
+
+    const whereClause = whereParts.length > 0 ? 'WHERE ' + whereParts.join(' AND ') : '';
 
     const query = `
       SELECT
