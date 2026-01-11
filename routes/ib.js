@@ -297,7 +297,7 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
                     thisMonth: 0,
                     avgDaily: 0,
                     activeClients: 0,
-                    byCategory: {},
+                    byCategory: [],
                     monthlyTrend: []
                 }
             });
