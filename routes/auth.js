@@ -37,7 +37,7 @@ router.post('/register', validateRegister, async (req, res, next) => {
         'SELECT id FROM users WHERE referral_code = $1',
         [referredBy]
       );
-      
+
       if (referrerResult.rows.length === 0) {
         return res.status(400).json({
           success: false,
@@ -134,7 +134,7 @@ router.post('/login', validateLogin, async (req, res, next) => {
 
     // Check account status - block banned and inactive users
     const userStatus = user.status ? user.status.toLowerCase() : 'active';
-    
+
     if (userStatus === 'banned') {
       return res.status(403).json({
         success: false,
@@ -248,7 +248,7 @@ router.post('/forgot-password', validateForgotPassword, async (req, res, next) =
     // Send OTP email using template
     try {
       const userResult = await pool.query('SELECT first_name, last_name FROM users WHERE id = $1', [user.id]);
-      const userName = userResult.rows.length > 0 
+      const userName = userResult.rows.length > 0
         ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'User'
         : 'User';
       await sendOTPVerificationEmail(user.email, userName, otp, 'Please use this code to reset your password.');
@@ -476,7 +476,7 @@ const passwordResetOtpStore = new Map(); // email -> { otp, expiresAt, userId }
  */
 router.post('/send-registration-otp', async (req, res, next) => {
   try {
-    const { email, password, firstName, lastName, phoneCode, phoneNumber, country, referredBy } = req.body;
+    const { email, password, firstName, lastName, phoneCode, phoneNumber, country, referredBy, commissionRates } = req.body;
 
     // Validate required fields
     if (!email || !password || !firstName || !lastName) {
@@ -505,7 +505,7 @@ router.post('/send-registration-otp', async (req, res, next) => {
         'SELECT id FROM users WHERE referral_code = $1',
         [referredBy]
       );
-      
+
       if (referrerResult.rows.length === 0) {
         return res.status(400).json({
           success: false,
@@ -531,7 +531,8 @@ router.post('/send-registration-otp', async (req, res, next) => {
         phoneCode: phoneCode || null,
         phoneNumber: phoneNumber?.trim() || null,
         country: country || null,
-        referredBy: referredBy || null
+        referredBy: referredBy || null,
+        commissionRates: commissionRates || null
       }
     });
 
@@ -667,6 +668,21 @@ router.post('/verify-registration-otp', async (req, res, next) => {
     // Remove OTP from store
     otpStore.delete(emailKey);
 
+    // If commission rates are provided, automatically approve as IB
+    if (registrationData.commissionRates) {
+      try {
+        await pool.query(
+          `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, approved_at)
+           VALUES ($1, 'approved', 'ib', $2, NOW())`,
+          [user.id, registrationData.commissionRates]
+        );
+        console.log(`User ${user.id} automatically approved as IB with custom rates`);
+      } catch (ibError) {
+        console.error('Auto-approve IB error:', ibError);
+        // Do not fail registration
+      }
+    }
+
     // Send welcome email using template
     setImmediate(async () => {
       try {
@@ -707,6 +723,36 @@ router.post('/verify-registration-otp', async (req, res, next) => {
     });
   } catch (error) {
     console.error('Verify registration OTP error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/auth/referrer/:code
+ * Get referrer details by code
+ */
+router.get('/referrer/:code', async (req, res, next) => {
+  try {
+    const { code } = req.params;
+
+    const result = await pool.query(
+      'SELECT first_name, last_name FROM users WHERE referral_code = $1',
+      [code]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Invalid referral code'
+      });
+    }
+
+    const user = result.rows[0];
+    res.json({
+      success: true,
+      name: `${user.first_name || ''} ${user.last_name || ''}`.trim()
+    });
+  } catch (error) {
     next(error);
   }
 });
@@ -906,7 +952,7 @@ router.get('/activate-account/:token', async (req, res, next) => {
       code: error.code,
       detail: error.detail
     });
-    
+
     // Check if it's a column doesn't exist error
     if (error.code === '42703' || error.message?.includes('column') && error.message?.includes('does not exist')) {
       return res.status(500).json({
@@ -914,7 +960,7 @@ router.get('/activate-account/:token', async (req, res, next) => {
         message: 'Database migration required. Please run the migration to add status column to users table.'
       });
     }
-    
+
     res.status(500).json({
       success: false,
       message: 'Failed to process activation request. Please try again.'
@@ -1235,7 +1281,7 @@ router.put('/change-password', (req, res, next) => {
       hasBody: !!req.body,
       bodyKeys: req.body ? Object.keys(req.body) : []
     });
-    
+
     const userId = req.user.id;
     const { currentPassword, newPassword } = req.body;
 
