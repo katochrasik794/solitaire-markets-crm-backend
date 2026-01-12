@@ -59,6 +59,41 @@ router.post('/register', validateRegister, async (req, res, next) => {
 
     const user = result.rows[0];
 
+    // Handle IB Request creation (if referred)
+    if (referredBy) {
+      try {
+        // Get referrer's ID
+        const referrerRes = await pool.query(
+          'SELECT id FROM users WHERE referral_code = $1',
+          [referredBy]
+        );
+        const referrerId = referrerRes.rows.length > 0 ? referrerRes.rows[0].id : null;
+
+        if (referrerId) {
+          // Check if there are commission rates (implies auto-approval)
+          // For direct register, we check req.body.commissionRates
+          const hasRates = req.body.commissionRates && Object.keys(req.body.commissionRates).length > 0;
+
+          if (hasRates) {
+            await pool.query(
+              `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
+               VALUES ($1, 'approved', 'sub_ib', $2, NOW(), $3, 'yes', 'yes')`,
+              [user.id, req.body.commissionRates, referrerId]
+            );
+          } else {
+            // Normal Referral Link: Pending request
+            await pool.query(
+              `INSERT INTO ib_requests (user_id, status, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
+               VALUES ($1, 'pending', $2, 'yes', 'yes')`,
+              [user.id, referrerId]
+            );
+          }
+        }
+      } catch (ibError) {
+        console.error('Auto IB request error (register):', ibError);
+      }
+    }
+
     // Automatically create wallet for this user
     try {
       await createWalletForUser(user.id);
@@ -668,18 +703,37 @@ router.post('/verify-registration-otp', async (req, res, next) => {
     // Remove OTP from store
     otpStore.delete(emailKey);
 
-    // If commission rates are provided, automatically approve as IB
-    if (registrationData.commissionRates) {
+    // Handle IB Request creation (if referred)
+    if (registrationData.referredBy) {
       try {
-        await pool.query(
-          `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, approved_at)
-           VALUES ($1, 'approved', 'ib', $2, NOW())`,
-          [user.id, registrationData.commissionRates]
+        // Get referrer's ID
+        const referrerRes = await pool.query(
+          'SELECT id FROM users WHERE referral_code = $1',
+          [registrationData.referredBy]
         );
-        console.log(`User ${user.id} automatically approved as IB with custom rates`);
+        const referrerId = referrerRes.rows.length > 0 ? referrerRes.rows[0].id : null;
+
+        const hasRates = registrationData.commissionRates && Object.keys(registrationData.commissionRates).length > 0;
+
+        if (hasRates) {
+          // Sub-IB Link: Auto-approve
+          await pool.query(
+            `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
+             VALUES ($1, 'approved', 'sub_ib', $2, NOW(), $3, 'yes', 'yes')`,
+            [user.id, registrationData.commissionRates, referrerId]
+          );
+          console.log(`User ${user.id} automatically approved as Sub-IB with custom rates`);
+        } else if (referrerId) {
+          // Normal Referral Link: Pending request
+          await pool.query(
+            `INSERT INTO ib_requests (user_id, status, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
+             VALUES ($1, 'pending', $2, 'yes', 'yes')`,
+            [user.id, referrerId]
+          );
+          console.log(`User ${user.id} IB request created with pending status`);
+        }
       } catch (ibError) {
-        console.error('Auto-approve IB error:', ibError);
-        // Do not fail registration
+        console.error('Auto IB request error (verify-otp):', ibError);
       }
     }
 

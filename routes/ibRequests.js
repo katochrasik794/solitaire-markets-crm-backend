@@ -1782,12 +1782,36 @@ router.get('/profiles-by-groups', authenticateAdmin, async (req, res, next) => {
       }));
     // Removed filter - show all active groups, even with 0 IBs
 
+    // Prepare a flat list of all approved IBs for the frontend table
+    const flatIbsList = approvedIbsResult.rows.map(ib => ({
+      ibRequestId: ib.ib_request_id,
+      userId: ib.user_id,
+      name: `${ib.first_name || ''} ${ib.last_name || ''}`.trim() || `User #${ib.user_id}`,
+      email: ib.email,
+      ibType: ib.ib_type || 'normal',
+      referralCode: ib.referral_code,
+      referredBy: ib.referred_by,
+      groupPipCommissions: (() => {
+        if (!ib.group_pip_commissions) return {};
+        if (typeof ib.group_pip_commissions === 'string') {
+          try {
+            return JSON.parse(ib.group_pip_commissions);
+          } catch (e) {
+            return {};
+          }
+        }
+        return ib.group_pip_commissions;
+      })(),
+      approvedAt: ib.approved_at
+    }));
+
     res.json({
       success: true,
       data: {
         groups: groupsWithIbs,
         totalGroups: groupsWithIbs.length,
-        totalIbs: approvedIbsResult.rows.length
+        totalIbs: approvedIbsResult.rows.length,
+        allIbs: flatIbsList
       }
     });
   } catch (error) {
