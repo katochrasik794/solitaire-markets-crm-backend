@@ -21,13 +21,31 @@ router.get('/groups', authenticate, async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT 
-        id, group_name, dedicated_name, currency, demo_leverage, 
-        margin_call, margin_stop_out, trade_flags, server, company, created_at
-       FROM mt5_groups
-       WHERE is_active = TRUE
-         AND LOWER(group_name) NOT LIKE '%demo%'
-       ORDER BY dedicated_name NULLS LAST, group_name ASC`,
-      []
+        mg.id, 
+        mg.group_name, 
+        gcd.display_name as dedicated_name, 
+        mg.currency, 
+        mg.demo_leverage, 
+        mg.margin_call, 
+        mg.margin_stop_out, 
+        mg.trade_flags, 
+        mg.server, 
+        mg.company, 
+        mg.created_at
+       FROM mt5_groups mg
+       INNER JOIN group_commission_distribution gcd ON mg.group_name = gcd.group_path
+       WHERE mg.is_active = TRUE
+         AND gcd.is_active = TRUE
+         AND LOWER(mg.group_name) NOT LIKE '%demo%'
+         AND (
+           gcd.availability = 'All Users' OR
+           (gcd.availability = 'Selected Users' AND EXISTS (
+             SELECT 1 FROM group_commission_users gcu 
+             WHERE gcu.distribution_id = gcd.id AND gcu.user_id = $1
+           ))
+         )
+       ORDER BY gcd.display_name ASC, mg.group_name ASC`,
+      [req.user.id]
     );
 
     res.json({
@@ -170,7 +188,7 @@ router.get('/', authenticate, async (req, res, next) => {
     const hasMt5GroupName = existingCols.has('mt5_group_name');
     const hasMt5GroupId = existingCols.has('mt5_group_id');
     const hasGroup = existingCols.has('group');
-    
+
     if (hasMt5GroupName) optionalCols.push('mt5_group_name');
     if (hasMt5GroupId) optionalCols.push('mt5_group_id');
     if (hasGroup) optionalCols.push('group');
@@ -234,7 +252,7 @@ router.get('/', authenticate, async (req, res, next) => {
         prioritizedConditions.push(`LOWER(ta.account_type) = LOWER(mg.dedicated_name)`);
         prioritizedConditions.push(`LOWER(ta.account_type) = LOWER(SUBSTRING(mg.group_name FROM '[^\\\\]+$'))`);
       }
-      
+
       const joinCondition = prioritizedConditions.join(' OR ');
       query += `
         COALESCE(mg.minimum_deposit, 0) as minimum_deposit,
@@ -631,14 +649,14 @@ router.post('/create', authenticate, async (req, res, next) => {
       // Include non-sensitive account info from MT5 API response
       mt5Response: mt5Login
     };
-    
+
     // Return response with account details (don't include encrypted passwords)
     res.json({
       success: true,
       message: 'Account created successfully',
       data: responseData
     });
-    
+
     // Log user action and send email
     setImmediate(async () => {
       await logUserAction({
