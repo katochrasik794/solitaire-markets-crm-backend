@@ -88,9 +88,9 @@ const syncClientTrades = async (ibId, clientId, pipRates) => {
 };
 
 /**
- * Process a single trade and store commission if applicable
+ * Process a single trade and distribute commissions to all levels in the chain
  */
-const processTradeCommission = async (ibId, clientId, login, groupId, trade, pipRate) => {
+const processTradeCommission = async (directIbId, clientId, login, groupId, trade, directPipRate) => {
     const client = await pool.connect();
     try {
         const {
@@ -102,58 +102,134 @@ const processTradeCommission = async (ibId, clientId, login, groupId, trade, pip
             time_done: closeTime
         } = trade;
 
-        // Check if already processed
-        const checkResult = await client.query(
-            "SELECT id FROM ib_commissions WHERE trade_ticket = $1",
-            [ticket]
-        );
+        // 1. Initial Checks
+        // Rule: IBs do not get commission on their own trading
+        if (directIbId === clientId) return;
 
-        if (checkResult.rows.length > 0) return;
-
-        // Calculate duration
+        // Calculate duration and check validity (Rule: duration > 60s)
         const openTs = new Date(openTime).getTime();
         const closeTs = new Date(closeTime).getTime();
         const durationSeconds = Math.floor((closeTs - openTs) / 1000);
 
         let status = 'processed';
         let exclusionReason = null;
-
-        // Rule: Duration <= 60 seconds excluded (as seen in MyCommission.jsx dummy text)
         if (durationSeconds <= 60) {
             status = 'excluded';
             exclusionReason = 'Trade duration <= 60 seconds';
         }
 
-        // Calculate commission
-        // Simplified formula: lots * pipRate * 10 (assuming $10 per pip per lot for many symbols)
-        // In a real system, we'd fetch actual pip_value from MT5 for each symbol
         const pipValue = 10.0; // Placeholder for actual pip value calculation
-        const commissionAmount = status === 'processed' ? (lots * pipRate * pipValue) : 0;
 
-        // Insert into database
-        await client.query(
-            `INSERT INTO ib_commissions (
-                ib_id, client_id, mt5_account_id, trade_ticket, symbol, 
-                lots, profit, commission_amount, group_id, pip_rate, 
-                pip_value, trade_open_time, trade_close_time, duration_seconds, 
-                status, exclusion_reason
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-            [
-                ibId, clientId, login, ticket, symbol,
-                lots, profit, commissionAmount, groupId, pipRate,
-                pipValue, openTime, closeTime, durationSeconds,
-                status, exclusionReason
-            ]
+        // 2. Fetch IB Info to get the chain
+        const ibInfoRes = await client.query(
+            "SELECT commission_chain, ib_level, root_master_id, referrer_ib_id FROM ib_requests WHERE user_id = $1 AND status = 'approved'",
+            [directIbId]
         );
 
-        // If commission was earned, update IB's wallet balance
-        if (commissionAmount > 0) {
+        if (ibInfoRes.rows.length === 0) return;
+        const { commission_chain: chain, ib_level: myLevel, root_master_id: rootId, referrer_ib_id: parentId } = ibInfoRes.rows[0];
+
+        // 3. Recursive Distribution Logic
+        // We need to distribute for:
+        // - Direct IB (Level N)
+        // - All ancestors (Level N-1 down to 1)
+        // - Root Master (Override)
+
+        let currentIbId = directIbId;
+        let currentClientReferrer = clientId; // For "referred_by" chain traversal if needed, but we use referrer_ib_id
+        let nextLevelRate = 0; // The rate of the level BELOW the one we are currently calculating for
+
+        // List of IBs to pay: [{ id, level, rate, isOverride }]
+        const participants = [];
+
+        // Add Direct IB
+        participants.push({ id: directIbId, level: myLevel || 1, rate: directPipRate, isOverride: false });
+
+        // If part of a chain, find ancestors
+        if (chain && chain[groupId] && chain[groupId].length > 0) {
+            const levelRates = chain[groupId]; // Array of rates [L1, L2, L3...]
+
+            // Traverse up the chain using referrer_ib_id
+            let loopLevel = (myLevel || 1) - 1;
+            let loopParentId = parentId;
+
+            while (loopLevel >= 1 && loopParentId) {
+                const parentRate = levelRates[loopLevel - 1];
+                participants.push({ id: loopParentId, level: loopLevel, rate: parentRate, isOverride: false });
+
+                // Move up
+                const pInfo = await client.query("SELECT referrer_ib_id FROM ib_requests WHERE user_id = $1 AND status = 'approved'", [loopParentId]);
+                loopParentId = pInfo.rows.length > 0 ? pInfo.rows[0].referrer_ib_id : null;
+                loopLevel--;
+            }
+
+            // ADD MASTER OVERRIDE
+            // The Master IB is the one who created the link or the root_master_id
+            const finalMasterId = rootId || loopParentId; // Potential fallback
+            if (finalMasterId) {
+                // Get Master's base rate for this group
+                const masterRateRes = await client.query(
+                    `SELECT (group_pip_commissions->>$1)::numeric as rate 
+                     FROM ib_requests WHERE user_id = $2 AND status = 'approved'`,
+                    [groupId, finalMasterId]
+                );
+
+                if (masterRateRes.rows.length > 0) {
+                    const mRate = parseFloat(masterRateRes.rows[0].rate || 0);
+                    participants.push({ id: finalMasterId, level: 0, rate: mRate, isOverride: true });
+                }
+            }
+        }
+
+        // 4. Execute Distribution (Top-Down Difference)
+        // Sort participants by level DESC (Deepest first)
+        // Levels: 5, 4, 3, 2, 1, 0 (Master)
+        participants.sort((a, b) => b.level - a.level);
+
+        let distributedSoFar = 0;
+        for (const p of participants) {
+            // Check if already processed for this specific IB and trade
+            const checkResult = await client.query(
+                "SELECT id FROM ib_commissions WHERE trade_ticket = $1 AND ib_id = $2",
+                [ticket, p.id]
+            );
+            if (checkResult.rows.length > 0) {
+                distributedSoFar = p.rate; // Update for next higher level's reference
+                continue;
+            }
+
+            // Commission for this participant = (Their Absolute Rate) - (Sum of rates below them)
+            // But since we are iterating up, it's simpler: Rate(Current) - Rate(Previous processed)
+            const absoluteRate = p.rate;
+            const diffRate = Math.max(0, absoluteRate - distributedSoFar);
+            const commissionAmount = status === 'processed' ? (lots * diffRate * pipValue) : 0;
+
+            // Insert Commission Entry
             await client.query(
-                "UPDATE wallets SET balance = balance + $1 WHERE user_id = $2",
-                [commissionAmount, ibId]
+                `INSERT INTO ib_commissions (
+                    ib_id, client_id, mt5_account_id, trade_ticket, symbol, 
+                    lots, profit, commission_amount, group_id, pip_rate, 
+                    pip_value, trade_open_time, trade_close_time, duration_seconds, 
+                    status, exclusion_reason, commission_level, is_override
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+                [
+                    p.id, clientId, login, ticket, symbol,
+                    lots, profit, commissionAmount, groupId, diffRate,
+                    pipValue, openTime, closeTime, durationSeconds,
+                    status, exclusionReason, p.level, p.isOverride
+                ]
             );
 
-            // Also log the transaction in a ledger if we had one
+            // Update Balance
+            if (commissionAmount > 0) {
+                await client.query(
+                    "UPDATE wallets SET balance = balance + $1 WHERE user_id = $2",
+                    [commissionAmount, p.id]
+                );
+            }
+
+            // Update tracked rate for next level
+            distributedSoFar = absoluteRate;
         }
 
     } catch (error) {

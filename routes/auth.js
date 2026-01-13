@@ -71,22 +71,61 @@ router.post('/register', validateRegister, async (req, res, next) => {
 
         if (referrerId) {
           // Check if there are commission rates (implies auto-approval)
-          // For direct register, we check req.body.commissionRates
-          const hasRates = req.body.commissionRates && Object.keys(req.body.commissionRates).length > 0;
+          // For multi-level, commissionRates might be the encoded chain object
+          const commissionData = req.body.commissionRates;
+          const hasCustomData = commissionData && Object.keys(commissionData).length > 0;
 
-          if (hasRates) {
+          if (hasCustomData) {
+            // Master's Custom Link logic
+            const groupCommissions = {};
+            const chainData = {};
+
+            // Extract L1 rates for group_pip_commissions and store full chain
+            Object.entries(commissionData).forEach(([groupId, data]) => {
+              if (data.rates && data.rates.length > 0) {
+                groupCommissions[groupId] = data.rates[0];
+                chainData[groupId] = data.rates;
+              }
+            });
+
             await pool.query(
-              `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
-               VALUES ($1, 'approved', 'sub_ib', $2, NOW(), $3, 'yes', 'yes')`,
-              [user.id, req.body.commissionRates, referrerId]
+              `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, commission_chain, ib_level, root_master_id, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
+               VALUES ($1, 'approved', 'sub_ib', $2, $3, 1, $4, NOW(), $4, 'yes', 'yes')`,
+              [user.id, groupCommissions, chainData, referrerId]
             );
           } else {
-            // Normal Referral Link: Pending request
-            await pool.query(
-              `INSERT INTO ib_requests (user_id, status, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
-               VALUES ($1, 'pending', $2, 'yes', 'yes')`,
-              [user.id, referrerId]
+            // Normal Referral Link: Check for inheritance from referrer
+            const referrerIB = await pool.query(
+              `SELECT commission_chain, ib_level, root_master_id FROM ib_requests 
+               WHERE user_id = $1 AND status = 'approved'`,
+              [referrerId]
             );
+
+            if (referrerIB.rows.length > 0) {
+              const { commission_chain, ib_level, root_master_id } = referrerIB.rows[0];
+              const nextLevel = (ib_level || 0) + 1;
+
+              // Check if chain supports this next level
+              const groupCommissions = {};
+              let chainExhausted = true;
+
+              if (commission_chain) {
+                Object.entries(commission_chain).forEach(([groupId, rates]) => {
+                  if (rates && rates.length >= nextLevel) {
+                    groupCommissions[groupId] = rates[nextLevel - 1]; // nextLevel is 1-indexed, array is 0-indexed
+                    if (groupCommissions[groupId] > 0) chainExhausted = false;
+                  }
+                });
+              }
+
+              if (!chainExhausted) {
+                await pool.query(
+                  `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, commission_chain, ib_level, root_master_id, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
+                   VALUES ($1, 'approved', 'sub_ib', $2, $3, $4, $5, NOW(), $6, 'yes', 'yes')`,
+                  [user.id, groupCommissions, commission_chain, nextLevel, root_master_id || referrerId, referrerId]
+                );
+              }
+            }
           }
         }
       } catch (ibError) {
@@ -713,24 +752,60 @@ router.post('/verify-registration-otp', async (req, res, next) => {
         );
         const referrerId = referrerRes.rows.length > 0 ? referrerRes.rows[0].id : null;
 
-        const hasRates = registrationData.commissionRates && Object.keys(registrationData.commissionRates).length > 0;
+        const commissionData = registrationData.commissionRates;
+        const hasCustomData = commissionData && Object.keys(commissionData).length > 0;
 
-        if (hasRates) {
-          // Sub-IB Link: Auto-approve
+        if (hasCustomData) {
+          // Master's Custom Link logic
+          const groupCommissions = {};
+          const chainData = {};
+
+          Object.entries(commissionData).forEach(([groupId, data]) => {
+            if (data.rates && data.rates.length > 0) {
+              groupCommissions[groupId] = data.rates[0];
+              chainData[groupId] = data.rates;
+            }
+          });
+
           await pool.query(
-            `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
-             VALUES ($1, 'approved', 'sub_ib', $2, NOW(), $3, 'yes', 'yes')`,
-            [user.id, registrationData.commissionRates, referrerId]
+            `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, commission_chain, ib_level, root_master_id, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
+             VALUES ($1, 'approved', 'sub_ib', $2, $3, 1, $4, NOW(), $4, 'yes', 'yes')`,
+            [user.id, groupCommissions, chainData, referrerId]
           );
-          console.log(`User ${user.id} automatically approved as Sub-IB with custom rates`);
+          console.log(`User ${user.id} automatically approved as L1 Sub-IB via custom chain`);
         } else if (referrerId) {
-          // Normal Referral Link: Pending request
-          await pool.query(
-            `INSERT INTO ib_requests (user_id, status, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
-             VALUES ($1, 'pending', $2, 'yes', 'yes')`,
-            [user.id, referrerId]
+          // Normal Referral Link: Inheritance
+          const referrerIB = await pool.query(
+            `SELECT commission_chain, ib_level, root_master_id FROM ib_requests 
+             WHERE user_id = $1 AND status = 'approved'`,
+            [referrerId]
           );
-          console.log(`User ${user.id} IB request created with pending status`);
+
+          if (referrerIB.rows.length > 0) {
+            const { commission_chain, ib_level, root_master_id } = referrerIB.rows[0];
+            const nextLevel = (ib_level || 0) + 1;
+
+            const groupCommissions = {};
+            let chainExhausted = true;
+
+            if (commission_chain) {
+              Object.entries(commission_chain).forEach(([groupId, rates]) => {
+                if (rates && rates.length >= nextLevel) {
+                  groupCommissions[groupId] = rates[nextLevel - 1];
+                  if (groupCommissions[groupId] > 0) chainExhausted = false;
+                }
+              });
+            }
+
+            if (!chainExhausted) {
+              await pool.query(
+                `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, commission_chain, ib_level, root_master_id, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
+                 VALUES ($1, 'approved', 'sub_ib', $2, $3, $4, $5, NOW(), $6, 'yes', 'yes')`,
+                [user.id, groupCommissions, commission_chain, nextLevel, root_master_id || referrerId, referrerId]
+              );
+              console.log(`User ${user.id} automatically approved as L${nextLevel} Sub-IB via inheritance`);
+            }
+          }
         }
       } catch (ibError) {
         console.error('Auto IB request error (verify-otp):', ibError);
