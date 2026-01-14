@@ -21,12 +21,31 @@ router.get('/groups', authenticate, async (req, res, next) => {
   try {
     // Step 1: Check if user has a commission chain (referral restriction)
     const ibRequestRes = await pool.query(
-      `SELECT commission_chain FROM ib_requests WHERE user_id = $1 AND status = 'approved'`,
+      `SELECT commission_chain, ib_level, ib_type FROM ib_requests WHERE user_id = $1 AND status = 'approved'`,
       [req.user.id]
     );
 
-    const commissionChain = ibRequestRes.rows[0]?.commission_chain;
-    const restrictedGroups = commissionChain ? Object.keys(commissionChain) : null;
+    const request = ibRequestRes.rows[0];
+    let restrictedGroups = null;
+
+    if (request?.commission_chain) {
+      const { commission_chain, ib_level, ib_type } = request;
+      restrictedGroups = Object.entries(commission_chain)
+        .filter(([groupId, rates]) => {
+          if (!Array.isArray(rates)) return false;
+
+          if (ib_type === 'sub_ib') {
+            // Sub-IBs see groups they have a rate for
+            return rates[ib_level - 1] > 0;
+          } else if (ib_type === 'trader') {
+            // Traders see groups their parent (IB) has access to
+            // If Trader is L2, Parent is L1 (index 0)
+            return rates[ib_level - 2] > 0;
+          }
+          return false;
+        })
+        .map(([groupId]) => groupId);
+    }
 
     // Step 2: Build and execute the main query
     const result = await pool.query(
