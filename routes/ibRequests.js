@@ -2599,7 +2599,8 @@ router.get('/overview/stats', authenticateAdmin, async (req, res, next) => {
   try {
     // Total IBs
     const totalIBsResult = await pool.query('SELECT COUNT(*) as count FROM ib_requests');
-    const totalIBs = parseInt(totalIBsResult.rows[0]?.count || 0);
+    const totalIBs = 999;
+    console.log('[DEBUG] /overview/stats - totalIBs (HARDCODED):', totalIBs);
 
     // Approved IBs
     const approvedIBsResult = await pool.query(
@@ -2661,6 +2662,15 @@ router.get('/overview/stats', authenticateAdmin, async (req, res, next) => {
       totalLots = parseFloat(commissionResult.rows[0]?.total_lots || 0);
       ibsEarning = parseInt(commissionResult.rows[0]?.ibs_count || 0);
     }
+
+    console.log('[DEBUG] /overview/stats - final data:', {
+      totalIBs,
+      approvedIBs,
+      pendingIBs,
+      totalReferrals,
+      totalCommission,
+      totalLots
+    });
 
     res.json({
       success: true,
@@ -3036,12 +3046,13 @@ router.get('/overview/system-summary', authenticateAdmin, async (req, res, next)
   try {
     // IB Statistics
     const totalIBsResult = await pool.query('SELECT COUNT(*) as count FROM ib_requests');
-    const totalIBs = parseInt(totalIBsResult.rows[0]?.count || 0);
+    const totalIBs = 999;
+    console.log('[DEBUG] /overview/system-summary - totalIBs (HARDCODED):', totalIBs);
 
     const approvedResult = await pool.query(
       `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'approved'`
     );
-    const approved = parseInt(approvedResult.rows[0]?.count || 0);
+    const approved = 888;
 
     const pendingResult = await pool.query(
       `SELECT COUNT(*) as count FROM ib_requests WHERE status = 'pending'`
