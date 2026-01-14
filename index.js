@@ -21,6 +21,8 @@ import menusRoutes from './routes/menus.js';
 import sessionRoutes from './routes/session.js';
 import ibRequestsRoutes from './routes/ibRequests.js';
 import ibRoutes from './routes/ib.js';
+import ibWithdrawalsRoutes from './routes/ibWithdrawals.js';
+import ibWithdrawalAdminRoutes from './routes/ibWithdrawalAdmin.js';
 import pool from './config/database.js';
 import { syncAllCommissions } from './services/ib_commission.service.js';
 
@@ -278,6 +280,8 @@ app.use('/api/menus', menusRoutes);
 app.use('/api/session', sessionRoutes);
 app.use('/api/ib-requests', ibRequestsRoutes);
 app.use('/api/ib', ibRoutes);
+app.use('/api/ib-withdrawals', ibWithdrawalsRoutes);
+app.use('/api/admin/ib-withdrawals', ibWithdrawalAdminRoutes);
 
 // Debug: Log registered routes
 console.log('✅ Routes registered:');
