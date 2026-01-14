@@ -97,7 +97,7 @@ router.post('/register', validateRegister, async (req, res, next) => {
             // Normal Referral Link: Check for inheritance from referrer
             const referrerIB = await pool.query(
               `SELECT commission_chain, ib_level, root_master_id FROM ib_requests 
-               WHERE user_id = $1 AND status = 'approved'`,
+                     WHERE user_id = $1 AND status = 'approved'`,
               [referrerId]
             );
 
@@ -119,10 +119,18 @@ router.post('/register', validateRegister, async (req, res, next) => {
               }
 
               if (!chainExhausted) {
+                // Inherit Sub-IB status
                 await pool.query(
                   `INSERT INTO ib_requests (user_id, status, ib_type, group_pip_commissions, commission_chain, ib_level, root_master_id, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
-                   VALUES ($1, 'approved', 'sub_ib', $2, $3, $4, $5, NOW(), $6, 'yes', 'yes')`,
+                             VALUES ($1, 'approved', 'sub_ib', $2, $3, $4, $5, NOW(), $6, 'yes', 'yes')`,
                   [user.id, groupCommissions, commission_chain, nextLevel, root_master_id || referrerId, referrerId]
+                );
+              } else if (commission_chain) {
+                // Chain is exhausted OR user is just a Trader, but we STILL store the chain for group restrictions
+                await pool.query(
+                  `INSERT INTO ib_requests (user_id, status, ib_type, commission_chain, ib_level, root_master_id, approved_at, referrer_ib_id, willing_to_become_ib, willing_to_sign_agreement)
+                             VALUES ($1, 'approved', 'trader', $2, $3, $4, NOW(), $5, 'yes', 'yes')`,
+                  [user.id, commission_chain, nextLevel, root_master_id || referrerId, referrerId]
                 );
               }
             }

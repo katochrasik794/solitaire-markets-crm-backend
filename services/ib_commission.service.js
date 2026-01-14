@@ -63,7 +63,7 @@ const syncClientTrades = async (ibId, clientId, pipRates) => {
         );
 
         for (const account of accountsResult.rows) {
-            const { account_number: login, group_id: groupId } = account;
+            const { account_number: login, mt5_group_id: groupId } = account;
 
             // Get the pip rate for this group
             const pipRate = parseFloat(pipRates[groupId] || 0);

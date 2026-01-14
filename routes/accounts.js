@@ -19,6 +19,16 @@ const router = express.Router();
  */
 router.get('/groups', authenticate, async (req, res, next) => {
   try {
+    // Step 1: Check if user has a commission chain (referral restriction)
+    const ibRequestRes = await pool.query(
+      `SELECT commission_chain FROM ib_requests WHERE user_id = $1 AND status = 'approved'`,
+      [req.user.id]
+    );
+
+    const commissionChain = ibRequestRes.rows[0]?.commission_chain;
+    const restrictedGroups = commissionChain ? Object.keys(commissionChain) : null;
+
+    // Step 2: Build and execute the main query
     const result = await pool.query(
       `SELECT 
         mg.id, 
@@ -38,14 +48,20 @@ router.get('/groups', authenticate, async (req, res, next) => {
          AND gcd.is_active = TRUE
          AND LOWER(mg.group_name) NOT LIKE '%demo%'
          AND (
-           gcd.availability = 'All Users' OR
-           (gcd.availability = 'Selected Users' AND EXISTS (
-             SELECT 1 FROM group_commission_users gcu 
-             WHERE gcu.distribution_id = gcd.id AND gcu.user_id = $1
+           -- If user has a commission chain, only show those groups
+           ($2::text[] IS NOT NULL AND mg.id::text = ANY($2::text[]))
+           OR
+           -- If no commission chain, apply standard availability rules
+           ($2::text[] IS NULL AND (
+             gcd.availability = 'All Users' OR
+             (gcd.availability = 'Selected Users' AND EXISTS (
+               SELECT 1 FROM group_commission_users gcu 
+               WHERE gcu.distribution_id = gcd.id AND gcu.user_id = $1
+             ))
            ))
          )
        ORDER BY gcd.display_name ASC, mg.group_name ASC`,
-      [req.user.id]
+      [req.user.id, restrictedGroups]
     );
 
     res.json({
