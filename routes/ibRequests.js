@@ -2260,7 +2260,7 @@ router.get('/dashboard/commission-by-group', authenticateAdmin, async (req, res,
         mg.id,
         mg.dedicated_name,
         mg.group_name,
-        COALESCE(SUM(ic.amount), 0) as total_commission,
+        COALESCE(SUM(ic.commission_amount), 0) as total_commission,
         COUNT(DISTINCT ic.ib_id) as ib_count
        FROM mt5_groups mg
        LEFT JOIN ib_commissions ic ON ic.group_id = mg.id
@@ -2271,7 +2271,7 @@ router.get('/dashboard/commission-by-group', authenticateAdmin, async (req, res,
     );
 
     // Calculate total for percentage
-    const totalResult = await pool.query('SELECT COALESCE(SUM(amount), 0) as total FROM ib_commissions');
+    const totalResult = await pool.query('SELECT COALESCE(SUM(commission_amount), 0) as total FROM ib_commissions');
     const totalCommission = parseFloat(totalResult.rows[0]?.total || 0);
 
     const groups = result.rows.map(row => {
@@ -2652,7 +2652,7 @@ router.get('/overview/stats', authenticateAdmin, async (req, res, next) => {
     if (commissionTableCheck.rows[0]?.exists) {
       const commissionResult = await pool.query(
         `SELECT 
-          COALESCE(SUM(amount), 0) as total_commission,
+          COALESCE(SUM(commission_amount), 0) as total_commission,
           COALESCE(SUM(lots), 0) as total_lots,
           COUNT(DISTINCT ib_id) as ibs_count
          FROM ib_commissions`
@@ -2704,7 +2704,7 @@ router.get('/overview/commission-by-group', authenticateAdmin, async (req, res, 
     }
 
     // Get total commission for percentage calculation
-    const totalResult = await pool.query('SELECT COALESCE(SUM(amount), 0) as total FROM ib_commissions');
+    const totalResult = await pool.query('SELECT COALESCE(SUM(commission_amount), 0) as total FROM ib_commissions');
     const totalCommission = parseFloat(totalResult.rows[0]?.total || 0);
 
     // Get commission by group
@@ -2713,7 +2713,7 @@ router.get('/overview/commission-by-group', authenticateAdmin, async (req, res, 
         mg.id,
         mg.dedicated_name,
         mg.group_name,
-        COALESCE(SUM(ic.amount), 0) as total_commission,
+        COALESCE(SUM(ic.commission_amount), 0) as total_commission,
         COALESCE(SUM(ic.lots), 0) as total_lots
        FROM mt5_groups mg
        LEFT JOIN ib_commissions ic ON ic.group_id = mg.id
@@ -2776,7 +2776,7 @@ router.get('/overview/ib-activity', authenticateAdmin, async (req, res, next) =>
         `SELECT 
           COALESCE(SUM(lots), 0) as total_volume,
           COUNT(*) as total_trades,
-          COALESCE(SUM(amount), 0) as total_commission
+          COALESCE(SUM(commission_amount), 0) as total_commission
          FROM ib_commissions`
       );
       totalVolume = parseFloat(activityResult.rows[0]?.total_volume || 0);
@@ -2923,14 +2923,14 @@ router.get('/overview/top-earners', authenticateAdmin, async (req, res, next) =>
         u.last_name,
         u.email,
         u.referral_code,
-        COALESCE(SUM(ic.amount), 0) as total_commission,
+        COALESCE(SUM(ic.commission_amount), 0) as total_commission,
         COALESCE(SUM(ic.lots), 0) as total_volume
        FROM ib_requests ir
        JOIN users u ON ir.user_id = u.id
        LEFT JOIN ib_commissions ic ON ic.ib_id = ir.id
        WHERE ir.status = 'approved'
        GROUP BY ir.id, ir.user_id, u.first_name, u.last_name, u.email, u.referral_code
-       HAVING COALESCE(SUM(ic.amount), 0) > 0
+       HAVING COALESCE(SUM(ic.commission_amount), 0) > 0
        ORDER BY total_commission DESC
        LIMIT $1`,
       [limit]
@@ -2995,7 +2995,7 @@ router.get('/overview/recent-activity', authenticateAdmin, async (req, res, next
         u.first_name,
         u.last_name,
         u.email,
-        COALESCE(SUM(ic.amount), 0) as total_commission,
+        COALESCE(SUM(ic.commission_amount), 0) as total_commission,
         COALESCE(SUM(ic.lots), 0) as total_volume
        FROM ib_requests ir
        JOIN users u ON ir.user_id = u.id
@@ -3003,7 +3003,7 @@ router.get('/overview/recent-activity', authenticateAdmin, async (req, res, next
          AND ic.created_at >= NOW() - INTERVAL '7 days'
        WHERE ir.status = 'approved'
        GROUP BY ir.id, ir.user_id, u.first_name, u.last_name, u.email
-       HAVING COALESCE(SUM(ic.amount), 0) > 0
+       HAVING COALESCE(SUM(ic.commission_amount), 0) > 0
        ORDER BY total_commission DESC
        LIMIT $1`,
       [limit]
@@ -3067,7 +3067,7 @@ router.get('/overview/system-summary', authenticateAdmin, async (req, res, next)
 
     if (commissionTableCheck.rows[0]?.exists) {
       const earningResult = await pool.query(
-        `SELECT COUNT(DISTINCT ib_id) as count FROM ib_commissions WHERE amount > 0`
+        `SELECT COUNT(DISTINCT ib_id) as count FROM ib_commissions WHERE commission_amount > 0`
       );
       ibsEarning = parseInt(earningResult.rows[0]?.count || 0);
     }
@@ -3137,7 +3137,7 @@ router.get('/overview/system-summary', authenticateAdmin, async (req, res, next)
     if (commissionTableCheck.rows[0]?.exists) {
       const commStatsResult = await pool.query(
         `SELECT 
-          COALESCE(SUM(amount), 0) as total,
+          COALESCE(SUM(commission_amount), 0) as total,
           COALESCE(SUM(lots), 0) as lots,
           COUNT(*) as trades
          FROM ib_commissions`
@@ -3250,7 +3250,7 @@ router.get('/commission-distribution/summary', authenticateAdmin, async (req, re
 
     if (commissionTableCheck.rows[0]?.exists) {
       const balanceResult = await pool.query(
-        `SELECT COALESCE(SUM(amount), 0) as total FROM ib_commissions`
+        `SELECT COALESCE(SUM(commission_amount), 0) as total FROM ib_commissions`
       );
       totalIBBalance = parseFloat(balanceResult.rows[0]?.total || 0);
     }
