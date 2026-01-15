@@ -77,14 +77,21 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
         );
         const referralCode = ibResult.rows[0]?.referral_code;
 
-        // 2. Get Direct Clients Count & Team Balance
+        // 2. Get Total Network Clients Count & Team Balance
         const clientsResult = await pool.query(
-            `SELECT 
-        COUNT(u.id) as client_count,
-        COALESCE(SUM(ta.balance), 0) as total_team_balance
-       FROM users u
-       LEFT JOIN trading_accounts ta ON u.id = ta.user_id AND ta.platform = 'MT5' AND ta.is_demo = FALSE
-       WHERE u.referred_by = $1`,
+            `WITH RECURSIVE referral_tree AS (
+                SELECT id, referral_code, 1 as level FROM users WHERE referred_by = $1
+                UNION ALL
+                SELECT u.id, u.referral_code, rt.level + 1
+                FROM users u
+                INNER JOIN referral_tree rt ON u.referred_by = rt.referral_code
+                WHERE rt.level < 10
+            )
+            SELECT 
+                COUNT(rt.id) as client_count,
+                COALESCE(SUM(ta.balance), 0) as total_team_balance
+            FROM referral_tree rt
+            LEFT JOIN trading_accounts ta ON rt.id = ta.user_id AND ta.platform = 'MT5' AND ta.is_demo = FALSE`,
             [referralCode]
         );
 
@@ -107,7 +114,8 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
         const groups = activeGroupsResult.rows.map(g => ({
             id: g.id,
             name: g.dedicated_name || g.group_name,
-            rate: parseFloat(ibRates[g.id] || 0)
+            rate: parseFloat(ibRates[g.id] || 0),
+            isActive: parseFloat(ibRates[g.id] || 0) > 0
         }));
         // 5. Get Personal Trading Accounts Stats
         const myAccountsResult = await pool.query(
@@ -166,30 +174,70 @@ router.get('/clients', authenticate, ensureIB, async (req, res) => {
         const referralCode = ibResult.rows[0]?.referral_code;
 
         let query = `
+      WITH RECURSIVE referral_tree AS (
+        -- Root: direct referrals
+        SELECT id, first_name, last_name, email, created_at, referral_code, referred_by, 1 as level,
+               CAST(NULL AS VARCHAR) as referred_by_name, CAST(NULL AS VARCHAR) as referred_by_email
+        FROM users
+        WHERE referred_by = $1
+
+        UNION ALL
+
+        -- Recursive step: indirect referrals
+        SELECT u.id, u.first_name, u.last_name, u.email, u.created_at, u.referral_code, u.referred_by, rt.level + 1,
+               rt.first_name || ' ' || rt.last_name, rt.email
+        FROM users u
+        INNER JOIN referral_tree rt ON u.referred_by = rt.referral_code
+        WHERE rt.level < 10 -- Limit depth to prevent infinite loops
+      )
       SELECT 
-        u.id, u.first_name, u.last_name, u.email, u.created_at as join_date,
+        rt.id, rt.first_name, rt.last_name, rt.email, rt.created_at as join_date, rt.level,
+        rt.referred_by_name, rt.referred_by_email,
         COUNT(ta.id) as account_count,
         COALESCE(SUM(ta.balance), 0) as total_balance
-      FROM users u
-      LEFT JOIN trading_accounts ta ON u.id = ta.user_id AND ta.platform = 'MT5' AND ta.is_demo = FALSE
-      WHERE u.referred_by = $1
+      FROM referral_tree rt
+      LEFT JOIN trading_accounts ta ON rt.id = ta.user_id AND ta.platform = 'MT5' AND ta.is_demo = FALSE
+      WHERE 1=1
     `;
         const params = [referralCode];
 
         if (search) {
-            query += ` AND (LOWER(u.first_name) LIKE $2 OR LOWER(u.last_name) LIKE $2 OR LOWER(u.email) LIKE $2)`;
+            query += ` AND (LOWER(rt.first_name) LIKE $2 OR LOWER(rt.last_name) LIKE $2 OR LOWER(rt.email) LIKE $2)`;
             params.push(`%${search.toLowerCase()}%`);
         }
 
-        query += ` GROUP BY u.id ORDER BY u.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        query += ` GROUP BY rt.id, rt.first_name, rt.last_name, rt.email, rt.created_at, rt.level, rt.referred_by_name, rt.referred_by_email 
+                   ORDER BY rt.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
         params.push(limit, offset);
 
         const result = await pool.query(query, params);
+
+        // Also get total count for pagination
+        let countQuery = `
+          WITH RECURSIVE referral_tree AS (
+            SELECT id, first_name, last_name, email, referral_code, level
+            FROM (SELECT id, first_name, last_name, email, referral_code, 1 as level FROM users WHERE referred_by = $1) as root
+            UNION ALL
+            SELECT u.id, u.first_name, u.last_name, u.email, u.referral_code, rt.level + 1
+            FROM users u
+            INNER JOIN referral_tree rt ON u.referred_by = rt.referral_code
+            WHERE rt.level < 10
+          )
+          SELECT COUNT(*) FROM referral_tree rt WHERE 1=1
+        `;
+        const countParams = [referralCode];
+        if (search) {
+            countQuery += ` AND (LOWER(rt.first_name) LIKE $2 OR LOWER(rt.last_name) LIKE $2 OR LOWER(rt.email) LIKE $2)`;
+            countParams.push(`%${search.toLowerCase()}%`);
+        }
+        const countResult = await pool.query(countQuery, countParams);
+        const total = parseInt(countResult.rows[0].count);
 
         res.json({
             success: true,
             data: {
                 clients: result.rows,
+                total: total,
                 page: parseInt(page),
                 limit: parseInt(limit)
             }
