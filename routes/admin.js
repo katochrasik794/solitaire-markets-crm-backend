@@ -3602,7 +3602,7 @@ router.get('/group-management', authenticateAdmin, async (req, res, next) => {
   try {
     const { is_active } = req.query;
     const params = [];
-    let whereParts = ["LOWER(group_name) NOT LIKE '%demo%'"];
+    let whereParts = [];
 
     if (typeof is_active === 'string' && is_active !== '') {
       params.push(is_active === 'true');
@@ -5306,6 +5306,89 @@ router.get('/activity-logs', authenticateAdmin, async (req, res, next) => {
       });
     } catch (e) {
       console.error('Error fetching user registrations:', e.message);
+    }
+    // 3. Get deposits from deposit_requests
+    try {
+      const depositsResult = await pool.query(
+        `SELECT 
+          dr.id,
+          dr.amount,
+          dr.status,
+          dr.created_at,
+          dr.mt5_account_id,
+          dr.cregis_order_id,
+          u.email,
+          u.first_name,
+          u.last_name
+        FROM deposit_requests dr
+        INNER JOIN users u ON dr.user_id = u.id
+        ORDER BY dr.created_at DESC
+        LIMIT $1`,
+        [parseInt(limit)]
+      );
+
+      depositsResult.rows.forEach(row => {
+        const nameParts = [];
+        if (row.first_name) nameParts.push(row.first_name);
+        if (row.last_name) nameParts.push(row.last_name);
+        const name = nameParts.join(' ').trim() || row.email;
+
+        items.push({
+          id: `deposit-${row.id}`,
+          type: 'Deposit',
+          time: row.created_at,
+          user: name,
+          email: row.email,
+          accountId: row.mt5_account_id,
+          amount: row.amount,
+          status: row.status.charAt(0).toUpperCase() + row.status.slice(1),
+          details: row.cregis_order_id || 'Manual Deposit'
+        });
+      });
+    } catch (e) {
+      console.error('Error fetching deposit activities:', e.message);
+    }
+
+    // 4. Get withdrawals from withdrawals
+    try {
+      const withdrawalsResult = await pool.query(
+        `SELECT 
+          w.id,
+          w.amount,
+          w.status,
+          w.created_at,
+          w.mt5_account_id,
+          w.external_transaction_id,
+          u.email,
+          u.first_name,
+          u.last_name
+        FROM withdrawals w
+        INNER JOIN users u ON w.user_id = u.id
+        ORDER BY w.created_at DESC
+        LIMIT $1`,
+        [parseInt(limit)]
+      );
+
+      withdrawalsResult.rows.forEach(row => {
+        const nameParts = [];
+        if (row.first_name) nameParts.push(row.first_name);
+        if (row.last_name) nameParts.push(row.last_name);
+        const name = nameParts.join(' ').trim() || row.email;
+
+        items.push({
+          id: `withdrawal-${row.id}`,
+          type: 'Withdrawal',
+          time: row.created_at,
+          user: name,
+          email: row.email,
+          accountId: row.mt5_account_id,
+          amount: row.amount,
+          status: row.status.charAt(0).toUpperCase() + row.status.slice(1),
+          details: row.external_transaction_id || 'Manual Withdrawal'
+        });
+      });
+    } catch (e) {
+      console.error('Error fetching withdrawal activities:', e.message);
     }
 
     // Sort all items by time (newest first)

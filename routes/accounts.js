@@ -52,7 +52,7 @@ router.get('/groups', authenticate, async (req, res, next) => {
       `SELECT 
         mg.id, 
         mg.group_name, 
-        gcd.display_name as dedicated_name, 
+        COALESCE(mg.dedicated_name, gcd.display_name, regexp_replace(mg.group_name, '^.*\\\\', '')) as dedicated_name, 
         mg.currency, 
         mg.demo_leverage, 
         mg.margin_call, 
@@ -62,24 +62,30 @@ router.get('/groups', authenticate, async (req, res, next) => {
         mg.company, 
         mg.created_at
        FROM mt5_groups mg
-       INNER JOIN group_commission_distribution gcd ON mg.group_name = gcd.group_path
+       LEFT JOIN group_commission_distribution gcd ON mg.group_name = gcd.group_path
        WHERE mg.is_active = TRUE
-         AND gcd.is_active = TRUE
-         AND LOWER(mg.group_name) NOT LIKE '%demo%'
          AND (
-           -- If user has a commission chain, only show those groups
-           ($2::text[] IS NOT NULL AND mg.id::text = ANY($2::text[]))
+           -- Demo Groups: Show if active in mt5_groups
+           (LOWER(mg.group_name) LIKE '%demo%')
            OR
-           -- If no commission chain, apply standard availability rules
-           ($2::text[] IS NULL AND (
-             gcd.availability = 'All Users' OR
-             (gcd.availability = 'Selected Users' AND EXISTS (
-               SELECT 1 FROM group_commission_users gcu 
-               WHERE gcu.distribution_id = gcd.id AND gcu.user_id = $1
-             ))
-           ))
+           -- Real Groups: Enforce commission distribution and availability rules
+           (
+             LOWER(mg.group_name) NOT LIKE '%demo%'
+             AND gcd.is_active = TRUE
+             AND (
+               ($2::text[] IS NOT NULL AND mg.id::text = ANY($2::text[]))
+               OR
+               ($2::text[] IS NULL AND (
+                 gcd.availability = 'All Users' OR
+                 (gcd.availability = 'Selected Users' AND EXISTS (
+                   SELECT 1 FROM group_commission_users gcu 
+                   WHERE gcu.distribution_id = gcd.id AND gcu.user_id = $1
+                 ))
+               ))
+             )
+           )
          )
-       ORDER BY gcd.display_name ASC, mg.group_name ASC`,
+       ORDER BY dedicated_name ASC, mg.group_name ASC`,
       [req.user.id, restrictedGroups]
     );
 
