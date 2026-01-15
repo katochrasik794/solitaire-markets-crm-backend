@@ -167,11 +167,25 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
 router.get('/clients', authenticate, ensureIB, async (req, res) => {
     try {
         const userId = req.user.id;
-        const { page = 1, limit = 10, search = '' } = req.query;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const search = req.query.search || '';
         const offset = (page - 1) * limit;
 
         const ibResult = await pool.query('SELECT referral_code FROM users WHERE id = $1', [userId]);
         const referralCode = ibResult.rows[0]?.referral_code;
+
+        if (!referralCode) {
+            return res.json({
+                success: true,
+                data: {
+                    clients: [],
+                    total: 0,
+                    page,
+                    limit
+                }
+            });
+        }
 
         let query = `
       WITH RECURSIVE referral_tree AS (
@@ -326,13 +340,27 @@ router.get('/profile', authenticate, ensureIB, async (req, res) => {
 
 /**
  * GET /api/ib/commission/summary
- * Get aggregated commission stats for the IB
+ * Get aggregated statistics for commission analytics
  */
 router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
     try {
         const userId = req.user.id;
+        const { start_date, end_date, granularity = 'day' } = req.query;
 
-        // Use a CTE or separate queries to avoid complexity if table might not exist
+        // Default range: 30 days
+        let start = start_date && start_date !== 'all' ? new Date(start_date) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        let end = end_date ? new Date(end_date) : new Date();
+
+        // If All Time is requested
+        if (start_date === 'all') {
+            const userRes = await pool.query('SELECT created_at FROM users WHERE id = $1', [userId]);
+            start = userRes.rows[0]?.created_at || new Date('2025-01-01');
+        }
+
+        // Validate dates
+        if (isNaN(start.getTime())) start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        if (isNaN(end.getTime())) end = new Date();
+
         const tableCheck = await pool.query(
             "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'ib_commissions')"
         );
@@ -341,10 +369,10 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
             return res.json({
                 success: true,
                 data: {
-                    totalCommission: 0,
-                    thisMonth: 0,
-                    avgDaily: 0,
-                    activeClients: 0,
+                    total_commission: 0,
+                    this_month: 0,
+                    avg_daily: 0,
+                    active_clients: 0,
                     byCategory: [],
                     monthlyTrend: []
                 }
@@ -361,8 +389,9 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
                 COALESCE(SUM(CASE WHEN ib_id != client_id THEN commission_amount ELSE 0 END), 0) as client_commission,
                 COALESCE(SUM(CASE WHEN lots > 0 AND ib_id != client_id THEN lots ELSE 0 END), 0) as client_lots
              FROM ib_commissions 
-             WHERE ib_id = $1 AND status = 'processed'`,
-            [userId]
+             WHERE ib_id = $1 AND status = 'processed'
+             AND created_at BETWEEN $2 AND $3`,
+            [userId, start, end]
         );
 
         // Get excluded trades stats
@@ -375,17 +404,18 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
                 COALESCE(SUM(CASE WHEN ib_id != client_id THEN 1 ELSE 0 END), 0) as client_count,
                 COALESCE(SUM(CASE WHEN ib_id != client_id THEN lots ELSE 0 END), 0) as client_lots
              FROM ib_commissions
-             WHERE ib_id = $1 AND status = 'excluded'`,
-            [userId]
+             WHERE ib_id = $1 AND status = 'excluded'
+             AND created_at BETWEEN $2 AND $3`,
+            [userId, start, end]
         );
 
-        // Get wallet balances (Available/Pending)
+        // Get wallet balances
         const walletResult = await pool.query(
             'SELECT balance, currency FROM wallets WHERE user_id = $1',
             [userId]
         );
 
-        // Get by category (simplified mapping from symbol)
+        // Get by category
         const categoryResult = await pool.query(
             `SELECT 
                 CASE 
@@ -397,21 +427,35 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
                 COALESCE(SUM(commission_amount), 0) as amount
              FROM ib_commissions
              WHERE ib_id = $1 AND status = 'processed'
+             AND created_at BETWEEN $2 AND $3
              GROUP BY category`,
-            [userId]
+            [userId, start, end]
         );
 
-        // Get monthly trend (last 12 months)
+        // Get monthly/weekly/daily trend using generate_series to fill gaps
+        let interval = '1 day';
+        let format = 'Mon DD';
+        if (granularity === 'week') {
+            interval = '1 week';
+            format = 'Mon DD';
+        } else if (granularity === 'month') {
+            interval = '1 month';
+            format = 'Mon YYYY';
+        }
+
         const trendResult = await pool.query(
-            `SELECT 
-                TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') as month,
-                COALESCE(SUM(commission_amount), 0) as amount
-             FROM ib_commissions
-             WHERE ib_id = $1 AND status = 'processed'
-             AND created_at >= CURRENT_DATE - INTERVAL '12 months'
-             GROUP BY DATE_TRUNC('month', created_at)
-             ORDER BY DATE_TRUNC('month', created_at)`,
-            [userId]
+            `WITH date_series AS (
+                SELECT generate_series($2::timestamp, $3::timestamp, $4::interval) as period
+            )
+            SELECT 
+                TO_CHAR(ds.period, $5) as label,
+                COALESCE(SUM(c.commission_amount), 0) as amount
+            FROM date_series ds
+            LEFT JOIN ib_commissions c ON DATE_TRUNC($6, c.created_at) = DATE_TRUNC($6, ds.period)
+                AND c.ib_id = $1 AND c.status = 'processed'
+            GROUP BY ds.period
+            ORDER BY ds.period`,
+            [userId, start, end, interval, format, granularity]
         );
 
         // Get top symbols
@@ -427,12 +471,13 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
                 COALESCE(SUM(commission_amount), 0) as commission,
                 COUNT(*) as trades,
                 COALESCE(SUM(lots), 0) as lots
-             FROM ib_commissions
-             WHERE ib_id = $1 AND status = 'processed'
-             GROUP BY symbol, category
-             ORDER BY commission DESC
-             LIMIT 10`,
-            [userId]
+            FROM ib_commissions
+            WHERE ib_id = $1 AND status = 'processed'
+            AND created_at BETWEEN $2 AND $3
+            GROUP BY symbol, category
+            ORDER BY commission DESC
+            LIMIT 10`,
+            [userId, start, end]
         );
 
         res.json({
@@ -460,7 +505,8 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
 router.get('/commission/history', authenticate, ensureIB, async (req, res) => {
     try {
         const userId = req.user.id;
-        const { page = 1, limit = 10 } = req.query;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
         const offset = (page - 1) * limit;
 
         const tableCheck = await pool.query(

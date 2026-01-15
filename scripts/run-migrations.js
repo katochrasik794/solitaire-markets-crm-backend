@@ -44,7 +44,7 @@ async function runMigrations() {
     for (const migration of migrations) {
       console.log(`📝 Running migration: ${migration.name}`);
       const sql = readFileSync(migration.file, 'utf8');
-      
+
       try {
         await pool.query(sql);
         console.log(`✅ Migration completed: ${migration.name}\n`);
