@@ -2717,6 +2717,98 @@ router.get('/users/:id/logins', authenticateAdmin, async (req, res, next) => {
 });
 
 /**
+ * GET /api/admin/users/:id/allowed-groups
+ * Get all MT5 groups a specific user is allowed to select
+ */
+router.get('/users/:id/allowed-groups', authenticateAdmin, async (req, res, next) => {
+  try {
+    const userId = req.params.id;
+
+    // Step 1: Check if user has a commission chain (referral restriction)
+    const ibRequestRes = await pool.query(
+      `SELECT commission_chain, ib_level, ib_type FROM ib_requests WHERE user_id = $1 AND status = 'approved'`,
+      [userId]
+    );
+
+    const request = ibRequestRes.rows[0];
+    let restrictedGroups = null;
+
+    if (request?.commission_chain) {
+      const { commission_chain, ib_level, ib_type } = request;
+      restrictedGroups = Object.entries(commission_chain)
+        .filter(([groupId, rates]) => {
+          if (!Array.isArray(rates)) return false;
+
+          if (ib_type === 'sub_ib') {
+            // Sub-IBs see groups they have a rate for
+            return rates[ib_level - 1] > 0;
+          } else if (ib_type === 'trader') {
+            // Traders see groups their parent (IB) has access to
+            // If Trader is L2, Parent is L1 (index 0)
+            return rates[ib_level - 2] > 0;
+          }
+          return false;
+        })
+        .map(([groupId]) => groupId);
+    }
+
+    // Step 2: Build and execute the main query
+    const result = await pool.query(
+      `SELECT 
+        mg.id, 
+        mg.group_name, 
+        COALESCE(mg.dedicated_name, gcd.display_name, regexp_replace(mg.group_name, '^.*\\\\', '')) as dedicated_name, 
+        mg.currency, 
+        mg.demo_leverage, 
+        mg.margin_call, 
+        mg.margin_stop_out, 
+        mg.trade_flags, 
+        mg.server, 
+        mg.company, 
+        mg.created_at
+       FROM mt5_groups mg
+       LEFT JOIN group_commission_distribution gcd ON mg.group_name = gcd.group_path
+       WHERE mg.is_active = TRUE
+         AND (
+           -- Demo Groups: Show if active in mt5_groups
+           (LOWER(mg.group_name) LIKE '%demo%')
+           OR
+           -- Real Groups: Enforce commission distribution and availability rules
+           (
+             LOWER(mg.group_name) NOT LIKE '%demo%'
+             AND gcd.is_active = TRUE
+             AND (
+               ($2::text[] IS NOT NULL AND mg.id::text = ANY($2::text[]))
+               OR
+               ($2::text[] IS NULL AND (
+                 gcd.availability = 'All Users' OR
+                 (gcd.availability = 'Selected Users' AND EXISTS (
+                   SELECT 1 FROM group_commission_users gcu 
+                   WHERE gcu.distribution_id = gcd.id AND gcu.user_id = $1
+                 ))
+               ))
+             )
+           )
+         )
+       ORDER BY dedicated_name ASC, mg.group_name ASC`,
+      [userId, restrictedGroups]
+    );
+
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Admin Get MT5 allowed groups error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch allowed MT5 groups',
+      error: error.message
+    });
+  }
+});
+
+/**
  * POST /api/admin/users/:id/accounts/create
  * Admin endpoint to create MT5 account for a user (bypasses portal password check)
  */
