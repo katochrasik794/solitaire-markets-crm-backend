@@ -118,6 +118,7 @@ export const authenticateAdmin = async (req, res, next) => {
     req.admin = decoded;
     next();
   } catch (error) {
+    console.error('Admin Auth Error:', error);
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
         success: false,
@@ -132,7 +133,8 @@ export const authenticateAdmin = async (req, res, next) => {
     }
     return res.status(500).json({
       success: false,
-      message: 'Token verification failed'
+      message: 'Token verification failed',
+      error: error.message
     });
   }
 };

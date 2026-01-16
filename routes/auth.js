@@ -506,7 +506,7 @@ router.get('/verify-token', async (req, res, next) => {
 
       // Optionally fetch fresh user data from database
       const result = await pool.query(
-        'SELECT id, email, first_name, last_name, country, referral_code, referred_by FROM users WHERE id = $1',
+        'SELECT id, email, first_name, last_name, country, referral_code, referred_by, is_banned FROM users WHERE id = $1',
         [decoded.id]
       );
 
@@ -529,7 +529,8 @@ router.get('/verify-token', async (req, res, next) => {
             lastName: user.last_name,
             country: user.country,
             referralCode: user.referral_code,
-            referredBy: user.referred_by
+            referredBy: user.referred_by,
+            isBanned: user.is_banned
           }
         }
       });

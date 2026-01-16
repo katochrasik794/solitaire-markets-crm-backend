@@ -36,7 +36,7 @@ router.get('/status', authenticate, async (req, res) => {
     try {
         const userId = req.user.id;
         const result = await pool.query(
-            'SELECT id, status, ib_type, referral_code FROM ib_requests JOIN users ON ib_requests.user_id = users.id WHERE user_id = $1 ORDER BY ib_requests.created_at DESC LIMIT 1',
+            'SELECT ib_requests.id, status, ib_type, referral_code, is_banned FROM ib_requests JOIN users ON ib_requests.user_id = users.id WHERE user_id = $1 ORDER BY ib_requests.created_at DESC LIMIT 1',
             [userId]
         );
 
@@ -47,11 +47,12 @@ router.get('/status', authenticate, async (req, res) => {
             });
         }
 
+        const isBanned = result.rows[0].is_banned;
         res.json({
             success: true,
             data: {
-                isIB: result.rows[0].status === 'approved',
-                status: result.rows[0].status,
+                isIB: result.rows[0].status === 'approved' && !isBanned,
+                status: isBanned ? 'locked' : result.rows[0].status,
                 ibType: result.rows[0].ib_type,
                 referralCode: result.rows[0].referral_code
             }
@@ -125,7 +126,7 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
 
         // 6. Get IB Status
         const ibStatusResult = await pool.query(
-            'SELECT status, ib_type FROM ib_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+            'SELECT ir.status, ir.ib_type, u.is_banned FROM ib_requests ir JOIN users u ON ir.user_id = u.id WHERE ir.user_id = $1 ORDER BY ir.created_at DESC LIMIT 1',
             [userId]
         );
 
@@ -148,7 +149,7 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
                     myAccountCount: parseInt(myAccountsResult.rows[0]?.count || 0),
                     myTotalBalance: parseFloat(myAccountsResult.rows[0]?.balance || 0),
                     myTotalEquity: parseFloat(myAccountsResult.rows[0]?.equity || 0),
-                    ibStatus: ibStatusResult.rows[0]?.status || 'none',
+                    ibStatus: ibStatusResult.rows[0]?.is_banned ? 'locked' : (ibStatusResult.rows[0]?.status || 'none'),
                     ibType: ibStatusResult.rows[0]?.ib_type || 'normal'
                 },
                 recentWithdrawals: withdrawalsResult.rows
@@ -320,7 +321,7 @@ router.get('/profile', authenticate, ensureIB, async (req, res) => {
         const userId = req.user.id;
         const result = await pool.query(
             `SELECT 
-                u.first_name, u.last_name, u.email, u.referral_code, u.referred_by,
+                u.first_name, u.last_name, u.email, u.referral_code, u.referred_by, u.is_banned,
                 ir.status as ib_status, ir.ib_type, ir.approved_at
              FROM users u
              JOIN ib_requests ir ON u.id = ir.user_id

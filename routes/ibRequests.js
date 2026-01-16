@@ -1104,7 +1104,7 @@ router.post('/:id/ban', authenticateAdmin, async (req, res, next) => {
 
     res.json({
       success: true,
-      message: is_banned ? 'IB banned successfully' : 'IB unbanned successfully',
+      message: is_banned ? 'IB locked successfully' : 'IB unlocked successfully',
       data: {
         user: updateResult.rows[0]
       }
@@ -2162,19 +2162,23 @@ router.get('/dashboard/stats', authenticateAdmin, async (req, res, next) => {
     );
     const activeIBs = parseInt(activeIBsResult.rows[0]?.count || 0);
 
-    // Active Users (30 days) - users who logged in or had activity in last 30 days
-    // For now, we'll use users created in last 30 days as a proxy
-    const activeUsers30DaysResult = await pool.query(
-      `SELECT COUNT(DISTINCT u.id) as count
-       FROM users u
-       WHERE u.created_at >= NOW() - INTERVAL '30 days'
-         OR EXISTS (
-           SELECT 1 FROM trading_accounts ta 
-           WHERE ta.user_id = u.id 
-           AND ta.created_at >= NOW() - INTERVAL '30 days'
-         )`
-    );
-    const activeUsers30Days = parseInt(activeUsers30DaysResult.rows[0]?.count || 0);
+    // Active Users (30 days) - users who have traded (generated commission) in last 30 days
+    let activeUsers30Days = 0;
+    try {
+      const activeCommCheck = await pool.query(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'ib_commissions')"
+      );
+      if (activeCommCheck.rows[0]?.exists) {
+        const activeUsersResult = await pool.query(
+          `SELECT COUNT(DISTINCT client_id) as count
+           FROM ib_commissions
+           WHERE created_at >= NOW() - INTERVAL '30 days'`
+        );
+        activeUsers30Days = parseInt(activeUsersResult.rows[0]?.count || 0);
+      }
+    } catch (e) {
+      console.error('Error fetching active users:', e);
+    }
 
     // Trading Accounts (active, non-demo)
     const tradingAccountsResult = await pool.query(
@@ -2201,7 +2205,7 @@ router.get('/dashboard/stats', authenticateAdmin, async (req, res, next) => {
     if (commissionTableCheck.rows[0]?.exists) {
       const commissionResult = await pool.query(
         `SELECT 
-          COALESCE(SUM(amount), 0) as total,
+          COALESCE(SUM(commission_amount), 0) as total,
           COUNT(DISTINCT ib_id) as ib_count
          FROM ib_commissions`
       );
@@ -2301,6 +2305,8 @@ router.get('/dashboard/commission-by-group', authenticateAdmin, async (req, res,
  */
 router.get('/dashboard/commission-chart', authenticateAdmin, async (req, res, next) => {
   try {
+    const { preset, startDate, endDate } = req.query;
+
     // Check if commission table exists
     const commissionTableCheck = await pool.query(
       `SELECT EXISTS (
@@ -2311,46 +2317,67 @@ router.get('/dashboard/commission-chart', authenticateAdmin, async (req, res, ne
     );
 
     if (!commissionTableCheck.rows[0]?.exists) {
-      // Return empty data for last 12 months
-      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
       return res.json({
         success: true,
-        data: months.map(() => 0)
+        data: { labels: [], data: [] }
       });
     }
 
-    // Get commission by month for last 12 months
-    const result = await pool.query(
-      `SELECT 
-        TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') as month,
-        EXTRACT(MONTH FROM DATE_TRUNC('month', created_at)) as month_num,
-        COALESCE(SUM(amount), 0) as total
-       FROM ib_commissions
-       WHERE created_at >= NOW() - INTERVAL '12 months'
-       GROUP BY DATE_TRUNC('month', created_at)
-       ORDER BY DATE_TRUNC('month', created_at) ASC`
-    );
+    let truncate = 'month';
+    let format = 'Mon';
+    let interval = '12 months';
 
-    // Create array for all 12 months
-    const monthMap = {
-      1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun',
-      7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
-    };
-
-    const monthData = {};
-    result.rows.forEach(row => {
-      monthData[parseInt(row.month_num)] = parseFloat(row.total || 0);
-    });
-
-    // Fill in all 12 months
-    const chartData = [];
-    for (let i = 1; i <= 12; i++) {
-      chartData.push(monthData[i] || 0);
+    if (preset === '1') {
+      truncate = 'hour';
+      format = 'HH24:00';
+      interval = '24 hours';
+    } else if (preset === '7') {
+      truncate = 'day';
+      format = 'DD Mon';
+      interval = '7 days';
+    } else if (preset === '30') {
+      truncate = 'day';
+      format = 'DD Mon';
+      interval = '30 days';
+    } else if (preset === 'YTD') {
+      truncate = 'month';
+      format = 'Mon';
+      interval = '12 months';
     }
+
+    let result;
+    if (preset === 'CUSTOM' && startDate && endDate) {
+      result = await pool.query(
+        `SELECT 
+          TO_CHAR(DATE_TRUNC($1, created_at), $2) as label,
+          COALESCE(SUM(commission_amount), 0) as total,
+          DATE_TRUNC($1, created_at) as sort_date
+         FROM ib_commissions
+         WHERE created_at >= $3 AND created_at <= $4
+         GROUP BY DATE_TRUNC($1, created_at)
+         ORDER BY sort_date ASC`,
+        [truncate, format, startDate, endDate]
+      );
+    } else {
+      result = await pool.query(
+        `SELECT 
+          TO_CHAR(DATE_TRUNC($1, created_at), $2) as label,
+          COALESCE(SUM(commission_amount), 0) as total,
+          DATE_TRUNC($1, created_at) as sort_date
+         FROM ib_commissions
+         WHERE created_at >= NOW() - CAST($3 AS INTERVAL)
+         GROUP BY DATE_TRUNC($1, created_at)
+         ORDER BY sort_date ASC`,
+        [truncate, format, interval]
+      );
+    }
+
+    const labels = result.rows.map(row => row.label);
+    const data = result.rows.map(row => parseFloat(row.total || 0));
 
     res.json({
       success: true,
-      data: chartData
+      data: { labels, data }
     });
   } catch (error) {
     console.error('Get commission chart error:', error);
@@ -2408,14 +2435,30 @@ router.get('/dashboard/commission-by-category', authenticateAdmin, async (req, r
       });
     }
 
-    // Categorize symbols
+    // Categorize symbols with timeframe filtering
+    const { preset, startDate, endDate } = req.query;
+    let whereClause = 'WHERE symbol IS NOT NULL';
+    const params = [];
+
+    if (preset === '1') {
+      whereClause += " AND created_at >= NOW() - INTERVAL '24 hours'";
+    } else if (preset === '7') {
+      whereClause += " AND created_at >= NOW() - INTERVAL '7 days'";
+    } else if (preset === '30') {
+      whereClause += " AND created_at >= NOW() - INTERVAL '30 days'";
+    } else if (preset === 'CUSTOM' && startDate && endDate) {
+      whereClause += " AND created_at >= $1 AND created_at <= $2";
+      params.push(startDate, endDate);
+    }
+
     const result = await pool.query(
       `SELECT 
         symbol,
-        SUM(amount) as total
+        SUM(commission_amount) as total
        FROM ib_commissions
-       WHERE symbol IS NOT NULL
-       GROUP BY symbol`
+       ${whereClause}
+       GROUP BY symbol`,
+      params
     );
 
     const categories = {
@@ -2480,6 +2523,7 @@ router.get('/dashboard/recent-requests', authenticateAdmin, async (req, res, nex
         ir.status,
         ir.ib_type,
         ir.created_at,
+        u.id as user_id,
         u.first_name,
         u.last_name,
         u.email
@@ -2544,22 +2588,22 @@ router.get('/dashboard/recent-commissions', authenticateAdmin, async (req, res, 
     // Get recent commissions with IB and group info
     const result = await pool.query(
       `SELECT 
-        ic.id,
-        ic.created_at,
-        ic.amount,
-        ic.symbol,
-        ic.lots,
-        mg.dedicated_name,
-        mg.group_name,
-        u.first_name,
-        u.last_name,
-        ir.id as ib_request_id
-       FROM ib_commissions ic
-       JOIN ib_requests ir ON ic.ib_id = ir.id
-       JOIN users u ON ir.user_id = u.id
-       LEFT JOIN mt5_groups mg ON ic.group_id = mg.id
-       ORDER BY ic.created_at DESC
-       LIMIT $1`,
+      ic.id,
+      ic.created_at,
+      ic.commission_amount as amount,
+      ic.symbol,
+      ic.lots,
+      mg.dedicated_name,
+      mg.group_name,
+      u.first_name,
+      u.last_name,
+      ir.id as ib_request_id
+     FROM ib_commissions ic
+     JOIN users u ON ic.ib_id = u.id
+     JOIN ib_requests ir ON u.id = ir.user_id
+     LEFT JOIN mt5_groups mg ON ic.group_id = mg.id
+     ORDER BY ic.created_at DESC
+     LIMIT $1`,
       [limit]
     );
 
@@ -3393,7 +3437,7 @@ router.get('/commission-distribution/list', authenticateAdmin, async (req, res, 
       if (hasCommissionTable) {
         const commissionResult = await pool.query(
           `SELECT 
-            COALESCE(SUM(amount), 0) as total_commission,
+            COALESCE(SUM(commission_amount), 0) as total_commission,
             COALESCE(SUM(lots), 0) as total_lots,
             COUNT(*) as total_trades
            FROM ib_commissions
@@ -3560,7 +3604,7 @@ router.get('/commission-distribution/:id/calculation', authenticateAdmin, async 
           ic.id,
           ic.symbol,
           ic.lots,
-          ic.amount,
+          ic.commission_amount as amount,
           ic.created_at,
           u.first_name,
           u.last_name,
@@ -3684,7 +3728,7 @@ router.get('/commission-distribution/:id/calculation', authenticateAdmin, async 
       if (hasCommissionTable) {
         const subIBCommResult = await pool.query(
           `SELECT 
-            COALESCE(SUM(amount), 0) as total_commission,
+            COALESCE(SUM(commission_amount), 0) as total_commission,
             COALESCE(SUM(lots), 0) as total_lots,
             COUNT(*) as total_trades
            FROM ib_commissions
@@ -3826,7 +3870,7 @@ router.get('/commission-distribution/:id/details', authenticateAdmin, async (req
     if (commissionTableCheck.rows[0]?.exists) {
       const commResult = await pool.query(
         `SELECT 
-          COALESCE(SUM(amount), 0) as total_commission,
+          COALESCE(SUM(commission_amount), 0) as total_commission,
           COALESCE(SUM(lots), 0) as total_lots,
           COUNT(*) as total_trades
          FROM ib_commissions
