@@ -108,7 +108,7 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
         );
 
         const ibRequestResult = await pool.query(
-            'SELECT group_pip_commissions FROM ib_requests WHERE user_id = $1 AND status = $2',
+            'SELECT group_pip_commissions, ib_balance FROM ib_requests WHERE user_id = $1 AND status = $2',
             [userId, 'approved']
         );
         const ibRates = ibRequestResult.rows[0]?.group_pip_commissions || {};
@@ -132,7 +132,7 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
 
         // 7. Get Recent Withdrawals
         const withdrawalsResult = await pool.query(
-            'SELECT amount, status, method, created_at FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10',
+            'SELECT amount, status, payment_method as method, created_at FROM ib_withdrawals WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10',
             [userId]
         );
 
@@ -143,7 +143,7 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
                 stats: {
                     clientCount: parseInt(clientsResult.rows[0]?.client_count || 0),
                     teamBalance: parseFloat(clientsResult.rows[0]?.total_team_balance || 0),
-                    availableBalance: parseFloat(walletResult.rows[0]?.balance || 0),
+                    availableBalance: parseFloat(ibRequestResult.rows[0]?.ib_balance || 0),
                     currency: walletResult.rows[0]?.currency || 'USD',
                     groups: groups,
                     myAccountCount: parseInt(myAccountsResult.rows[0]?.count || 0),
@@ -208,10 +208,19 @@ router.get('/clients', authenticate, ensureIB, async (req, res) => {
       SELECT 
         rt.id, rt.first_name, rt.last_name, rt.email, rt.created_at as join_date, rt.level,
         rt.referred_by_name, rt.referred_by_email,
-        COUNT(ta.id) as account_count,
-        COALESCE(SUM(ta.balance), 0) as total_balance
+        COUNT(DISTINCT ta.id) as account_count,
+        COALESCE(SUM(ta.balance), 0) as total_balance,
+        ir.status as ib_status,
+        ir.group_pip_commissions as sub_ib_rates,
+        ir.ib_balance as ib_balance,
+        ir.id as ib_request_id,
+        (
+             COALESCE((SELECT SUM(commission_amount) FROM ib_commissions WHERE ib_id = rt.id), 0) +
+             COALESCE((SELECT SUM(amount) FROM ib_distributions WHERE ib_id = ir.id), 0)
+        ) as total_commission_earned
       FROM referral_tree rt
       LEFT JOIN trading_accounts ta ON rt.id = ta.user_id AND ta.platform = 'MT5' AND ta.is_demo = FALSE
+      LEFT JOIN ib_requests ir ON ir.user_id = rt.id AND ir.status = 'approved'
       WHERE 1=1
     `;
         const params = [referralCode];
@@ -221,8 +230,8 @@ router.get('/clients', authenticate, ensureIB, async (req, res) => {
             params.push(`%${search.toLowerCase()}%`);
         }
 
-        query += ` GROUP BY rt.id, rt.first_name, rt.last_name, rt.email, rt.created_at, rt.level, rt.referred_by_name, rt.referred_by_email 
-                   ORDER BY rt.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        query += ` GROUP BY rt.id, rt.first_name, rt.last_name, rt.email, rt.created_at, rt.level, rt.referred_by_name, rt.referred_by_email, ir.status, ir.group_pip_commissions, ir.ib_balance, ir.id 
+                   ORDER BY rt.level ASC, rt.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
         params.push(limit, offset);
 
         const result = await pool.query(query, params);
@@ -322,7 +331,7 @@ router.get('/profile', authenticate, ensureIB, async (req, res) => {
         const result = await pool.query(
             `SELECT 
                 u.first_name, u.last_name, u.email, u.referral_code, u.referred_by, u.is_banned,
-                ir.status as ib_status, ir.ib_type, ir.approved_at
+                ir.status as ib_status, ir.ib_type, ir.approved_at, ir.ib_balance
              FROM users u
              JOIN ib_requests ir ON u.id = ir.user_id
              WHERE u.id = $1 AND ir.status = 'approved'`,
@@ -375,7 +384,8 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
                     avg_daily: 0,
                     active_clients: 0,
                     byCategory: [],
-                    monthlyTrend: []
+                    monthlyTrend: [],
+                    availableBalance: 0
                 }
             });
         }
@@ -433,6 +443,24 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
             [userId, start, end]
         );
 
+        // Get total manual distributions
+        const distributionResult = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0) as total 
+             FROM ib_distributions d
+             JOIN ib_requests ir ON d.ib_id = ir.id
+             WHERE ir.user_id = $1
+             AND d.created_at BETWEEN $2 AND $3`,
+            [userId, start, end]
+        );
+        const totalDistribution = parseFloat(distributionResult.rows[0]?.total || 0);
+
+        // Get Available Balance from ib_requests
+        const ibBalanceResult = await pool.query(
+            'SELECT ib_balance FROM ib_requests WHERE user_id = $1 AND status = \'approved\'',
+            [userId]
+        );
+        const availableBalance = parseFloat(ibBalanceResult.rows[0]?.ib_balance || 0);
+
         // Get monthly/weekly/daily trend using generate_series to fill gaps
         let interval = '1 day';
         let format = 'Mon DD';
@@ -486,7 +514,7 @@ router.get('/commission/summary', authenticate, ensureIB, async (req, res) => {
             data: {
                 ...statsResult.rows[0],
                 excluded: excludedResult.rows[0],
-                availableBalance: parseFloat(walletResult.rows[0]?.balance || 0),
+                availableBalance: availableBalance,
                 currency: walletResult.rows[0]?.currency || 'USD',
                 byCategory: categoryResult.rows,
                 monthlyTrend: trendResult.rows,

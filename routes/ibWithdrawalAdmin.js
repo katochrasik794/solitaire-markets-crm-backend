@@ -62,27 +62,27 @@ router.patch('/:id/approve', authenticateAdmin, async (req, res) => {
 
         const { user_id, amount } = withdrawal;
 
-        // 2. Check and deduct wallet balance
-        const walletResult = await client.query(
-            'SELECT id, balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+        // 2. Check and deduct IB balance
+        const ibResult = await client.query(
+            'SELECT id, ib_balance FROM ib_requests WHERE user_id = $1 AND status = \'approved\' FOR UPDATE',
             [user_id]
         );
 
-        if (walletResult.rows.length === 0) {
+        if (ibResult.rows.length === 0) {
             await client.query('ROLLBACK');
-            return res.status(404).json({ success: false, message: 'User wallet not found' });
+            return res.status(404).json({ success: false, message: 'Approved IB request not found. Cannot deduct balance.' });
         }
 
-        const balance = parseFloat(walletResult.rows[0].balance || 0);
-        if (balance < parseFloat(amount)) {
+        const currentIBBalance = parseFloat(ibResult.rows[0].ib_balance || 0);
+        if (currentIBBalance < parseFloat(amount)) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ success: false, message: 'User has insufficient balance to complete this withdrawal' });
+            return res.status(400).json({ success: false, message: 'User has insufficient IB balance to complete this withdrawal' });
         }
 
-        // 3. Deduct balance
+        // 3. Deduct from IB balance
         await client.query(
-            'UPDATE wallets SET balance = balance - $1, updated_at = NOW() WHERE user_id = $2',
-            [amount, user_id]
+            'UPDATE ib_requests SET ib_balance = ib_balance - $1, updated_at = NOW() WHERE id = $2',
+            [amount, ibResult.rows[0].id]
         );
 
         // 4. Update withdrawal status

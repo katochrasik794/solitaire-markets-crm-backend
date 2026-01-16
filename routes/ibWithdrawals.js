@@ -51,20 +51,20 @@ router.post('/', authenticate, ensureIB, async (req, res) => {
             });
         }
 
-        // 1. Check IB Available Balance (from wallets)
-        const walletResult = await pool.query(
-            'SELECT id, balance FROM wallets WHERE user_id = $1',
-            [userId]
+        // 1. Check IB Available Balance (from ib_requests)
+        const ibRequestResult = await pool.query(
+            'SELECT ib_balance FROM ib_requests WHERE user_id = $1 AND status = $2',
+            [userId, 'approved']
         );
 
-        if (walletResult.rows.length === 0) {
+        if (ibRequestResult.rows.length === 0) {
             return res.status(404).json({
                 success: false,
-                message: 'IB wallet not found'
+                message: 'Approved IB account not found'
             });
         }
 
-        const balance = parseFloat(walletResult.rows[0].balance || 0);
+        const balance = parseFloat(ibRequestResult.rows[0].ib_balance || 0);
         if (balance < parseFloat(amount)) {
             return res.status(400).json({
                 success: false,
