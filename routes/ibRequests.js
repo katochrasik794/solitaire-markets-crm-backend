@@ -1605,6 +1605,10 @@ router.get('/profiles-by-groups', authenticateAdmin, async (req, res, next) => {
         ir.referrer_ib_id,
         ir.group_pip_commissions,
         COALESCE(ir.ib_balance, 0) as ib_balance,
+        (
+           COALESCE((SELECT SUM(commission_amount) FROM ib_commissions WHERE ib_id = ir.id), 0) +
+           COALESCE((SELECT SUM(amount) FROM ib_distributions WHERE ib_id = ir.id), 0)
+        ) as total_commission,
         ir.approved_at,
         u.first_name,
         u.last_name,
@@ -1688,7 +1692,9 @@ router.get('/profiles-by-groups', authenticateAdmin, async (req, res, next) => {
         referralCode: ib.referral_code,
         referredBy: ib.referred_by,
         approvedAt: ib.approved_at,
+        approvedAt: ib.approved_at,
         ibBalance: parseFloat(ib.ib_balance || 0),
+        totalCommission: parseFloat(ib.total_commission || 0),
         groupPipCommissions: (() => {
           if (!ib.group_pip_commissions) return {};
           if (typeof ib.group_pip_commissions === 'string') {
@@ -1793,6 +1799,8 @@ router.get('/profiles-by-groups', authenticateAdmin, async (req, res, next) => {
       ibType: ib.ib_type || 'normal',
       referralCode: ib.referral_code,
       referredBy: ib.referred_by,
+      ibBalance: parseFloat(ib.ib_balance || 0).toFixed(2),
+      totalCommission: `$${parseFloat(ib.total_commission || 0).toFixed(2)}`,
       groupPipCommissions: (() => {
         if (!ib.group_pip_commissions) return {};
         if (typeof ib.group_pip_commissions === 'string') {
