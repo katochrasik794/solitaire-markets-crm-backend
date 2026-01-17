@@ -868,14 +868,16 @@ router.get('/roles', authenticateAdmin, async (req, res) => {
 // Create a new role
 router.post('/roles', authenticateAdmin, async (req, res) => {
   try {
-    const { name, description, permissions, featurePermissions } = req.body;
+    const { name, description, permissions, featurePermissions, features } = req.body;
     if (!name) return res.status(400).json({ ok: false, error: 'Role name is required' });
 
     // Build permissions object with features and feature_permissions
     let permsJson = { features: [] };
 
-    // Handle features (can be array or part of permissions object)
-    if (permissions && typeof permissions === 'object' && !Array.isArray(permissions)) {
+    // Handle features (can be passed directly as features array or in permissions object)
+    if (Array.isArray(features)) {
+      permsJson.features = features;
+    } else if (permissions && typeof permissions === 'object' && !Array.isArray(permissions)) {
       permsJson = { ...permissions };
     } else if (Array.isArray(permissions)) {
       permsJson.features = permissions;
@@ -919,10 +921,10 @@ router.post('/roles', authenticateAdmin, async (req, res) => {
 });
 
 // Update a role
-router.patch('/roles/:id', authenticateAdmin, async (req, res) => {
+router.put('/roles/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, permissions, featurePermissions } = req.body;
+    const { name, description, permissions, featurePermissions, features } = req.body;
 
     // Get existing role to merge with
     const existingRole = await pool.query(
@@ -936,8 +938,10 @@ router.patch('/roles/:id', authenticateAdmin, async (req, res) => {
 
     let permsJson = existingRole.rows[0].permissions || { features: [] };
 
-    // Update features if provided
-    if (permissions !== undefined) {
+    // Update features if provided (prioritize direct 'features' field)
+    if (Array.isArray(features)) {
+      permsJson.features = features;
+    } else if (permissions !== undefined) {
       if (Array.isArray(permissions)) {
         permsJson = { ...permsJson, features: permissions };
       } else if (typeof permissions === 'object' && permissions !== null) {
