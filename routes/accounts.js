@@ -737,5 +737,171 @@ router.post('/create', authenticate, async (req, res, next) => {
   }
 });
 
+/**
+ * PUT /api/accounts/:accountNumber/password
+ * Change MT5 account password
+ */
+router.put('/:accountNumber/password', authenticate, async (req, res, next) => {
+  try {
+    const { accountNumber } = req.params;
+    const { password } = req.body;
+    const userId = req.user.id;
+
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password is required'
+      });
+    }
+
+    // Verify account ownership
+    const accountCheck = await pool.query(
+      'SELECT id, account_number, user_id FROM trading_accounts WHERE account_number = $1 AND user_id = $2 AND platform = \'MT5\'',
+      [accountNumber, userId]
+    );
+
+    if (accountCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Account not found or does not belong to you'
+      });
+    }
+
+    // Call MT5 Service
+    try {
+      await mt5Service.changePassword(parseInt(accountNumber, 10), password, 'master');
+
+      // Update local DB
+      const encryptedPassword = encryptPassword(password);
+      await pool.query(
+        'UPDATE trading_accounts SET master_password = $1, updated_at = NOW() WHERE account_number = $2',
+        [encryptedPassword, accountNumber]
+      );
+
+      // Log action
+      await logUserAction({
+        userId: req.user.id,
+        userEmail: req.user.email,
+        actionType: 'mt5_password_change',
+        actionCategory: 'mt5',
+        targetType: 'mt5_account',
+        targetId: accountCheck.rows[0].id,
+        targetIdentifier: accountNumber,
+        description: `Changed password for MT5 account ${accountNumber}`,
+        req,
+        res
+      });
+
+      res.json({
+        success: true,
+        message: 'Password changed successfully'
+      });
+
+    } catch (mt5Error) {
+      console.error('MT5 Password Change Error:', mt5Error);
+      return res.status(400).json({
+        success: false,
+        message: mt5Error.message || 'Failed to change password on MT5 server'
+      });
+    }
+
+  } catch (error) {
+    console.error('Change password error:', error);
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/accounts/:accountNumber/leverage
+ * Change MT5 account leverage
+ */
+router.put('/:accountNumber/leverage', authenticate, async (req, res, next) => {
+  try {
+    const { accountNumber } = req.params;
+    const { leverage } = req.body;
+    const userId = req.user.id;
+
+    if (!leverage) {
+      return res.status(400).json({
+        success: false,
+        message: 'Leverage is required'
+      });
+    }
+
+    const newLeverage = parseInt(leverage, 10);
+    if (isNaN(newLeverage) || newLeverage <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid leverage value'
+      });
+    }
+
+    // Verify account ownership and check checks
+    const accountCheck = await pool.query(
+      'SELECT id, account_number, user_id, is_swap_free FROM trading_accounts WHERE account_number = $1 AND user_id = $2 AND platform = \'MT5\'',
+      [accountNumber, userId]
+    );
+
+    if (accountCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Account not found or does not belong to you'
+      });
+    }
+
+    const account = accountCheck.rows[0];
+
+    // Enforce swap-free limit
+    if (account.is_swap_free && newLeverage > 500) {
+      return res.status(400).json({
+        success: false,
+        message: 'Swap-free accounts cannot have leverage higher than 1:500'
+      });
+    }
+
+    // Call MT5 Service
+    try {
+      await mt5Service.updateUser(parseInt(accountNumber, 10), { leverage: newLeverage });
+
+      // Update local DB
+      await pool.query(
+        'UPDATE trading_accounts SET leverage = $1, updated_at = NOW() WHERE account_number = $2',
+        [newLeverage, accountNumber]
+      );
+
+      // Log action
+      await logUserAction({
+        userId: req.user.id,
+        userEmail: req.user.email,
+        actionType: 'mt5_leverage_change',
+        actionCategory: 'mt5',
+        targetType: 'mt5_account',
+        targetId: account.id,
+        targetIdentifier: accountNumber,
+        description: `Changed leverage for MT5 account ${accountNumber} to 1:${newLeverage}`,
+        req,
+        res
+      });
+
+      res.json({
+        success: true,
+        message: 'Leverage changed successfully',
+        data: { leverage: newLeverage }
+      });
+
+    } catch (mt5Error) {
+      console.error('MT5 Leverage Change Error:', mt5Error);
+      return res.status(400).json({
+        success: false,
+        message: mt5Error.message || 'Failed to update leverage on MT5 server'
+      });
+    }
+
+  } catch (error) {
+    console.error('Change leverage error:', error);
+    next(error);
+  }
+});
+
 export default router;
 
