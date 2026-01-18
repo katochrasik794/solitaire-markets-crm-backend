@@ -158,7 +158,12 @@ async function upsertSymbols(accountType, symbols, onProgress = null) {
 
         const pip_per_lot = Number(pipPerLotRaw) || 1.0;
         const pip_value = pipValueRaw !== null && pipValueRaw !== undefined ? Number(pipValueRaw) : null;
-        const commission = Number(commissionRaw) || 0;
+        // Auto-calculate commission if not provided, or override based on formula: Commission = PipValue * PipPerLot
+        // We use the calculated value to ensure consistency with the user's request
+        let commission = Number(commissionRaw) || 0;
+        if (pip_value !== null) {
+          commission = pip_per_lot * pip_value;
+        }
 
         const currency = sym.currency || sym.Currency || sym.CurrencyProfit || 'USD';
         const status = sym.status || sym.Status || 'active';
