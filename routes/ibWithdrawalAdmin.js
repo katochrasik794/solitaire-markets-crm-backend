@@ -97,8 +97,17 @@ router.patch('/:id/approve', authenticateAdmin, async (req, res) => {
         res.json({ success: true, message: 'Withdrawal approved and balance deducted' });
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('PATCH /api/admin/ib-withdrawals/:id/approve error:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
+        console.error('❌ PATCH /api/admin/ib-withdrawals/:id/approve error:', {
+            message: error.message,
+            stack: error.stack,
+            params: req.params,
+            admin: req.admin
+        });
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     } finally {
         client.release();
     }
@@ -114,6 +123,8 @@ router.patch('/:id/reject', authenticateAdmin, async (req, res) => {
         const adminId = req.admin.adminId;
         const { reason } = req.body;
 
+        console.log('🚫 Attempting to reject withdrawal:', { withdrawalId, adminId, reason });
+
         const result = await pool.query(
             `UPDATE ib_withdrawals 
              SET status = 'rejected', admin_id = $1, rejection_reason = $2, rejected_at = NOW(), updated_at = NOW() 
@@ -123,13 +134,25 @@ router.patch('/:id/reject', authenticateAdmin, async (req, res) => {
         );
 
         if (result.rows.length === 0) {
+            console.log('⚠️ Rejection failed: Withdrawal not found or not pending', { withdrawalId });
             return res.status(404).json({ success: false, message: 'Withdrawal request not found or not in pending status' });
         }
 
+        console.log('✅ Withdrawal rejected successfully:', withdrawalId);
         res.json({ success: true, message: 'Withdrawal request rejected' });
     } catch (error) {
-        console.error('PATCH /api/admin/ib-withdrawals/:id/reject error:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
+        console.error('❌ PATCH /api/admin/ib-withdrawals/:id/reject error:', {
+            message: error.message,
+            stack: error.stack,
+            params: req.params,
+            body: req.body,
+            admin: req.admin
+        });
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 });
 

@@ -647,6 +647,7 @@ router.get('/referral-report', authenticate, ensureIB, async (req, res) => {
                         deposits: { amount: node.total_deposits, count: node.deposit_count },
                         withdrawals: { amount: node.total_withdrawals, count: node.withdrawal_count },
                         netAmount: parseFloat(node.total_deposits) - parseFloat(node.total_withdrawals),
+                        join_date: node.created_at,
                         type: 'Client'
                     });
 
