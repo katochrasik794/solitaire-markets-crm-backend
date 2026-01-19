@@ -2268,24 +2268,58 @@ router.get('/dashboard/commission-by-group', authenticateAdmin, async (req, res,
       });
     }
 
+    const { preset, startDate, endDate } = req.query;
+
+    // Calculate date range filter
+    let dateFilter = '';
+    const queryParams = [];
+
+    // Helper to get date clause
+    const getDateClause = (paramIndex) => {
+      if (preset === '1') return `AND ic.created_at >= NOW() - INTERVAL '24 hours'`;
+      if (preset === '7') return `AND ic.created_at >= NOW() - INTERVAL '7 days'`;
+      if (preset === '30') return `AND ic.created_at >= NOW() - INTERVAL '30 days'`;
+      if (preset === 'YTD') return `AND ic.created_at >= DATE_TRUNC('year', NOW())`;
+      if (preset === 'CUSTOM' && startDate && endDate) {
+        return `AND ic.created_at >= $${paramIndex} AND ic.created_at <= $${paramIndex + 1}`;
+      }
+      return ''; // ALL or default
+    };
+
+    // Prepare custom date params if needed
+    const customParams = [];
+    if (preset === 'CUSTOM' && startDate && endDate) {
+      customParams.push(startDate, endDate);
+    }
+
+    const whereClause = getDateClause(1); // params start at $1 for the custom check inside join? No, join condition parameters
+
     // Get commission by group from mt5_groups
-    const result = await pool.query(
-      `SELECT 
+    // We filter the JOINED table ib_commissions by date
+    const groupQuery = `
+      SELECT 
         mg.id,
         mg.dedicated_name,
         mg.group_name,
         COALESCE(SUM(ic.commission_amount), 0) as total_commission,
         COUNT(DISTINCT ic.ib_id) as ib_count
        FROM mt5_groups mg
-       LEFT JOIN ib_commissions ic ON ic.group_id = mg.id
+       LEFT JOIN ib_commissions ic ON ic.group_id = mg.id ${whereClause}
        WHERE mg.is_active = TRUE 
          AND LOWER(mg.group_name) NOT LIKE '%demo%'
        GROUP BY mg.id, mg.dedicated_name, mg.group_name
-       ORDER BY total_commission DESC`
-    );
+       ORDER BY total_commission DESC
+    `;
 
-    // Calculate total for percentage
-    const totalResult = await pool.query('SELECT COALESCE(SUM(commission_amount), 0) as total FROM ib_commissions');
+    const result = await pool.query(groupQuery, customParams);
+
+    // Calculate total for percentage with SAME filter
+    const totalQuery = `
+      SELECT COALESCE(SUM(commission_amount), 0) as total 
+      FROM ib_commissions ic
+      WHERE 1=1 ${whereClause}
+    `;
+    const totalResult = await pool.query(totalQuery, customParams);
     const totalCommission = parseFloat(totalResult.rows[0]?.total || 0);
 
     const groups = result.rows.map(row => {
