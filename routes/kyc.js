@@ -349,7 +349,8 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
         const shouldUpdateReviewedAt = status === 'approved' || status === 'rejected';
         const reviewedAtVal = shouldUpdateReviewedAt ? new Date() : null;
 
-        `UPDATE kyc_verifications 
+        const updateResult = await pool.query(
+          `UPDATE kyc_verifications 
            SET status = $1,
                sumsub_applicant_id = COALESCE($2::text, sumsub_applicant_id),
                sumsub_review_result = COALESCE($3::text, sumsub_review_result),
@@ -371,79 +372,79 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
           ]
         );
 
-// If no record was updated, insert a new one
-if (updateResult.rowCount === 0) {
-  await pool.query(
-    `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, reviewed_at, updated_at)
+        // If no record was updated, insert a new one
+        if (updateResult.rowCount === 0) {
+          await pool.query(
+            `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, reviewed_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
-    [
-      req.user.id,
-      status,
-      sumsubApplicantId,
-      reviewResult,
-      reviewComment,
-      statusData?.reviewStatus || statusData?.status || 'unknown',
-      JSON.stringify(sumsubResponseData),
-      reviewedAtVal
-    ]
-  );
-}
+            [
+              req.user.id,
+              status,
+              sumsubApplicantId,
+              reviewResult,
+              reviewComment,
+              statusData?.reviewStatus || statusData?.status || 'unknown',
+              JSON.stringify(sumsubResponseData),
+              reviewedAtVal
+            ]
+          );
+        }
 
-console.log(`✅ Updated KYC status for user ${req.user.id} from Sumsub: ${status}`);
+        console.log(`✅ Updated KYC status for user ${req.user.id} from Sumsub: ${status}`);
       } catch (sumsubError) {
-  console.error('⚠️ Error fetching data from Sumsub API:', sumsubError);
-  // Store error response if available
-  let errorResponseData = {
-    error: true,
-    message: sumsubError.message || 'Failed to fetch data from Sumsub'
-  };
+        console.error('⚠️ Error fetching data from Sumsub API:', sumsubError);
+        // Store error response if available
+        let errorResponseData = {
+          error: true,
+          message: sumsubError.message || 'Failed to fetch data from Sumsub'
+        };
 
-  if (sumsubError.errorResponse) {
-    errorResponseData = sumsubError.errorResponse;
-  }
+        if (sumsubError.errorResponse) {
+          errorResponseData = sumsubError.errorResponse;
+        }
 
-  // Store error in database
-  const updateResult = await pool.query(
-    `UPDATE kyc_verifications 
+        // Store error in database
+        const updateResult = await pool.query(
+          `UPDATE kyc_verifications 
            SET sumsub_verification_result = COALESCE(sumsub_verification_result::jsonb || $1::jsonb, $1::jsonb),
                updated_at = NOW()
            WHERE user_id = $2`,
-    [
-      JSON.stringify({ fetchError: errorResponseData }),
-      req.user.id
-    ]
-  );
+          [
+            JSON.stringify({ fetchError: errorResponseData }),
+            req.user.id
+          ]
+        );
 
-  // If no record exists, create one with error
-  if (updateResult.rowCount === 0) {
-    await pool.query(
-      `INSERT INTO kyc_verifications (user_id, status, sumsub_verification_result, updated_at)
+        // If no record exists, create one with error
+        if (updateResult.rowCount === 0) {
+          await pool.query(
+            `INSERT INTO kyc_verifications (user_id, status, sumsub_verification_result, updated_at)
              VALUES ($1, 'pending', $2, NOW())`,
-      [
-        req.user.id,
-        JSON.stringify({ fetchError: errorResponseData })
-      ]
-    );
-  }
-}
+            [
+              req.user.id,
+              JSON.stringify({ fetchError: errorResponseData })
+            ]
+          );
+        }
+      }
     } else {
-  // Use database status
-  if (status === 'approved') reviewResult = 'GREEN';
-  if (status === 'rejected') reviewResult = 'RED';
-}
+      // Use database status
+      if (status === 'approved') reviewResult = 'GREEN';
+      if (status === 'rejected') reviewResult = 'RED';
+    }
 
-res.json({
-  success: true,
-  data: {
-    reviewResult,
-    status,
-    reviewComment
-  }
-});
+    res.json({
+      success: true,
+      data: {
+        reviewResult,
+        status,
+        reviewComment
+      }
+    });
   } catch (error) {
-  console.error('❌ Get Sumsub status error:', error);
-  res.status(500).json({ success: false, error: error.message });
-}
+    console.error('❌ Get Sumsub status error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 
