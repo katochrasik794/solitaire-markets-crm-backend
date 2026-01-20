@@ -1,8 +1,7 @@
 import express from 'express';
 import pool from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
-import { createAccessToken } from '../services/sumsub.service.js';
-import { getApplicantData, getApplicantStatus } from '../services/sumsub.js';
+import { createAccessToken, getApplicantData, getApplicantStatus } from '../services/sumsub.service.js';
 
 const router = express.Router();
 
@@ -37,8 +36,8 @@ router.get('/status', authenticate, async (req, res) => {
 
     // If no KYC record exists, default to unverified
     // Normalize to lowercase for consistency
-    const status = kycResult.rows[0]?.status 
-      ? String(kycResult.rows[0].status).toLowerCase() 
+    const status = kycResult.rows[0]?.status
+      ? String(kycResult.rows[0].status).toLowerCase()
       : 'unverified';
 
     // Use sumsub_applicant_id from kyc_verifications if available, otherwise from users table
@@ -57,8 +56,8 @@ router.get('/status', authenticate, async (req, res) => {
     console.error('❌ Get KYC info error:', error);
     console.error('Error stack:', error.stack);
     console.error('Request user:', req.user);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       error: error.message || 'Failed to fetch KYC info',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
@@ -73,9 +72,9 @@ router.post('/profile', authenticate, async (req, res) => {
 
     // Validate required fields
     if (!hasTradingExperience || !employmentStatus || !annualIncome || !totalNetWorth || !sourceOfWealth) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'All fields are required' 
+      return res.status(400).json({
+        success: false,
+        error: 'All fields are required'
       });
     }
 
@@ -159,8 +158,8 @@ router.post('/sumsub/init', authenticate, async (req, res) => {
         hasAppToken: !!process.env.SUMSUB_APP_TOKEN,
         hasSecretKey: !!process.env.SUMSUB_SECRET_KEY
       });
-      return res.status(500).json({ 
-        success: false, 
+      return res.status(500).json({
+        success: false,
         message: 'Sumsub verification service is not configured. Please contact support.',
         error: 'SUMSUB_APP_TOKEN or SUMSUB_SECRET_KEY is missing'
       });
@@ -168,7 +167,7 @@ router.post('/sumsub/init', authenticate, async (req, res) => {
 
     const userId = req.user.id.toString();
     const levelName = process.env.SUMSUB_LEVEL_NAME || 'id-only';
-    
+
     console.log('Sumsub configuration:', {
       hasAppToken: !!process.env.SUMSUB_APP_TOKEN,
       hasSecretKey: !!process.env.SUMSUB_SECRET_KEY,
@@ -182,8 +181,8 @@ router.post('/sumsub/init', authenticate, async (req, res) => {
 
     if (!tokenData || !tokenData.token) {
       console.error('Invalid token data from Sumsub:', tokenData);
-      return res.status(500).json({ 
-        success: false, 
+      return res.status(500).json({
+        success: false,
         message: 'Failed to get access token from Sumsub. Please try again.',
         error: 'Invalid token data'
       });
@@ -208,7 +207,7 @@ router.post('/sumsub/init', authenticate, async (req, res) => {
       message: error.message,
       stack: error.stack
     });
-    
+
     // Provide more specific error messages
     let errorMessage = 'Failed to initialize verification. Please try again.';
     if (error.message.includes('SUMSUB_SECRET_KEY is missing') || error.message.includes('SUMSUB_APP_TOKEN is missing')) {
@@ -221,8 +220,8 @@ router.post('/sumsub/init', authenticate, async (req, res) => {
       errorMessage = error.message;
     }
 
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: errorMessage,
       error: error.message || 'Failed to initialize Sumsub'
     });
@@ -254,7 +253,7 @@ router.get('/sumsub/access-token/:applicantId', authenticate, async (req, res) =
 router.get('/sumsub/status', authenticate, async (req, res) => {
   try {
     const refresh = req.query.refresh === 'true';
-    
+
     // Get user's sumsub applicant ID
     const userResult = await pool.query(
       'SELECT sumsub_applicant_id, kyc_status FROM users WHERE id = $1',
@@ -275,7 +274,7 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
           getApplicantStatus(sumsubApplicantId),
           getApplicantData(sumsubApplicantId)
         ]);
-        
+
         let statusData = null;
         let applicantData = null;
         let sumsubResponseData = {};
@@ -284,7 +283,7 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
         if (sumsubStatus.status === 'fulfilled') {
           statusData = sumsubStatus.value;
           console.log(`📊 Sumsub status for applicant ${sumsubApplicantId}:`, JSON.stringify(statusData, null, 2));
-          
+
           // Extract review result from Sumsub response
           if (statusData.reviewResult) {
             reviewResult = statusData.reviewResult.reviewAnswer || statusData.reviewResult.reviewStatus;
@@ -390,7 +389,7 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
           error: true,
           message: sumsubError.message || 'Failed to fetch data from Sumsub'
         };
-        
+
         if (sumsubError.errorResponse) {
           errorResponseData = sumsubError.errorResponse;
         }
@@ -516,7 +515,7 @@ router.post('/sumsub/callback', authenticate, async (req, res) => {
           console.log(`📥 Fetching full applicant data for applicant ${sumsubApplicantId}`);
           const fullApplicantData = await getApplicantData(sumsubApplicantId);
           console.log(`✅ Retrieved full applicant data with idDocs`);
-          
+
           sumsubResponseData = {
             ...sumsubResponseData,
             fullApplicantData: fullApplicantData,
@@ -617,7 +616,7 @@ router.post('/webhook', async (req, res) => {
   try {
     const payload = req.body;
     console.log('📧 Sumsub webhook received:', JSON.stringify(payload, null, 2));
-    
+
     const { externalUserId, type, reviewResult, applicantId } = payload;
 
     // Check if payload contains error response (code, description, correlationId)
@@ -657,14 +656,14 @@ router.post('/webhook', async (req, res) => {
           );
         }
       }
-      
+
       return res.status(200).send('OK - Error stored');
     }
 
     // Handle different webhook event types
     // Also handle cases where reviewStatus is 'completed' or reviewResult exists but type might be missing
-    if (type === 'applicantReviewed' || type === 'applicantStatusChanged' || 
-        payload.reviewStatus === 'completed' || payload.reviewResult || reviewResult) {
+    if (type === 'applicantReviewed' || type === 'applicantStatusChanged' ||
+      payload.reviewStatus === 'completed' || payload.reviewResult || reviewResult) {
       // Extract userId from externalUserId (format: "user_123" or just "123")
       let userId = null;
       if (externalUserId) {
@@ -707,22 +706,22 @@ router.post('/webhook', async (req, res) => {
         status = 'rejected';
       }
 
-      const reviewComment = reviewResult?.reviewComment || reviewResult?.comment || 
-                           payload.reviewComment || payload.comment || null;
+      const reviewComment = reviewResult?.reviewComment || reviewResult?.comment ||
+        payload.reviewComment || payload.comment || null;
 
       console.log(`📝 Updating KYC status for user ${userId}: ${status}`, { reviewAnswer, reviewComment });
 
       // Fetch full applicant data (including idDocs) when verification is completed (approved or rejected)
       let fullApplicantData = null;
       let sumsubResponseData = payload;
-      
+
       const actualApplicantId = applicantId || externalUserId || userId.toString();
       if ((status === 'approved' || status === 'rejected') && actualApplicantId) {
         try {
           console.log(`📥 Fetching full applicant data for applicant ${actualApplicantId}`);
           fullApplicantData = await getApplicantData(actualApplicantId);
           console.log(`✅ Retrieved full applicant data with idDocs:`, JSON.stringify(fullApplicantData, null, 2));
-          
+
           // Merge webhook payload with full applicant data
           sumsubResponseData = {
             ...payload,
@@ -787,8 +786,8 @@ router.post('/webhook', async (req, res) => {
           `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, sumsub_webhook_received_at, reviewed_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), CASE WHEN $2 = 'approved' OR $2 = 'rejected' THEN NOW() ELSE NULL END, NOW())`,
           [
-            userId, 
-            status, 
+            userId,
+            status,
             actualApplicantId,
             reviewAnswer,
             reviewComment,
