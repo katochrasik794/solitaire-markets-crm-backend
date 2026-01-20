@@ -342,6 +342,8 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
         );
 
         // Update kyc_verifications table - preserve existing profile data
+        const shouldUpdateReviewedAt = status === 'approved' || status === 'rejected';
+
         const updateResult = await pool.query(
           `UPDATE kyc_verifications 
            SET status = $1,
@@ -350,7 +352,7 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
                sumsub_review_comment = COALESCE($4, sumsub_review_comment),
                sumsub_verification_status = COALESCE($5, sumsub_verification_status),
                sumsub_verification_result = $6,
-               reviewed_at = CASE WHEN $1 = 'approved' OR $1 = 'rejected' THEN NOW() ELSE reviewed_at END,
+               reviewed_at = CASE WHEN $8::boolean THEN NOW() ELSE reviewed_at END,
                updated_at = NOW()
            WHERE user_id = $7`,
           [
@@ -360,7 +362,8 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
             reviewComment,
             statusData?.reviewStatus || statusData?.status || 'unknown',
             JSON.stringify(sumsubResponseData),
-            req.user.id
+            req.user.id,
+            shouldUpdateReviewedAt
           ]
         );
 
@@ -368,7 +371,7 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
         if (updateResult.rowCount === 0) {
           await pool.query(
             `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, reviewed_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $2 = 'approved' OR $2 = 'rejected' THEN NOW() ELSE NULL END, NOW())`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $8::boolean THEN NOW() ELSE NULL END, NOW())`,
             [
               req.user.id,
               status,
@@ -376,7 +379,8 @@ router.get('/sumsub/status', authenticate, async (req, res) => {
               reviewResult,
               reviewComment,
               statusData?.reviewStatus || statusData?.status || 'unknown',
-              JSON.stringify(sumsubResponseData)
+              JSON.stringify(sumsubResponseData),
+              shouldUpdateReviewedAt
             ]
           );
         }
@@ -450,22 +454,24 @@ router.post('/update-status', authenticate, async (req, res) => {
       [status, req.user.id]
     );
 
+    const shouldUpdateReviewedAt = status === 'approved' || status === 'rejected';
+
     // Sync to kyc_verifications - preserve existing profile data
     const updateResult = await pool.query(
       `UPDATE kyc_verifications 
        SET status = $1, 
-           reviewed_at = CASE WHEN $1 = 'approved' OR $1 = 'rejected' THEN NOW() ELSE reviewed_at END,
+           reviewed_at = CASE WHEN $3::boolean THEN NOW() ELSE reviewed_at END,
            updated_at = NOW()
        WHERE user_id = $2`,
-      [status, req.user.id]
+      [status, req.user.id, shouldUpdateReviewedAt]
     );
 
     // If no record was updated, insert a new one
     if (updateResult.rowCount === 0) {
       await pool.query(
         `INSERT INTO kyc_verifications (user_id, status, reviewed_at, updated_at)
-         VALUES ($1, $2, CASE WHEN $2 = 'approved' OR $2 = 'rejected' THEN NOW() ELSE NULL END, NOW())`,
-        [req.user.id, status]
+         VALUES ($1, $2, CASE WHEN $3::boolean THEN NOW() ELSE NULL END, NOW())`,
+        [req.user.id, status, shouldUpdateReviewedAt]
       );
     }
 
@@ -540,6 +546,8 @@ router.post('/sumsub/callback', authenticate, async (req, res) => {
         [status, userId]
       );
 
+      const shouldUpdateReviewedAt = status === 'approved' || status === 'rejected';
+
       // Update or insert into kyc_verifications table
       const updateResult = await pool.query(
         `UPDATE kyc_verifications 
@@ -549,7 +557,7 @@ router.post('/sumsub/callback', authenticate, async (req, res) => {
              sumsub_review_comment = COALESCE($4, sumsub_review_comment),
              sumsub_verification_status = COALESCE($5, sumsub_verification_status),
              sumsub_verification_result = $6,
-             reviewed_at = CASE WHEN $1 = 'approved' OR $1 = 'rejected' THEN NOW() ELSE reviewed_at END,
+             reviewed_at = CASE WHEN $8::boolean THEN NOW() ELSE reviewed_at END,
              updated_at = NOW()
          WHERE user_id = $7`,
         [
@@ -559,7 +567,8 @@ router.post('/sumsub/callback', authenticate, async (req, res) => {
           reviewComment,
           payload?.reviewStatus || 'completed',
           JSON.stringify(sumsubResponseData),
-          userId
+          userId,
+          shouldUpdateReviewedAt
         ]
       );
 
@@ -567,7 +576,7 @@ router.post('/sumsub/callback', authenticate, async (req, res) => {
       if (updateResult.rowCount === 0) {
         await pool.query(
           `INSERT INTO kyc_verifications (user_id, status, sumsub_applicant_id, sumsub_review_result, sumsub_review_comment, sumsub_verification_status, sumsub_verification_result, reviewed_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $2 = 'approved' OR $2 = 'rejected' THEN NOW() ELSE NULL END, NOW())`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $8::boolean THEN NOW() ELSE NULL END, NOW())`,
           [
             userId,
             status,
@@ -575,7 +584,8 @@ router.post('/sumsub/callback', authenticate, async (req, res) => {
             reviewAnswer,
             reviewComment,
             payload?.reviewStatus || 'completed',
-            JSON.stringify(sumsubResponseData)
+            JSON.stringify(sumsubResponseData),
+            shouldUpdateReviewedAt
           ]
         );
       }
