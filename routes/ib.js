@@ -108,7 +108,7 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
         );
 
         const ibRequestResult = await pool.query(
-            'SELECT group_pip_commissions, ib_balance FROM ib_requests WHERE user_id = $1 AND status = $2',
+            'SELECT group_pip_commissions, ib_balance, plan_type, show_commission_structure FROM ib_requests WHERE user_id = $1 AND status = $2',
             [userId, 'approved']
         );
         const ibRates = ibRequestResult.rows[0]?.group_pip_commissions || {};
@@ -150,7 +150,9 @@ router.get('/dashboard', authenticate, ensureIB, async (req, res) => {
                     myTotalBalance: parseFloat(myAccountsResult.rows[0]?.balance || 0),
                     myTotalEquity: parseFloat(myAccountsResult.rows[0]?.equity || 0),
                     ibStatus: ibStatusResult.rows[0]?.is_banned ? 'locked' : (ibStatusResult.rows[0]?.status || 'none'),
-                    ibType: ibStatusResult.rows[0]?.ib_type || 'normal'
+                    ibType: ibStatusResult.rows[0]?.ib_type || 'normal',
+                    planType: ibRequestResult.rows[0]?.plan_type,
+                    showCommissionStructure: ibRequestResult.rows[0]?.show_commission_structure ?? true
                 },
                 recentWithdrawals: withdrawalsResult.rows
             }
@@ -327,16 +329,25 @@ router.get('/tree', authenticate, ensureIB, async (req, res) => {
  */
 router.get('/profile', authenticate, ensureIB, async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = parseInt(req.user.id);
+        if (isNaN(userId)) {
+            return res.status(400).json({ success: false, message: 'Invalid user ID' });
+        }
+
         const result = await pool.query(
             `SELECT 
                 u.first_name, u.last_name, u.email, u.referral_code, u.referred_by, u.is_banned,
-                ir.status as ib_status, ir.ib_type, ir.approved_at, ir.ib_balance
+                ir.status as ib_status, ir.ib_type, ir.approved_at, ir.ib_balance, ir.plan_type, ir.show_commission_structure
              FROM users u
              JOIN ib_requests ir ON u.id = ir.user_id
-             WHERE u.id = $1 AND ir.status = 'approved'`,
+             WHERE u.id = $1 AND ir.status = 'approved'
+             ORDER BY ir.created_at DESC LIMIT 1`,
             [userId]
         );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'IB profile not found' });
+        }
 
         res.json({
             success: true,
@@ -344,7 +355,56 @@ router.get('/profile', authenticate, ensureIB, async (req, res) => {
         });
     } catch (error) {
         console.error('GET /ib/profile error:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
+        res.status(500).json({ success: false, message: 'Internal server error: ' + error.message });
+    }
+});
+
+/**
+ * POST /api/ib/select-plan
+ * Allow Master IB to select their plan (Normal/Advanced)
+ */
+router.post('/select-plan', authenticate, ensureIB, async (req, res, next) => {
+    try {
+        const userId = req.user.id;
+        const { plan_type } = req.body;
+
+        if (!plan_type || !['normal', 'advanced'].includes(plan_type)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid plan_type is required (normal or advanced)'
+            });
+        }
+
+        // Check if plan is already set
+        const statusRes = await pool.query(
+            'SELECT plan_type FROM ib_requests WHERE user_id = $1 AND status = $2',
+            [userId, 'approved']
+        );
+
+        if (statusRes.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Approved IB request not found' });
+        }
+
+        if (statusRes.rows[0].plan_type !== null) {
+            return res.status(400).json({
+                success: false,
+                message: 'Plan is already set and cannot be changed'
+            });
+        }
+
+        // Update plan_type
+        await pool.query(
+            'UPDATE ib_requests SET plan_type = $1, updated_at = NOW() WHERE user_id = $2 AND status = $3',
+            [plan_type, userId, 'approved']
+        );
+
+        res.json({
+            success: true,
+            message: `Successfully enrolled in ${plan_type} plan`
+        });
+    } catch (error) {
+        console.error('POST /ib/select-plan error:', error);
+        next(error);
     }
 });
 

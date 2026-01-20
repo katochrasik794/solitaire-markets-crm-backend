@@ -5,6 +5,197 @@ import { authenticate, authenticateAdmin } from '../middleware/auth.js';
 const router = express.Router();
 
 /**
+ * GET /api/ib-requests/plans
+ * Get all saved plans for the current IB
+ */
+router.get('/plans', authenticate, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const result = await pool.query(
+      'SELECT * FROM ib_plans WHERE user_id = $1 ORDER BY created_at DESC',
+      [userId]
+    );
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Get IB plans error:', error);
+    next(error);
+  }
+});
+
+/**
+ * GET /api/ib-requests/:id/plans
+ * Get all saved plans for a specific IB (admin only)
+ */
+router.get('/:id/plans', authenticateAdmin, async (req, res, next) => {
+  try {
+    const requestId = parseInt(req.params.id);
+
+    // Get user_id for this request
+    const ibRes = await pool.query('SELECT user_id FROM ib_requests WHERE id = $1', [requestId]);
+    if (ibRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'IB request not found' });
+    }
+    const userId = ibRes.rows[0].user_id;
+
+    const result = await pool.query(
+      'SELECT * FROM ib_plans WHERE user_id = $1 ORDER BY created_at DESC',
+      [userId]
+    );
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Get IB plans error (admin):', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/ib-requests/plans
+ * Save a new IB plan (custom link structure)
+ */
+router.post('/plans', authenticate, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const { name, plan_type, levels_count, structure, link_data } = req.body;
+
+    if (!name || !levels_count || !structure || !link_data) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name, levels count, structure, and link data are required'
+      });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO ib_plans 
+        (user_id, name, plan_type, levels_count, structure, link_data)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [userId, name, plan_type || 'advanced', levels_count, JSON.stringify(structure), link_data]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'IB plan saved successfully',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Save IB plan error:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /api/ib-requests/admin/plans
+ * Admin creates a plan for a specific IB
+ */
+router.post('/admin/plans', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { name, plan_type, levels_count, structure, link_data, user_id } = req.body;
+
+    if (!name || !levels_count || !structure || !link_data || !user_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name, levels count, structure, link data, and user_id are required'
+      });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO ib_plans 
+        (user_id, name, plan_type, levels_count, structure, link_data)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [user_id, name, plan_type || 'advanced', levels_count, JSON.stringify(structure), link_data]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'IB plan created successfully by admin',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Admin create plan error:', error);
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/ib-requests/plans/:planId
+ * Update an existing IB plan (admin only)
+ */
+router.put('/plans/:planId', authenticateAdmin, async (req, res, next) => {
+  try {
+    const planId = parseInt(req.params.planId);
+    const { name, levels_count, structure, link_data } = req.body;
+
+    if (!name || !levels_count || !structure) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name, levels_count, and structure are required'
+      });
+    }
+
+    const result = await pool.query(
+      `UPDATE ib_plans 
+       SET name = $1, levels_count = $2, structure = $3, link_data = COALESCE($4, link_data), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5
+       RETURNING *`,
+      [name, levels_count, JSON.stringify(structure), link_data, planId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'IB plan not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'IB plan updated successfully',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Update IB plan error:', error);
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/ib-requests/plans/:planId
+ * Delete an IB plan (admin only)
+ */
+router.delete('/plans/:planId', authenticateAdmin, async (req, res, next) => {
+  try {
+    const planId = parseInt(req.params.planId);
+
+    const result = await pool.query(
+      'DELETE FROM ib_plans WHERE id = $1 RETURNING *',
+      [planId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'IB plan not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'IB plan deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete IB plan error:', error);
+    next(error);
+  }
+});
+
+/**
  * POST /api/ib-requests
  * Create a new IB partnership application
  */
@@ -566,6 +757,10 @@ router.get('/admin', authenticateAdmin, async (req, res, next) => {
     if (existingCols.has('referrer_ib_id')) selectCols.push('ir.referrer_ib_id');
     if (existingCols.has('group_pip_commissions')) selectCols.push('ir.group_pip_commissions');
     if (existingCols.has('approved_at')) selectCols.push('ir.approved_at');
+    if (existingCols.has('plan_type')) selectCols.push('ir.plan_type');
+
+    // Add custom plans count subquery
+    selectCols.push('(SELECT COUNT(*) FROM ib_plans WHERE user_id = ir.user_id) as custom_plans_count');
 
     // Check if is_banned column exists in users table
     const userColsRes = await pool.query(
@@ -623,6 +818,9 @@ router.get('/admin', authenticateAdmin, async (req, res, next) => {
         }
         return row.group_pip_commissions;
       })(),
+      planType: row.plan_type || null,
+      customPlansCount: parseInt(row.custom_plans_count || 0),
+      workingPlansCount: row.plan_type === 'normal' ? 1 : parseInt(row.custom_plans_count || 0),
       approvedAt: row.approved_at || null,
       rejectionReason: row.rejection_reason,
       reviewedBy: row.reviewed_by,
@@ -692,6 +890,7 @@ router.get('/active-groups', authenticateAdmin, async (req, res, next) => {
  * Get list of approved Master IBs for referrer selection
  */
 router.get('/master-ibs', authenticateAdmin, async (req, res, next) => {
+  console.log('GET /api/ib-requests/master-ibs hit');
   try {
     // Check if ib_type column exists
     const colsRes = await pool.query(
@@ -757,7 +956,7 @@ router.get('/master-ibs', authenticateAdmin, async (req, res, next) => {
 router.post('/:id/approve', authenticateAdmin, async (req, res, next) => {
   try {
     const requestId = parseInt(req.params.id);
-    const { ib_type, referrer_ib_id, group_pip_commissions } = req.body;
+    const { ib_type, referrer_ib_id, group_pip_commissions, plan_type, show_commission_structure } = req.body;
 
     if (!requestId || isNaN(requestId)) {
       return res.status(400).json({
@@ -869,16 +1068,20 @@ router.post('/:id/approve', authenticateAdmin, async (req, res, next) => {
            ib_type = $1,
            referrer_ib_id = $2,
            group_pip_commissions = $3,
+           plan_type = $4,
+           show_commission_structure = $5,
            approved_at = NOW(),
            reviewed_by = NULL,
            reviewed_at = NOW(),
            updated_at = NOW()
-       WHERE id = $4
+       WHERE id = $6
        RETURNING *`,
       [
         normalizedIbType,
         referrer_ib_id || null,
         JSON.stringify(pipCommissions),
+        plan_type || null, // Allow NULL so user can pick
+        show_commission_structure !== false,
         requestId
       ]
     );
@@ -1359,7 +1562,7 @@ router.post('/commission-distributions/add-all', authenticateAdmin, async (req, 
 router.post('/:id/ib-type', authenticateAdmin, async (req, res, next) => {
   try {
     const requestId = parseInt(req.params.id);
-    const { ib_type, referrer_ib_id } = req.body;
+    const { ib_type, referrer_ib_id, plan_type, show_commission_structure } = req.body;
 
     if (!requestId || isNaN(requestId)) {
       return res.status(400).json({
@@ -1454,6 +1657,14 @@ router.post('/:id/ib-type', authenticateAdmin, async (req, res, next) => {
       params.push(referrer_ib_id || null);
       paramIndex++;
     }
+
+    updateQuery += `, plan_type = $${paramIndex}`;
+    params.push(plan_type !== undefined ? plan_type : null); // undefined means keep current, but here we usually pass what we want
+    paramIndex++;
+
+    updateQuery += `, show_commission_structure = $${paramIndex}`;
+    params.push(show_commission_structure !== false);
+    paramIndex++;
 
     updateQuery += ` WHERE id = $${paramIndex} RETURNING *`;
     params.push(requestId);
@@ -1610,6 +1821,8 @@ router.get('/profiles-by-groups', authenticateAdmin, async (req, res, next) => {
            COALESCE((SELECT SUM(amount) FROM ib_distributions WHERE ib_id = ir.id), 0)
         ) as total_commission,
         ir.approved_at,
+        ir.plan_type,
+        (SELECT COUNT(*) FROM ib_plans WHERE user_id = ir.user_id) as custom_plans_count,
         u.first_name,
         u.last_name,
         u.email,
@@ -1695,6 +1908,9 @@ router.get('/profiles-by-groups', authenticateAdmin, async (req, res, next) => {
         approvedAt: ib.approved_at,
         ibBalance: parseFloat(ib.ib_balance || 0),
         totalCommission: parseFloat(ib.total_commission || 0),
+        planType: ib.plan_type || null,
+        customPlansCount: parseInt(ib.custom_plans_count || 0),
+        workingPlansCount: ib.plan_type === 'normal' ? 1 : parseInt(ib.custom_plans_count || 0),
         groupPipCommissions: (() => {
           if (!ib.group_pip_commissions) return {};
           if (typeof ib.group_pip_commissions === 'string') {
@@ -1801,6 +2017,8 @@ router.get('/profiles-by-groups', authenticateAdmin, async (req, res, next) => {
       referredBy: ib.referred_by,
       ibBalance: parseFloat(ib.ib_balance || 0).toFixed(2),
       totalCommission: `$${parseFloat(ib.total_commission || 0).toFixed(2)}`,
+      planType: ib.plan_type || null,
+      workingPlansCount: ib.plan_type === 'normal' ? 1 : parseInt(ib.custom_plans_count || 0),
       groupPipCommissions: (() => {
         if (!ib.group_pip_commissions) return {};
         if (typeof ib.group_pip_commissions === 'string') {
@@ -3849,8 +4067,6 @@ router.get('/commission-distribution/:id/details', authenticateAdmin, async (req
         memberSince: new Date(ib.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' }),
         totalTrades: parseInt(commStatsResult.rows[0].total_trades),
         totalLots: parseFloat(commStatsResult.rows[0].total_lots).toFixed(2),
-        totalTrades: parseInt(commStatsResult.rows[0].total_trades),
-        totalLots: parseFloat(commStatsResult.rows[0].total_lots).toFixed(2),
         totalCommission: `$${totalComm.toFixed(2)}`,
         estimatedEarnings: `$${totalComm.toFixed(2)}`,
         ibBalance: parseFloat(ib.ib_balance || 0).toFixed(2),
@@ -3865,11 +4081,7 @@ router.get('/commission-distribution/:id/details', authenticateAdmin, async (req
   }
 });
 
-/**
- * GET /api/ib-requests/:id
- * Get a single IB request with full details (admin only)
- * NOTE: This must come near the bottom to avoid route conflicts with static endpoints
- */
+
 router.get('/:id', authenticateAdmin, async (req, res, next) => {
   try {
     const requestId = parseInt(req.params.id);
@@ -4031,5 +4243,6 @@ router.get('/:id', authenticateAdmin, async (req, res, next) => {
     next(error);
   }
 });
+
 
 export default router;

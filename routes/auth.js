@@ -506,7 +506,11 @@ router.get('/verify-token', async (req, res, next) => {
 
       // Optionally fetch fresh user data from database
       const result = await pool.query(
-        'SELECT id, email, first_name, last_name, country, referral_code, referred_by, is_banned FROM users WHERE id = $1',
+        `SELECT u.id, u.email, u.first_name, u.last_name, u.country, u.referral_code, u.referred_by, u.is_banned,
+                ir.ib_type, ir.plan_type, ir.status as ib_status
+         FROM users u 
+         LEFT JOIN ib_requests ir ON u.id = ir.user_id AND ir.status = 'approved'
+         WHERE u.id = $1`,
         [decoded.id]
       );
 
@@ -530,7 +534,10 @@ router.get('/verify-token', async (req, res, next) => {
             country: user.country,
             referralCode: user.referral_code,
             referredBy: user.referred_by,
-            isBanned: user.is_banned
+            isBanned: user.is_banned,
+            ibType: user.ib_type,
+            planType: user.plan_type,
+            ibStatus: user.ib_status
           }
         }
       });
