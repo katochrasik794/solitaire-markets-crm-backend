@@ -4,6 +4,7 @@ import { authenticate } from '../middleware/auth.js';
 import bcrypt from 'bcrypt';
 import * as mt5Service from '../services/mt5.service.js';
 import { logUserAction } from '../services/logging.service.js';
+import { sendWithdrawalRequestEmail } from '../services/templateEmail.service.js';
 
 const router = express.Router();
 
@@ -238,13 +239,36 @@ router.post('/', authenticate, async (req, res) => {
             }
         };
 
-        // TODO: Send email notification to user
-        // TODO: Notify admin (optional)
-
         res.status(201).json(responseData);
         
-        // Log user action
+        // Send withdrawal request email (non-blocking)
         setImmediate(async () => {
+            try {
+                // Get user details
+                const userResult = await pool.query(
+                    'SELECT email, first_name, last_name FROM users WHERE id = $1',
+                    [userId]
+                );
+                
+                if (userResult.rows.length > 0 && userResult.rows[0].email) {
+                    const user = userResult.rows[0];
+                    const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+                    const accountLogin = mt5AccountId || walletId || 'N/A';
+                    
+                    await sendWithdrawalRequestEmail(
+                        user.email,
+                        userName,
+                        accountLogin,
+                        `${withdrawal.amount} ${withdrawal.currency}`,
+                        new Date(withdrawal.created_at).toLocaleDateString()
+                    );
+                    console.log(`Withdrawal request email sent to ${user.email}`);
+                }
+            } catch (emailError) {
+                console.error('Failed to send withdrawal request email:', emailError);
+            }
+
+            // Log user action
             await logUserAction({
                 userId: req.user.id,
                 userEmail: req.user.email,

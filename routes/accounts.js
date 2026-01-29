@@ -723,7 +723,8 @@ router.post('/create', authenticate, async (req, res, next) => {
           userName,
           accountType,
           accountNumber, // This is the login (MT5 account number)
-          masterPasswordValue // Master password for MT5 login
+          masterPasswordValue, // Master password for MT5 login
+          investorPassword // Investor password for read-only access
         );
         console.log(`MT5 account created email sent to ${user.email}`);
       } catch (emailError) {

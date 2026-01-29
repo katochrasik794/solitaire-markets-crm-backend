@@ -19,7 +19,13 @@ import {
   sendKYCCompletionEmail,
   sendTicketCreatedEmail,
   sendTicketResponseEmail,
-  sendMT5AccountCreatedEmail
+  sendMT5AccountCreatedEmail,
+  sendDepositApprovedEmail,
+  sendDepositRejectedEmail,
+  sendWithdrawalApprovedEmail,
+  sendWithdrawalRejectedEmail,
+  sendBonusAddedEmail,
+  sendBonusDeductedEmail
 } from '../services/templateEmail.service.js';
 import { logAdminAction } from '../services/logging.service.js';
 import { captureResponseData, logAdminActionMiddleware } from '../middleware/logging.middleware.js';
@@ -1587,22 +1593,38 @@ router.post('/users', authenticateAdmin, async (req, res, next) => {
 
     res.status(201).json(responseData);
 
-    // Log admin action
+    // Send welcome email and log admin action (non-blocking)
     setImmediate(async () => {
-      await logAdminAction({
-        adminId: req.admin?.adminId || req.admin?.id,
-        adminEmail: req.admin?.email,
-        actionType: 'user_create',
-        actionCategory: 'user_management',
-        targetType: 'user',
-        targetId: user.id,
-        targetIdentifier: user.email,
-        description: `Created user: ${user.email}`,
-        req,
-        res,
-        beforeData: null,
-        afterData: responseData.user
-      });
+      // Send welcome email using template
+      try {
+        const { sendWelcomeEmail } = await import('../services/templateEmail.service.js');
+        const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
+        await sendWelcomeEmail(user.email, userName);
+        console.log(`Welcome email sent to ${user.email}`);
+      } catch (emailError) {
+        console.error('Failed to send welcome email:', emailError);
+        // Don't fail the request if email fails
+      }
+
+      // Log admin action
+      try {
+        await logAdminAction({
+          adminId: req.admin?.adminId || req.admin?.id,
+          adminEmail: req.admin?.email,
+          actionType: 'user_create',
+          actionCategory: 'user_management',
+          targetType: 'user',
+          targetId: user.id,
+          targetIdentifier: user.email,
+          description: `Created user: ${user.email}`,
+          req,
+          res,
+          beforeData: null,
+          afterData: responseData.user
+        });
+      } catch (logError) {
+        console.error('Failed to log admin action:', logError);
+      }
     });
   } catch (error) {
     console.error('Admin create user error:', error);
@@ -3057,7 +3079,8 @@ router.post('/users/:id/accounts/create', authenticateAdmin, async (req, res, ne
           userName,
           accountType,
           accountNumber, // This is the login (MT5 account number)
-          masterPassword // Master password for MT5 login
+          masterPassword, // Master password for MT5 login
+          investorPassword // Investor password for read-only access
         );
         console.log(`MT5 account created email sent to ${user.email} (admin created)`);
       } catch (emailError) {
@@ -4563,6 +4586,241 @@ router.put('/mt5/account/:accountId', authenticateAdmin, async (req, res) => {
 });
 
 /**
+ * PUT /api/admin/mt5/account/:accountId/group
+ * Change MT5 group for a single account
+ */
+router.put('/mt5/account/:accountId/group', authenticateAdmin, async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const { group } = req.body;
+    const login = parseInt(accountId);
+
+    if (isNaN(login)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid account ID'
+      });
+    }
+
+    if (!group) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Group name is required'
+      });
+    }
+
+    // Update MT5 account group via MT5 service
+    const result = await mt5Service.updateUser(login, { group });
+
+    if (!result.success) {
+      return res.status(500).json({
+        ok: false,
+        error: result.error || 'Failed to update MT5 group'
+      });
+    }
+
+    // Update database - also update mt5_group_id if available
+    try {
+      // Try to get group ID from mt5_groups table
+      const groupResult = await pool.query(
+        'SELECT id FROM mt5_groups WHERE group_name = $1 LIMIT 1',
+        [group]
+      );
+      
+      const groupId = groupResult.rows[0]?.id || null;
+      
+      // Update both group name and group ID if available
+      if (groupId) {
+        await pool.query(
+          `UPDATE trading_accounts 
+           SET mt5_group_name = $1, mt5_group_id = $3, updated_at = NOW()
+           WHERE account_number = $2`,
+          [group, accountId.toString(), groupId]
+        );
+      } else {
+        await pool.query(
+          `UPDATE trading_accounts 
+           SET mt5_group_name = $1, updated_at = NOW()
+           WHERE account_number = $2`,
+          [group, accountId.toString()]
+        );
+      }
+    } catch (dbError) {
+      console.error('Failed to update database:', dbError);
+      // Continue even if DB update fails - MT5 server was updated
+    }
+
+    // Log admin action
+    try {
+      await logAdminAction({
+        adminId: req.admin?.adminId || req.admin?.id,
+        adminEmail: req.admin?.email,
+        actionType: 'mt5_group_change',
+        actionCategory: 'mt5_management',
+        targetType: 'mt5_account',
+        targetId: login,
+        targetIdentifier: `MT5 Account ${accountId}`,
+        description: `Changed MT5 group for account ${accountId} to ${group}`,
+        req,
+        res,
+        beforeData: null,
+        afterData: { group }
+      });
+    } catch (logError) {
+      console.error('Failed to log admin action:', logError);
+    }
+
+    res.json({
+      ok: true,
+      message: 'MT5 group updated successfully',
+      data: result.data
+    });
+  } catch (error) {
+    console.error('Change MT5 group error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to change MT5 group'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/mt5/bulk-change-group
+ * Change MT5 group for multiple accounts (bulk operation)
+ */
+router.post('/mt5/bulk-change-group', authenticateAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { accountIds, group } = req.body;
+    const adminId = req.admin?.adminId || req.admin?.id;
+
+    if (!Array.isArray(accountIds) || accountIds.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        ok: false,
+        error: 'Account IDs array is required'
+      });
+    }
+
+    if (!group) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        ok: false,
+        error: 'Group name is required'
+      });
+    }
+
+    const results = {
+      success: [],
+      failed: [],
+      total: accountIds.length,
+      groupIdFetched: false,
+      groupId: null
+    };
+
+    // Process each account
+    for (const accountId of accountIds) {
+      try {
+        const login = parseInt(accountId);
+        if (isNaN(login)) {
+          results.failed.push({ accountId, error: 'Invalid account ID' });
+          continue;
+        }
+
+        // Update MT5 account group via MT5 service
+        const result = await mt5Service.updateUser(login, { group });
+
+        if (!result.success) {
+          results.failed.push({ accountId, error: result.error || 'Failed to update MT5 group' });
+          continue;
+        }
+
+        // Update database - also update mt5_group_id if available
+        try {
+          // Try to get group ID from mt5_groups table (only once, reuse for all accounts)
+          let groupId = null;
+          if (!results.groupIdFetched) {
+            const groupResult = await client.query(
+              'SELECT id FROM mt5_groups WHERE group_name = $1 LIMIT 1',
+              [group]
+            );
+            groupId = groupResult.rows[0]?.id || null;
+            results.groupIdFetched = true;
+            results.groupId = groupId;
+          } else {
+            groupId = results.groupId;
+          }
+          
+          // Update both group name and group ID if available
+          if (groupId) {
+            await client.query(
+              `UPDATE trading_accounts 
+               SET mt5_group_name = $1, mt5_group_id = $3, updated_at = NOW()
+               WHERE account_number = $2`,
+              [group, accountId.toString(), groupId]
+            );
+          } else {
+            await client.query(
+              `UPDATE trading_accounts 
+               SET mt5_group_name = $1, updated_at = NOW()
+               WHERE account_number = $2`,
+              [group, accountId.toString()]
+            );
+          }
+        } catch (dbError) {
+          console.error(`Failed to update database for account ${accountId}:`, dbError);
+          // Continue even if DB update fails - MT5 server was updated
+        }
+
+        results.success.push(accountId);
+
+        // Log admin action for each account
+        try {
+          await logAdminAction({
+            adminId: adminId,
+            adminEmail: req.admin?.email,
+            actionType: 'mt5_group_change_bulk',
+            actionCategory: 'mt5_management',
+            targetType: 'mt5_account',
+            targetId: login,
+            targetIdentifier: `MT5 Account ${accountId}`,
+            description: `Bulk changed MT5 group for account ${accountId} to ${group}`,
+            req,
+            res,
+            beforeData: null,
+            afterData: { group }
+          });
+        } catch (logError) {
+          console.error(`Failed to log admin action for account ${accountId}:`, logError);
+        }
+      } catch (error) {
+        console.error(`Error processing account ${accountId}:`, error);
+        results.failed.push({ accountId, error: error.message || 'Unknown error' });
+      }
+    }
+
+    await client.query('COMMIT');
+
+    res.json({
+      ok: true,
+      message: `Processed ${results.success.length} of ${results.total} accounts`,
+      results
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Bulk change MT5 group error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to bulk change MT5 groups'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+/**
  * PATCH /api/admin/mt5/account/:accountId/status
  * Update MT5 account status in database
  */
@@ -4815,6 +5073,39 @@ router.post('/mt5/deposit', authenticateAdmin, async (req, res, next) => {
       comment || `Deposit by admin ${req.admin.email}`
     );
 
+    // Send deposit email notification using template (non-blocking)
+    setImmediate(async () => {
+      try {
+        // Get user info from trading account
+        const accountResult = await pool.query(
+          `SELECT u.id, u.email, u.first_name, u.last_name 
+           FROM trading_accounts ta
+           INNER JOIN users u ON ta.user_id = u.id
+           WHERE ta.account_number = $1 AND ta.platform = 'MT5'
+           LIMIT 1`,
+          [login]
+        );
+
+        if (accountResult.rows.length > 0) {
+          const user = accountResult.rows[0];
+          const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
+          
+          const { sendDepositApprovedEmail } = await import('../services/templateEmail.service.js');
+          await sendDepositApprovedEmail(
+            user.email,
+            userName,
+            login.toString(),
+            `$${balance.toFixed(2)}`,
+            new Date().toLocaleDateString()
+          );
+          console.log(`Deposit email sent to ${user.email}`);
+        }
+      } catch (emailError) {
+        console.error('Failed to send deposit email:', emailError);
+        // Don't fail the request if email fails
+      }
+    });
+
     res.json({
       success: true,
       message: 'Deposit successful',
@@ -4866,6 +5157,39 @@ router.post('/mt5/withdraw', authenticateAdmin, async (req, res, next) => {
       balance,
       comment || `Withdrawal by admin ${req.admin.email}`
     );
+
+    // Send withdrawal email notification using template (non-blocking)
+    setImmediate(async () => {
+      try {
+        // Get user info from trading account
+        const accountResult = await pool.query(
+          `SELECT u.id, u.email, u.first_name, u.last_name 
+           FROM trading_accounts ta
+           INNER JOIN users u ON ta.user_id = u.id
+           WHERE ta.account_number = $1 AND ta.platform = 'MT5'
+           LIMIT 1`,
+          [login]
+        );
+
+        if (accountResult.rows.length > 0) {
+          const user = accountResult.rows[0];
+          const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
+          
+          const { sendWithdrawalApprovedEmail } = await import('../services/templateEmail.service.js');
+          await sendWithdrawalApprovedEmail(
+            user.email,
+            userName,
+            login.toString(),
+            `$${balance.toFixed(2)}`,
+            new Date().toLocaleDateString()
+          );
+          console.log(`Withdrawal email sent to ${user.email}`);
+        }
+      } catch (emailError) {
+        console.error('Failed to send withdrawal email:', emailError);
+        // Don't fail the request if email fails
+      }
+    });
 
     res.json({
       success: true,
@@ -4999,6 +5323,36 @@ router.post('/mt5/credit', authenticateAdmin, async (req, res, next) => {
       comment || `Credit by admin ${req.admin.email}`
     );
 
+    // Send bonus email notification using template
+    try {
+      // Get user info from trading account
+      const accountResult = await pool.query(
+        `SELECT u.id, u.email, u.first_name, u.last_name 
+         FROM trading_accounts ta
+         INNER JOIN users u ON ta.user_id = u.id
+         WHERE ta.account_number = $1 AND ta.platform = 'MT5'
+         LIMIT 1`,
+        [login]
+      );
+
+      if (accountResult.rows.length > 0) {
+        const user = accountResult.rows[0];
+        const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
+        
+        await sendBonusAddedEmail(
+          user.email,
+          userName,
+          login.toString(),
+          `$${balance.toFixed(2)}`,
+          new Date().toLocaleDateString(),
+          comment || ''
+        );
+      }
+    } catch (emailError) {
+      console.error('Failed to send bonus email:', emailError);
+      // Don't fail the request if email fails
+    }
+
     res.json({
       success: true,
       message: 'Credit added successfully',
@@ -5011,6 +5365,188 @@ router.post('/mt5/credit', authenticateAdmin, async (req, res, next) => {
       message: error.message || 'Failed to add credit',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
+  }
+});
+
+/**
+ * POST /api/admin/deposits/cash-deposit
+ * Local Depositor: Create cash deposit for user's MT5 account
+ * Creates a deposit_request record with status='approved' and adds balance to MT5
+ */
+router.post('/deposits/cash-deposit', authenticateAdmin, requireAdminFeaturePermission('deposits', 'edit'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { user_id, mt5_account_id, amount, currency = 'USD', comment, admin_notes } = req.body;
+    const adminId = req.admin?.adminId || req.admin?.id;
+
+    // Validation
+    if (!user_id || !mt5_account_id || !amount) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        ok: false,
+        error: 'User ID, MT5 Account ID, and amount are required'
+      });
+    }
+
+    const depositAmount = parseFloat(amount);
+    if (isNaN(depositAmount) || depositAmount <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid amount'
+      });
+    }
+
+    // Verify user exists
+    const userResult = await client.query(
+      'SELECT id, email, first_name, last_name FROM users WHERE id = $1',
+      [user_id]
+    );
+
+    if (userResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        ok: false,
+        error: 'User not found'
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    // Verify MT5 account exists and belongs to user
+    const accountResult = await client.query(
+      'SELECT id, account_number, user_id, currency FROM trading_accounts WHERE account_number = $1 AND user_id = $2 AND platform = $3',
+      [mt5_account_id, user_id, 'MT5']
+    );
+
+    if (accountResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        ok: false,
+        error: 'MT5 account not found or does not belong to this user'
+      });
+    }
+
+    const account = accountResult.rows[0];
+    const mt5Login = parseInt(mt5_account_id);
+    if (isNaN(mt5Login)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid MT5 account ID'
+      });
+    }
+
+    // Create deposit_request record with status='approved' (cash deposit)
+    const depositResult = await client.query(
+      `INSERT INTO deposit_requests 
+       (user_id, gateway_id, amount, currency, deposit_to_type, mt5_account_id, status, admin_notes, created_at, updated_at)
+       VALUES ($1, NULL, $2, $3, 'mt5', $4, 'approved', $5, NOW(), NOW())
+       RETURNING *`,
+      [
+        user_id,
+        depositAmount,
+        currency,
+        mt5_account_id,
+        admin_notes || `Cash deposit by admin ${req.admin.email}. ${comment || ''}`.trim()
+      ]
+    );
+
+    const deposit = depositResult.rows[0];
+
+    // Add balance to MT5 account
+    try {
+      const mt5Service = await import('../services/mt5.service.js');
+      await mt5Service.addBalance(
+        mt5Login,
+        depositAmount,
+        `Cash Deposit #${deposit.id} - ${comment || 'Local depositor'}`
+      );
+
+      // Update trading_accounts balance
+      await client.query(
+        `UPDATE trading_accounts 
+         SET balance = COALESCE(balance, 0) + $1, 
+             equity = COALESCE(equity, 0) + $1,
+             updated_at = NOW()
+         WHERE account_number = $2`,
+        [depositAmount, mt5_account_id]
+      );
+    } catch (mt5Error) {
+      await client.query('ROLLBACK');
+      console.error('Error adding MT5 balance:', mt5Error);
+      return res.status(500).json({
+        ok: false,
+        error: `Failed to add balance to MT5 account: ${mt5Error.message}`
+      });
+    }
+
+    await client.query('COMMIT');
+
+    // Get user details for email
+    const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+
+    // Send deposit approved email (non-blocking)
+    setImmediate(async () => {
+      try {
+        const { sendDepositApprovedEmail } = await import('../services/templateEmail.service.js');
+        await sendDepositApprovedEmail(
+          user.email,
+          userName,
+          mt5_account_id,
+          `${depositAmount} ${currency}`,
+          new Date().toLocaleDateString()
+        );
+        console.log(`Cash deposit email sent to ${user.email}`);
+      } catch (emailError) {
+        console.error('Failed to send cash deposit email:', emailError);
+      }
+
+      // Log admin action
+      try {
+        await logAdminAction({
+          adminId: adminId,
+          adminEmail: req.admin?.email,
+          actionType: 'cash_deposit',
+          actionCategory: 'deposit_management',
+          targetType: 'deposit',
+          targetId: deposit.id,
+          targetIdentifier: `Cash Deposit #${deposit.id}`,
+          description: `Created cash deposit #${deposit.id} of $${depositAmount} ${currency} for user: ${user.email}. MT5 Account: ${mt5_account_id}`,
+          req,
+          res,
+          beforeData: null,
+          afterData: deposit
+        });
+      } catch (logError) {
+        console.error('Failed to log admin action:', logError);
+      }
+
+    });
+
+    res.json({
+      ok: true,
+      message: 'Cash deposit created successfully',
+      deposit: {
+        id: deposit.id,
+        amount: deposit.amount,
+        currency: deposit.currency,
+        status: deposit.status,
+        mt5_account_id: deposit.mt5_account_id,
+        created_at: deposit.created_at
+      }
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Cash deposit error:', error);
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to create cash deposit'
+    });
+  } finally {
+    client.release();
   }
 });
 
@@ -5050,6 +5586,36 @@ router.post('/mt5/credit/deduct', authenticateAdmin, async (req, res, next) => {
       balance,
       comment || `Credit deduction by admin ${req.admin.email}`
     );
+
+    // Send bonus deduction email notification using template
+    try {
+      // Get user info from trading account
+      const accountResult = await pool.query(
+        `SELECT u.id, u.email, u.first_name, u.last_name 
+         FROM trading_accounts ta
+         INNER JOIN users u ON ta.user_id = u.id
+         WHERE ta.account_number = $1 AND ta.platform = 'MT5'
+         LIMIT 1`,
+        [login]
+      );
+
+      if (accountResult.rows.length > 0) {
+        const user = accountResult.rows[0];
+        const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
+        
+        await sendBonusDeductedEmail(
+          user.email,
+          userName,
+          login.toString(),
+          `$${balance.toFixed(2)}`,
+          new Date().toLocaleDateString(),
+          comment || ''
+        );
+      }
+    } catch (emailError) {
+      console.error('Failed to send bonus deduction email:', emailError);
+      // Don't fail the request if email fails
+    }
 
     res.json({
       success: true,
@@ -6469,15 +7035,16 @@ router.post('/deposits/:id/approve', authenticateAdmin, requireAdminFeaturePermi
       message: 'Deposit approved successfully'
     });
 
-    // Send transaction completed email
+    // Send deposit approved email (non-blocking)
     setImmediate(async () => {
       try {
         if (userEmail) {
           const accountLogin = deposit.mt5_account_id || deposit.wallet_id || 'N/A';
-          await sendTransactionCompletedEmail(
+          
+          // Send deposit approved email
+          await sendDepositApprovedEmail(
             userEmail,
             userName,
-            'Deposit',
             accountLogin,
             `${deposit.amount} ${deposit.currency || 'USD'}`,
             new Date().toLocaleDateString()
@@ -6563,8 +7130,34 @@ router.post('/deposits/:id/reject', authenticateAdmin, requireAdminFeaturePermis
       message: 'Deposit rejected successfully'
     });
 
-    // Log admin action
+    // Send rejection email (non-blocking)
     setImmediate(async () => {
+      try {
+        if (userEmail) {
+          const userDetailsResult = await pool.query(
+            'SELECT first_name, last_name FROM users WHERE id = $1',
+            [beforeData.user_id]
+          );
+          const userName = userDetailsResult.rows.length > 0
+            ? `${userDetailsResult.rows[0].first_name || ''} ${userDetailsResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
+            : 'Valued Customer';
+          const accountLogin = beforeData.mt5_account_id || beforeData.wallet_id || 'N/A';
+          
+          await sendDepositRejectedEmail(
+            userEmail,
+            userName,
+            accountLogin,
+            `${beforeData.amount} ${beforeData.currency || 'USD'}`,
+            reason || 'Your deposit request did not meet our requirements.',
+            new Date().toLocaleDateString()
+          );
+          console.log(`Deposit rejection email sent to ${userEmail}`);
+        }
+      } catch (emailError) {
+        console.error('Failed to send deposit rejection email:', emailError);
+      }
+
+      // Log admin action
       await logAdminAction({
         adminId: req.admin?.adminId || req.admin?.id,
         adminEmail: req.admin?.email,
@@ -7135,11 +7728,12 @@ router.post('/withdrawals/:id/approve', authenticateAdmin, requireAdminFeaturePe
       ]
     ).catch(err => console.error('Failed to log activity:', err));
 
-    // TODO: Send email notification to user
-
-    // Get user email for logging
-    const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [withdrawal.user_id]);
+    // Get user email and name for email
+    const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [withdrawal.user_id]);
     const userEmail = userResult.rows[0]?.email || null;
+    const userName = userResult.rows.length > 0
+      ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
+      : 'Valued Customer';
 
     // Get after data
     const afterResult = await pool.query(
@@ -7153,15 +7747,17 @@ router.post('/withdrawals/:id/approve', authenticateAdmin, requireAdminFeaturePe
       message: 'Withdrawal approved successfully'
     });
 
-    // Send transaction completed email
+    // Send withdrawal approved email (non-blocking)
     setImmediate(async () => {
       try {
         if (userEmail) {
-          await sendTransactionCompletedEmail(
+          const accountLogin = withdrawal.mt5_account_id || withdrawal.wallet_id || 'N/A';
+          
+          // Send withdrawal approved email
+          await sendWithdrawalApprovedEmail(
             userEmail,
             userName,
-            'Withdrawal',
-            withdrawal.mt5_account_id || 'N/A',
+            accountLogin,
             `${withdrawal.amount} ${withdrawal.currency || 'USD'}`,
             new Date().toLocaleDateString()
           );
@@ -7257,11 +7853,12 @@ router.post('/withdrawals/:id/reject', authenticateAdmin, requireAdminFeaturePer
       ]
     ).catch(err => console.error('Failed to log activity:', err));
 
-    // TODO: Send email notification to user
-
-    // Get user email for logging
-    const userResult = await pool.query('SELECT email FROM users WHERE id = $1', [withdrawal.user_id]);
+    // Get user email and details for email
+    const userResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [withdrawal.user_id]);
     const userEmail = userResult.rows[0]?.email || null;
+    const userName = userResult.rows.length > 0
+      ? `${userResult.rows[0].first_name || ''} ${userResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
+      : 'Valued Customer';
 
     // Get after data
     const afterResult = await pool.query(
@@ -7275,8 +7872,27 @@ router.post('/withdrawals/:id/reject', authenticateAdmin, requireAdminFeaturePer
       message: 'Withdrawal rejected successfully'
     });
 
-    // Log admin action
+    // Send rejection email (non-blocking)
     setImmediate(async () => {
+      try {
+        if (userEmail) {
+          const accountLogin = withdrawal.mt5_account_id || withdrawal.wallet_id || 'N/A';
+          
+          await sendWithdrawalRejectedEmail(
+            userEmail,
+            userName,
+            accountLogin,
+            `${withdrawal.amount} ${withdrawal.currency || 'USD'}`,
+            reason || 'Your withdrawal request did not meet our requirements.',
+            new Date().toLocaleDateString()
+          );
+          console.log(`Withdrawal rejection email sent to ${userEmail}`);
+        }
+      } catch (emailError) {
+        console.error('Failed to send withdrawal rejection email:', emailError);
+      }
+
+      // Log admin action
       await logAdminAction({
         adminId: req.admin?.adminId || req.admin?.id,
         adminEmail: req.admin?.email,
@@ -7525,7 +8141,7 @@ router.get('/send-emails/search-users', authenticateAdmin, async (req, res) => {
 });
 
 // Helper to build user query
-const buildUserQuery = (recipientType, specificUsers = [], startParamIndex = 1) => {
+const buildUserQuery = (recipientType, specificUsers = [], groupIds = [], startParamIndex = 1) => {
   let whereClause = '';
   let params = [];
 
@@ -7585,6 +8201,29 @@ const buildUserQuery = (recipientType, specificUsers = [], startParamIndex = 1) 
         whereClause = '1=0';
       }
       break;
+    case 'by_group':
+      // Filter users by MT5 group IDs
+      if (groupIds && groupIds.length > 0) {
+        // Get group names from group IDs
+        const groupIdsArray = Array.isArray(groupIds) ? groupIds : [groupIds];
+        whereClause = `id IN (
+          SELECT DISTINCT ta.user_id
+          FROM trading_accounts ta
+          WHERE ta.platform = 'MT5'
+          AND (
+            ta.mt5_group_id = ANY($${startParamIndex})
+            OR ta.mt5_group_name IN (
+              SELECT group_name 
+              FROM mt5_groups 
+              WHERE id = ANY($${startParamIndex})
+            )
+          )
+        )`;
+        params.push(groupIdsArray);
+      } else {
+        whereClause = '1=0';
+      }
+      break;
     case 'zero_balance':
       // Users who have trading accounts but with 0 balance (or no balance > 0)
       // This means users who either:
@@ -7616,10 +8255,34 @@ const buildUserQuery = (recipientType, specificUsers = [], startParamIndex = 1) 
   return { whereClause, params };
 };
 
+// GET /api/admin/send-emails/groups
+router.get('/send-emails/groups', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, group_name, COALESCE(dedicated_name, group_name) as display_name, currency
+       FROM mt5_groups
+       WHERE is_active = TRUE
+       ORDER BY COALESCE(dedicated_name, group_name) ASC`
+    );
+
+    const groups = result.rows.map(g => ({
+      id: g.id,
+      groupName: g.group_name,
+      displayName: g.dedicated_name || g.group_name,
+      currency: g.currency || 'USD'
+    }));
+
+    res.json({ ok: true, groups });
+  } catch (err) {
+    console.error('GET /admin/send-emails/groups failed:', err);
+    res.status(500).json({ ok: false, error: 'Failed to fetch MT5 groups' });
+  }
+});
+
 // POST /api/admin/send-emails/preview
 router.post('/send-emails/preview', authenticateAdmin, async (req, res) => {
   try {
-    const { recipientType, specificUsers = [] } = req.body || {};
+    const { recipientType, specificUsers = [], groupIds = [] } = req.body || {};
 
     if (!recipientType) {
       return res.status(400).json({ ok: false, error: 'Recipient type is required' });
@@ -7663,7 +8326,7 @@ router.post('/send-emails/preview', authenticateAdmin, async (req, res) => {
 // POST /api/admin/send-emails
 router.post('/send-emails', authenticateAdmin, async (req, res) => {
   try {
-    const { recipientType, specificUsers = [], subject, body, isHtml = true, imageUrl, attachments = [], templateId, templateVariables = {} } = req.body || {};
+    const { recipientType, specificUsers = [], groupIds = [], subject, body, isHtml = true, imageUrl, attachments = [], templateId, templateVariables = {} } = req.body || {};
     const adminId = req.admin.adminId;
 
     if (!recipientType) {
@@ -7677,7 +8340,7 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
       }
     }
 
-    const { whereClause, params } = buildUserQuery(recipientType, specificUsers);
+    const { whereClause, params } = buildUserQuery(recipientType, specificUsers, groupIds);
 
     // Fetch users
     const usersRes = await pool.query(
@@ -7827,22 +8490,22 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
             }
           }
         } else {
-          // Wrap body in basic template if no template selected
-          const logoUrl = getLogoUrl();
-          if (isHtml && !body.includes('<html')) {
-            htmlContent = `
-                        <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto;">
-                            <div style="text-align: center; margin-bottom: 20px;">
-                              <img src="${logoUrl}" alt="Solitaire Markets" style="height: 50px; margin-bottom: 10px;" />
-                            </div>
-                            ${body}
-                            <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
-                            <p style="font-size: 12px; color: #666; text-align: center;">
-                              © ${new Date().getFullYear()} Solitaire Markets. All rights reserved.
-                            </p>
-                        </div>
-                    `;
+          // Use default template with editable body if no template selected
+          const { getDefaultEmailTemplate } = await import('../services/defaultEmailTemplate.js');
+          const recipientName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+          
+          // Use default template with header/footer fixed, body editable
+          // If body doesn't contain HTML tags, treat as plain text and convert line breaks
+          let bodyContent = body;
+          if (isHtml && !body.includes('<') && !body.includes('>')) {
+            // Plain text - convert line breaks to <br>
+            bodyContent = body.replace(/\n/g, '<br>');
+          } else if (!isHtml) {
+            // Plain text mode
+            bodyContent = body.replace(/\n/g, '<br>');
           }
+          
+          htmlContent = getDefaultEmailTemplate(bodyContent, recipientName);
         }
 
         // Send email with logo attachment

@@ -1,6 +1,12 @@
 import express from 'express';
 import pool from '../config/database.js';
 import { authenticate, authenticateAdmin } from '../middleware/auth.js';
+import { 
+  sendTemplateEmail,
+  sendIBRequestRejectedEmail, 
+  sendIBLockedEmail, 
+  sendIBUnlockedEmail 
+} from '../services/templateEmail.service.js';
 
 const router = express.Router();
 
@@ -271,6 +277,35 @@ router.post('/', authenticate, async (req, res, next) => {
     );
 
     const ibRequest = result.rows[0];
+
+    // Get user details for email
+    const userResult = await pool.query(
+      'SELECT email, first_name, last_name FROM users WHERE id = $1',
+      [userId]
+    );
+
+    // Send email notification (non-blocking)
+    if (userResult.rows.length > 0 && userResult.rows[0].email) {
+      const user = userResult.rows[0];
+      const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+      
+      try {
+        await sendTemplateEmail(
+          'IB Request Email - on IB Request',
+          user.email,
+          {
+            recipientName: userName,
+            recipientEmail: user.email,
+            requestId: ibRequest.id,
+            submissionDate: new Date(ibRequest.created_at).toLocaleDateString(),
+            currentYear: new Date().getFullYear()
+          }
+        );
+      } catch (emailError) {
+        console.error('Failed to send IB request creation email:', emailError);
+        // Don't block the response if email fails
+      }
+    }
 
     res.status(201).json({
       success: true,
@@ -1086,6 +1121,38 @@ router.post('/:id/approve', authenticateAdmin, async (req, res, next) => {
       ]
     );
 
+    // Get user details for email
+    const userId = requestCheck.rows[0].user_id;
+    const userResult = await pool.query(
+      'SELECT email, first_name, last_name FROM users WHERE id = $1',
+      [userId]
+    );
+
+    // Send approval email (non-blocking)
+    if (userResult.rows.length > 0 && userResult.rows[0].email) {
+      const user = userResult.rows[0];
+      const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+      const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+      
+      try {
+        await sendTemplateEmail(
+          'IB Request Accepted Email - on IB Request Approval',
+          user.email,
+          {
+            recipientName: userName,
+            recipientEmail: user.email,
+            ibType: normalizedIbType === 'master' ? 'Master IB' : 'Sub-IB',
+            ibPortalUrl: `${frontendUrl}/ib-portal`,
+            approvedDate: new Date().toLocaleDateString(),
+            currentYear: new Date().getFullYear()
+          }
+        );
+      } catch (emailError) {
+        console.error('Failed to send IB request approval email:', emailError);
+        // Don't block the response if email fails
+      }
+    }
+
     res.json({
       success: true,
       message: 'IB request approved successfully',
@@ -1139,6 +1206,12 @@ router.post('/:id/reject', authenticateAdmin, async (req, res, next) => {
     // Setting reviewed_by to NULL to avoid foreign key constraint violation
     // The foreign key allows NULL (ON DELETE SET NULL)
 
+    // Get user details before updating (for email)
+    const requestDetails = await pool.query(
+      `SELECT user_id FROM ib_requests WHERE id = $1`,
+      [requestId]
+    );
+
     // Update the request
     const updateResult = await pool.query(
       `UPDATE ib_requests 
@@ -1154,6 +1227,31 @@ router.post('/:id/reject', authenticateAdmin, async (req, res, next) => {
         requestId
       ]
     );
+
+    // Send rejection email (non-blocking)
+    if (requestDetails.rows.length > 0) {
+      const userId = requestDetails.rows[0].user_id;
+      const userResult = await pool.query(
+        'SELECT email, first_name, last_name FROM users WHERE id = $1',
+        [userId]
+      );
+
+      if (userResult.rows.length > 0 && userResult.rows[0].email) {
+        const user = userResult.rows[0];
+        const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+        
+        try {
+          await sendIBRequestRejectedEmail(
+            user.email,
+            userName,
+            rejection_reason || 'Your application did not meet our current requirements.'
+          );
+        } catch (emailError) {
+          console.error('Failed to send IB request rejection email:', emailError);
+          // Don't block the response if email fails
+        }
+      }
+    }
 
     res.json({
       success: true,
@@ -1288,6 +1386,12 @@ router.post('/:id/ban', authenticateAdmin, async (req, res, next) => {
       );
     }
 
+    // Get user details before updating (for email)
+    const userDetailsResult = await pool.query(
+      'SELECT email, first_name, last_name FROM users WHERE id = $1',
+      [userId]
+    );
+
     // Update user's ban status
     const updateResult = await pool.query(
       `UPDATE users 
@@ -1303,6 +1407,23 @@ router.post('/:id/ban', authenticateAdmin, async (req, res, next) => {
         success: false,
         message: 'User not found'
       });
+    }
+
+    // Send lock/unlock email (non-blocking)
+    if (userDetailsResult.rows.length > 0 && userDetailsResult.rows[0].email) {
+      const user = userDetailsResult.rows[0];
+      const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+      
+      try {
+        if (is_banned) {
+          await sendIBLockedEmail(user.email, userName);
+        } else {
+          await sendIBUnlockedEmail(user.email, userName);
+        }
+      } catch (emailError) {
+        console.error('Failed to send IB lock/unlock email:', emailError);
+        // Don't block the response if email fails
+      }
     }
 
     res.json({

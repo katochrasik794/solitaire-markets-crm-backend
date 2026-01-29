@@ -349,7 +349,7 @@ export async function sendWelcomeEmail(userEmail, userName) {
  * Send MT5 Account Created Email
  * Uses action name from unified_actions: 'MT5 Account Creation Email - on New MT5 Account'
  */
-export async function sendMT5AccountCreatedEmail(userEmail, userName, accountType, login, password) {
+export async function sendMT5AccountCreatedEmail(userEmail, userName, accountType, login, password, investorPassword = '') {
   return await sendTemplateEmail(
     'MT5 Account Creation Email - on New MT5 Account', // Action name from unified_actions
     userEmail,
@@ -357,7 +357,8 @@ export async function sendMT5AccountCreatedEmail(userEmail, userName, accountTyp
       recipientName: userName || 'Valued Customer',
       accountType: accountType || 'Standard',
       login: login || '',
-      password: password || ''
+      password: password || '',
+      investorPassword: investorPassword || ''
     }
   );
 }
@@ -369,6 +370,23 @@ export async function sendMT5AccountCreatedEmail(userEmail, userName, accountTyp
 export async function sendDepositRequestEmail(userEmail, userName, accountLogin, amount, date) {
   return await sendTemplateEmail(
     'Deposit Request Email - on Deposit Request', // Action name from unified_actions
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      accountLogin: accountLogin || '',
+      amount: amount || '0.00',
+      date: date || new Date().toLocaleDateString()
+    }
+  );
+}
+
+/**
+ * Send Deposit Approved Email
+ * Uses action name from unified_actions: 'Deposit Approved Email - on Deposit Approval'
+ */
+export async function sendDepositApprovedEmail(userEmail, userName, accountLogin, amount, date) {
+  return await sendTemplateEmail(
+    'Deposit Approved Email - on Deposit Approval', // Action name from unified_actions
     userEmail,
     {
       recipientName: userName || 'Valued Customer',
@@ -392,6 +410,59 @@ export async function sendWithdrawalRequestEmail(userEmail, userName, accountLog
       accountLogin: accountLogin || '',
       amount: amount || '0.00',
       date: date || new Date().toLocaleDateString()
+    }
+  );
+}
+
+/**
+ * Send Withdrawal Approved Email
+ * Uses action name from unified_actions: 'Withdrawal Approved Email - on Withdrawal Approval'
+ */
+export async function sendWithdrawalApprovedEmail(userEmail, userName, accountLogin, amount, date) {
+  return await sendTemplateEmail(
+    'Withdrawal Approved Email - on Withdrawal Approval', // Action name from unified_actions
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      accountLogin: accountLogin || '',
+      amount: amount || '0.00',
+      date: date || new Date().toLocaleDateString()
+    }
+  );
+}
+
+/**
+ * Send Bonus Added Email
+ * Uses action name from unified_actions: 'Bonus Added Email - on Bonus Add'
+ */
+export async function sendBonusAddedEmail(userEmail, userName, accountLogin, amount, date, comment = '') {
+  return await sendTemplateEmail(
+    'Bonus Added Email - on Bonus Add', // Action name from unified_actions
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      accountLogin: accountLogin || '',
+      amount: amount || '0.00',
+      date: date || new Date().toLocaleDateString(),
+      comment: comment || ''
+    }
+  );
+}
+
+/**
+ * Send Bonus Deducted Email
+ * Uses action name from unified_actions: 'Bonus Deducted Email - on Bonus Deduct'
+ */
+export async function sendBonusDeductedEmail(userEmail, userName, accountLogin, amount, date, comment = '') {
+  return await sendTemplateEmail(
+    'Bonus Deducted Email - on Bonus Deduct', // Action name from unified_actions
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      accountLogin: accountLogin || '',
+      amount: amount || '0.00',
+      date: date || new Date().toLocaleDateString(),
+      comment: comment || ''
     }
   );
 }
@@ -518,6 +589,217 @@ export async function sendTicketResponseEmail(userEmail, userName, ticketId, sub
       currentYear: new Date().getFullYear()
     },
     `Response on Support Ticket #${ticketId}`
+  );
+}
+
+/**
+ * Send IB Request Rejected Email
+ * Uses action name from unified_actions: 'IB Request Rejected Email - on IB Request Rejection'
+ */
+export async function sendIBRequestRejectedEmail(userEmail, userName, rejectionReason) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  return await sendTemplateEmail(
+    'IB Request Rejected Email - on IB Request Rejection',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      rejectionReason: rejectionReason || 'Your application did not meet our current requirements.',
+      supportUrl: `${frontendUrl}/user/support`,
+      currentYear: new Date().getFullYear()
+    }
+  );
+}
+
+/**
+ * Send IB Locked Email
+ * Uses action name from unified_actions: 'IB Locked Email - on IB Lock'
+ */
+export async function sendIBLockedEmail(userEmail, userName, lockReason = null) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  return await sendTemplateEmail(
+    'IB Locked Email - on IB Lock',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      lockReason: lockReason || 'Account locked for security and compliance reasons.',
+      supportUrl: `${frontendUrl}/user/support`,
+      currentYear: new Date().getFullYear()
+    }
+  );
+}
+
+/**
+ * Send IB Unlocked Email
+ * Uses action name from unified_actions: 'IB Unlocked Email - on IB Unlock'
+ */
+export async function sendIBUnlockedEmail(userEmail, userName) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  return await sendTemplateEmail(
+    'IB Unlocked Email - on IB Unlock',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      ibPortalUrl: `${frontendUrl}/ib-portal`,
+      currentYear: new Date().getFullYear()
+    }
+  );
+}
+
+/**
+ * Send IB Withdrawal Request Email
+ * Uses action name from unified_actions: 'IB Withdrawal Request Email - on IB Withdrawal Request'
+ */
+export async function sendIBWithdrawalRequestEmail(userEmail, userName, amount, withdrawalId, paymentMethod, date = null) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  const paymentMethodDisplay = paymentMethod === 'bank_transfer' ? 'Bank Transfer' : 
+                               paymentMethod === 'usdt_trc20' ? 'USDT (TRC20)' : 
+                               paymentMethod || 'N/A';
+  
+  return await sendTemplateEmail(
+    'IB Withdrawal Request Email - on IB Withdrawal Request',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      withdrawalId: withdrawalId || 'N/A',
+      amount: typeof amount === 'number' ? amount.toFixed(2) : amount || '0.00',
+      paymentMethod: paymentMethodDisplay,
+      date: date || new Date().toLocaleDateString(),
+      ibPortalUrl: `${frontendUrl}/ib-portal`,
+      currentYear: new Date().getFullYear()
+    }
+  );
+}
+
+/**
+ * Send IB Withdrawal Approved Email
+ * Uses action name from unified_actions: 'IB Withdrawal Approved Email - on IB Withdrawal Approval'
+ */
+export async function sendIBWithdrawalApprovedEmail(userEmail, userName, amount, withdrawalId, paymentMethod, date = null) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  const paymentMethodDisplay = paymentMethod === 'bank_transfer' ? 'Bank Transfer' : 
+                               paymentMethod === 'usdt_trc20' ? 'USDT (TRC20)' : 
+                               paymentMethod || 'N/A';
+  
+  return await sendTemplateEmail(
+    'IB Withdrawal Approved Email - on IB Withdrawal Approval',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      withdrawalId: withdrawalId || 'N/A',
+      amount: typeof amount === 'number' ? amount.toFixed(2) : amount || '0.00',
+      paymentMethod: paymentMethodDisplay,
+      date: date || new Date().toLocaleDateString(),
+      ibPortalUrl: `${frontendUrl}/ib-portal`,
+      currentYear: new Date().getFullYear()
+    }
+  );
+}
+
+/**
+ * Send IB Withdrawal Rejected Email
+ * Uses action name from unified_actions: 'IB Withdrawal Rejected Email - on IB Withdrawal Rejection'
+ */
+export async function sendIBWithdrawalRejectedEmail(userEmail, userName, amount, withdrawalId, rejectionReason, date = null) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  
+  return await sendTemplateEmail(
+    'IB Withdrawal Rejected Email - on IB Withdrawal Rejection',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      withdrawalId: withdrawalId || 'N/A',
+      amount: typeof amount === 'number' ? amount.toFixed(2) : amount || '0.00',
+      rejectionReason: rejectionReason || 'Your withdrawal request did not meet our requirements.',
+      date: date || new Date().toLocaleDateString(),
+      supportUrl: `${frontendUrl}/user/support`,
+      currentYear: new Date().getFullYear()
+    }
+  );
+}
+
+/**
+ * Send Deposit Rejected Email
+ * Uses action name from unified_actions: 'Deposit Rejected Email - on Deposit Rejection'
+ */
+export async function sendDepositRejectedEmail(userEmail, userName, accountLogin, amount, rejectionReason, date = null) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  
+  return await sendTemplateEmail(
+    'Deposit Rejected Email - on Deposit Rejection',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      accountLogin: accountLogin || 'N/A',
+      amount: typeof amount === 'number' ? `${amount.toFixed(2)}` : amount || '0.00',
+      rejectionReason: rejectionReason || 'Your deposit request did not meet our requirements.',
+      date: date || new Date().toLocaleDateString(),
+      supportUrl: `${frontendUrl}/user/support`,
+      currentYear: new Date().getFullYear()
+    }
+  );
+}
+
+/**
+ * Send Deposit Cancelled Email
+ * Uses action name from unified_actions: 'Deposit Cancelled Email - on Deposit Cancellation'
+ */
+export async function sendDepositCancelledEmail(userEmail, userName, accountLogin, amount, date = null) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  
+  return await sendTemplateEmail(
+    'Deposit Cancelled Email - on Deposit Cancellation',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      accountLogin: accountLogin || 'N/A',
+      amount: typeof amount === 'number' ? `${amount.toFixed(2)}` : amount || '0.00',
+      date: date || new Date().toLocaleDateString(),
+      dashboardUrl: `${frontendUrl}/user/dashboard`,
+      currentYear: new Date().getFullYear()
+    }
+  );
+}
+
+/**
+ * Send Withdrawal Rejected Email
+ * Uses action name from unified_actions: 'Withdrawal Rejected Email - on Withdrawal Rejection'
+ */
+export async function sendWithdrawalRejectedEmail(userEmail, userName, accountLogin, amount, rejectionReason, date = null) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  
+  return await sendTemplateEmail(
+    'Withdrawal Rejected Email - on Withdrawal Rejection',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      accountLogin: accountLogin || 'N/A',
+      amount: typeof amount === 'number' ? `${amount.toFixed(2)}` : amount || '0.00',
+      rejectionReason: rejectionReason || 'Your withdrawal request did not meet our requirements.',
+      date: date || new Date().toLocaleDateString(),
+      supportUrl: `${frontendUrl}/user/support`,
+      currentYear: new Date().getFullYear()
+    }
+  );
+}
+
+/**
+ * Send Withdrawal Cancelled Email
+ * Uses action name from unified_actions: 'Withdrawal Cancelled Email - on Withdrawal Cancellation'
+ */
+export async function sendWithdrawalCancelledEmail(userEmail, userName, accountLogin, amount, date = null) {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://portal.solitairemarkets.com';
+  
+  return await sendTemplateEmail(
+    'Withdrawal Cancelled Email - on Withdrawal Cancellation',
+    userEmail,
+    {
+      recipientName: userName || 'Valued Customer',
+      accountLogin: accountLogin || 'N/A',
+      amount: typeof amount === 'number' ? `${amount.toFixed(2)}` : amount || '0.00',
+      date: date || new Date().toLocaleDateString(),
+      dashboardUrl: `${frontendUrl}/user/dashboard`,
+      currentYear: new Date().getFullYear()
+    }
   );
 }
 

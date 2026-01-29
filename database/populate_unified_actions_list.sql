@@ -34,6 +34,12 @@ INSERT INTO unified_actions (action_name, system_type) VALUES
 -- IB (Introducing Broker)
 ('IB Request Email - on IB Request', 'ib_client'),
 ('IB Request Accepted Email - on IB Request Approval', 'ib_admin'),
+('IB Request Rejected Email - on IB Request Rejection', 'ib_admin'),
+('IB Locked Email - on IB Lock', 'ib_admin'),
+('IB Unlocked Email - on IB Unlock', 'ib_admin'),
+('IB Withdrawal Request Email - on IB Withdrawal Request', 'ib_client'),
+('IB Withdrawal Approved Email - on IB Withdrawal Approval', 'ib_admin'),
+('IB Withdrawal Rejected Email - on IB Withdrawal Rejection', 'ib_admin'),
 
 -- Support/Tickets
 ('Ticket Email - on Ticket Creation', 'crm_user'),

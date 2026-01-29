@@ -1,6 +1,10 @@
 import express from 'express';
 import pool from '../config/database.js';
 import { authenticateAdmin } from '../middleware/auth.js';
+import { 
+  sendIBWithdrawalApprovedEmail, 
+  sendIBWithdrawalRejectedEmail 
+} from '../services/templateEmail.service.js';
 
 const router = express.Router();
 
@@ -93,7 +97,42 @@ router.patch('/:id/approve', authenticateAdmin, async (req, res) => {
             [adminId, withdrawalId]
         );
 
+        // 5. Get withdrawal and user details for email
+        const withdrawalDetails = await client.query(
+            `SELECT w.*, u.email, u.first_name, u.last_name, pd.payment_details
+             FROM ib_withdrawals w
+             JOIN users u ON w.user_id = u.id
+             LEFT JOIN payment_details pd ON w.payment_detail_id = pd.id
+             WHERE w.id = $1`,
+            [withdrawalId]
+        );
+
         await client.query('COMMIT');
+
+        // Send approval email (non-blocking)
+        if (withdrawalDetails.rows.length > 0) {
+            const withdrawal = withdrawalDetails.rows[0];
+            const user = withdrawal;
+            const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+            const paymentMethod = withdrawal.payment_method === 'bank_transfer' ? 'Bank Transfer' : 
+                                 withdrawal.payment_method === 'usdt_trc20' ? 'USDT (TRC20)' : 
+                                 withdrawal.payment_method || 'N/A';
+            
+            try {
+                await sendIBWithdrawalApprovedEmail(
+                    user.email,
+                    userName,
+                    parseFloat(withdrawal.amount),
+                    withdrawal.id,
+                    paymentMethod,
+                    new Date().toLocaleDateString()
+                );
+            } catch (emailError) {
+                console.error('Failed to send IB withdrawal approval email:', emailError);
+                // Don't block the response if email fails
+            }
+        }
+
         res.json({ success: true, message: 'Withdrawal approved and balance deducted' });
     } catch (error) {
         await client.query('ROLLBACK');
@@ -125,6 +164,15 @@ router.patch('/:id/reject', authenticateAdmin, async (req, res) => {
 
         console.log('🚫 Attempting to reject withdrawal:', { withdrawalId, adminId, reason });
 
+        // Get withdrawal details before updating (for email)
+        const withdrawalDetails = await pool.query(
+            `SELECT w.*, u.email, u.first_name, u.last_name
+             FROM ib_withdrawals w
+             JOIN users u ON w.user_id = u.id
+             WHERE w.id = $1 AND w.status = 'pending'`,
+            [withdrawalId]
+        );
+
         const result = await pool.query(
             `UPDATE ib_withdrawals 
              SET status = 'rejected', admin_id = $1, rejection_reason = $2, rejected_at = NOW(), updated_at = NOW() 
@@ -136,6 +184,27 @@ router.patch('/:id/reject', authenticateAdmin, async (req, res) => {
         if (result.rows.length === 0) {
             console.log('⚠️ Rejection failed: Withdrawal not found or not pending', { withdrawalId });
             return res.status(404).json({ success: false, message: 'Withdrawal request not found or not in pending status' });
+        }
+
+        // Send rejection email (non-blocking)
+        if (withdrawalDetails.rows.length > 0) {
+            const withdrawal = withdrawalDetails.rows[0];
+            const user = withdrawal;
+            const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+            
+            try {
+                await sendIBWithdrawalRejectedEmail(
+                    user.email,
+                    userName,
+                    parseFloat(withdrawal.amount),
+                    withdrawal.id,
+                    reason || 'Rejected by administrator',
+                    new Date().toLocaleDateString()
+                );
+            } catch (emailError) {
+                console.error('Failed to send IB withdrawal rejection email:', emailError);
+                // Don't block the response if email fails
+            }
         }
 
         console.log('✅ Withdrawal rejected successfully:', withdrawalId);

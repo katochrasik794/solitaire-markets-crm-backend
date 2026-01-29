@@ -1,6 +1,7 @@
 import express from 'express';
 import pool from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
+import { sendIBWithdrawalRequestEmail } from '../services/templateEmail.service.js';
 
 const router = express.Router();
 
@@ -94,6 +95,35 @@ router.post('/', authenticate, ensureIB, async (req, res) => {
              RETURNING id, amount, status, created_at`,
             [userId, amount, paymentMethod, paymentDetailId]
         );
+
+        // 4. Get user details for email
+        const userResult = await pool.query(
+            'SELECT email, first_name, last_name FROM users WHERE id = $1',
+            [userId]
+        );
+
+        // Send withdrawal request email (non-blocking)
+        if (userResult.rows.length > 0 && userResult.rows[0].email) {
+            const user = userResult.rows[0];
+            const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
+            const paymentMethodDisplay = paymentMethod === 'bank_transfer' ? 'Bank Transfer' : 
+                                         paymentMethod === 'usdt_trc20' ? 'USDT (TRC20)' : 
+                                         paymentMethod || 'N/A';
+            
+            try {
+                await sendIBWithdrawalRequestEmail(
+                    user.email,
+                    userName,
+                    parseFloat(amount),
+                    insertResult.rows[0].id,
+                    paymentMethodDisplay,
+                    new Date(insertResult.rows[0].created_at).toLocaleDateString()
+                );
+            } catch (emailError) {
+                console.error('Failed to send IB withdrawal request email:', emailError);
+                // Don't block the response if email fails
+            }
+        }
 
         res.status(201).json({
             success: true,

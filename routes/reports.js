@@ -1284,7 +1284,9 @@ router.get('/trading-performance', authenticate, async (req, res) => {
             unprofitable: 0,
             tradingVolume: 0,
             lifetimeVolume: 0,
-            equity: 0
+            equity: 0,
+            totalDeposits: 0,
+            totalWithdrawals: 0
           },
           chartData: {
             netProfit: { labels: [], profit: [], loss: [] },
@@ -1508,14 +1510,14 @@ router.get('/trading-performance', authenticate, async (req, res) => {
     // If we have profit from API, use it (includes both realized and unrealized)
     // Otherwise fallback to trades (only realized)
     let netProfit = totalProfitFromAPI;
-    let profit = totalProfitFromAPI > 0 ? totalProfitFromAPI : totalProfit;
-    let loss = totalProfitFromAPI < 0 ? Math.abs(totalProfitFromAPI) : totalLoss;
+    let finalProfit = totalProfitFromAPI > 0 ? totalProfitFromAPI : totalProfit;
+    let finalLoss = totalProfitFromAPI < 0 ? Math.abs(totalProfitFromAPI) : totalLoss;
     
     // If no API profit but we have trades, use trades
     if (totalProfitFromAPI === 0 && (totalProfit > 0 || totalLoss > 0)) {
       netProfit = totalProfit - totalLoss;
-      profit = totalProfit;
-      loss = totalLoss;
+      finalProfit = totalProfit;
+      finalLoss = totalLoss;
     }
     
     // Calculate unrealised P/L (equity - balance - credit)
@@ -1715,15 +1717,17 @@ router.get('/trading-performance', authenticate, async (req, res) => {
       data: {
         summary: {
           netProfit: parseFloat(netProfit.toFixed(2)),
-          profit: parseFloat(totalProfit.toFixed(2)),
-          loss: parseFloat(totalLoss.toFixed(2)),
+          profit: parseFloat(finalProfit.toFixed(2)),
+          loss: parseFloat(finalLoss.toFixed(2)),
           unrealisedPL: parseFloat(unrealisedPL.toFixed(2)),
           closedOrders: profitableTrades + unprofitableTrades,
           profitable: profitableTrades,
           unprofitable: unprofitableTrades,
           tradingVolume: parseFloat(totalVolume.toFixed(2)),
           lifetimeVolume: parseFloat(lifetimeVolume.toFixed(2)),
-          equity: parseFloat(totalEquity.toFixed(2))
+          equity: parseFloat(totalEquity.toFixed(2)),
+          totalDeposits: parseFloat(totalDeposits.toFixed(2)),
+          totalWithdrawals: parseFloat(totalWithdrawals.toFixed(2))
         },
         chartData: {
           netProfit: netProfitData,

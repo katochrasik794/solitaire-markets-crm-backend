@@ -65,9 +65,12 @@ const getEmailTemplate = (title, subtitle, content, variables = []) => {
           <!-- Footer -->
           <tr>
             <td style="background-color: #f9fafb; padding: 24px 30px; text-align: center; border-top: 1px solid #e5e7eb;">
-              <p style="font-size: 13px; color: #6b7280; margin: 0; line-height: 1.5;">
+              <p style="font-size: 13px; color: #6b7280; margin: 0 0 16px 0; line-height: 1.5;">
                 © {{currentYear}} ${BRAND_NAME}. All rights reserved.<br>
                 <a href="mailto:${COMPANY_EMAIL}" style="color: ${PRIMARY_COLOR}; text-decoration: none;">${COMPANY_EMAIL}</a>
+              </p>
+              <p style="font-size: 11px; color: #9ca3af; margin: 0; line-height: 1.6; max-width: 560px; margin-left: auto; margin-right: auto;">
+                <strong>Risk Warning:</strong> Trading in financial instruments involves a significant risk of loss. Past performance is not indicative of future results. Only invest capital that you can afford to lose. Before trading, please ensure you fully understand the risks involved and seek independent advice if necessary. ${BRAND_NAME} is not responsible for any losses incurred as a result of trading decisions.
               </p>
             </td>
           </tr>

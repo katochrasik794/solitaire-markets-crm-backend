@@ -1,7 +1,7 @@
 import express from 'express';
 import pool from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
-import { sendDepositRequestEmail } from '../services/templateEmail.service.js';
+import { sendDepositRequestEmail, sendDepositCancelledEmail } from '../services/templateEmail.service.js';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -1101,6 +1101,15 @@ router.put('/:depositId/cancel', authenticate, async (req, res) => {
       });
     }
 
+    // Get deposit details before updating (for email)
+    const depositDetailsResult = await pool.query(
+      `SELECT d.*, u.email, u.first_name, u.last_name
+       FROM deposit_requests d
+       JOIN users u ON d.user_id = u.id
+       WHERE d.id = $1`,
+      [depositId]
+    );
+
     // Update deposit status to cancelled
     await pool.query(
       `UPDATE deposit_requests 
@@ -1128,6 +1137,28 @@ router.put('/:depositId/cancel', authenticate, async (req, res) => {
     }
 
     console.log(`Deposit #${depositId} cancelled by user ${userId}`);
+
+    // Send cancellation email (non-blocking)
+    if (depositDetailsResult.rows.length > 0 && depositDetailsResult.rows[0].email) {
+      const depositDetails = depositDetailsResult.rows[0];
+      const userName = `${depositDetails.first_name || ''} ${depositDetails.last_name || ''}`.trim() || 'Valued Customer';
+      const accountLogin = depositDetails.mt5_account_id || depositDetails.wallet_id || 'N/A';
+      
+      setImmediate(async () => {
+        try {
+          await sendDepositCancelledEmail(
+            depositDetails.email,
+            userName,
+            accountLogin,
+            `${depositDetails.amount} ${depositDetails.currency || 'USD'}`,
+            new Date().toLocaleDateString()
+          );
+          console.log(`Deposit cancellation email sent to ${depositDetails.email}`);
+        } catch (emailError) {
+          console.error('Failed to send deposit cancellation email:', emailError);
+        }
+      });
+    }
 
     res.json({
       success: true,
