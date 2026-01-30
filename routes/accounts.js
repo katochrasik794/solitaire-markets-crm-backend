@@ -144,8 +144,12 @@ router.get('/:accountNumber/balance', authenticate, async (req, res) => {
 
       const profileResult = await mt5Service.getClientProfile(login);
 
-      if (profileResult.success && profileResult.data && profileResult.data.Success && profileResult.data.Data) {
-        const mt5Data = profileResult.data.Data;
+      if (profileResult.success && profileResult.data) {
+        // Handle different response structures (Data or direct properties)
+        const mt5Data = profileResult.data.Data || profileResult.data;
+
+        // Log for debugging
+        // console.log(`MT5 Balance Fetch for ${accountNumber}:`, JSON.stringify(mt5Data));
 
         // Update balance in database
         await pool.query(
@@ -167,12 +171,21 @@ router.get('/:accountNumber/balance', authenticate, async (req, res) => {
         res.json({
           success: true,
           data: {
+            // Include all raw data from MT5
+            ...mt5Data,
+
+            // Normalized fields for frontend
             leverage: mt5Data.Leverage || 2000,
             equity: parseFloat(mt5Data.Equity || 0),
             balance: parseFloat(mt5Data.Balance || 0),
             margin: parseFloat(mt5Data.Margin || 0),
             credit: parseFloat(mt5Data.Credit || 0),
-            marginFree: parseFloat(mt5Data.MarginFree || 0)
+            marginFree: parseFloat(mt5Data.MarginFree || 0),
+            profit: parseFloat(mt5Data.Profit || 0),
+            floating: parseFloat(mt5Data.Floating || 0),
+            // Potential deposit/withdrawal fields (guesses based on common MT5 APIs)
+            totalDeposit: parseFloat(mt5Data.Deposit || mt5Data.TotalDeposit || 0),
+            totalWithdrawal: parseFloat(mt5Data.Withdrawal || mt5Data.TotalWithdrawal || 0)
           }
         });
       } else {
