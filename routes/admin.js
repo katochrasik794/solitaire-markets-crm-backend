@@ -4626,9 +4626,9 @@ router.put('/mt5/account/:accountId/group', authenticateAdmin, async (req, res) 
         'SELECT id FROM mt5_groups WHERE group_name = $1 LIMIT 1',
         [group]
       );
-      
+
       const groupId = groupResult.rows[0]?.id || null;
-      
+
       // Update both group name and group ID if available
       if (groupId) {
         await pool.query(
@@ -4752,7 +4752,7 @@ router.post('/mt5/bulk-change-group', authenticateAdmin, async (req, res) => {
           } else {
             groupId = results.groupId;
           }
-          
+
           // Update both group name and group ID if available
           if (groupId) {
             await client.query(
@@ -5073,38 +5073,61 @@ router.post('/mt5/deposit', authenticateAdmin, async (req, res, next) => {
       comment || `Deposit by admin ${req.admin.email}`
     );
 
-    // Send deposit email notification using template (non-blocking)
-    setImmediate(async () => {
-      try {
-        // Get user info from trading account
-        const accountResult = await pool.query(
-          `SELECT u.id, u.email, u.first_name, u.last_name 
-           FROM trading_accounts ta
-           INNER JOIN users u ON ta.user_id = u.id
-           WHERE ta.account_number = $1 AND ta.platform = 'MT5'
-           LIMIT 1`,
-          [login]
+    // Create deposit_request record in database (audit trail)
+    try {
+      // Get user info and account details
+      const accountResult = await pool.query(
+        `SELECT u.id, u.email, u.first_name, u.last_name, ta.currency 
+         FROM trading_accounts ta
+         INNER JOIN users u ON ta.user_id = u.id
+         WHERE ta.account_number = $1 AND ta.platform = 'MT5'
+         LIMIT 1`,
+        [mt5_login.toString()]
+      );
+
+      if (accountResult.rows.length > 0) {
+        const user = accountResult.rows[0];
+        const userCurrency = user.currency || 'USD';
+        const adminNotes = `Admin Direct Deposit by ${req.admin.email}. ${comment || ''}`.trim();
+
+        // Insert into deposit_requests
+        const depositResult = await pool.query(
+          `INSERT INTO deposit_requests 
+           (user_id, gateway_id, amount, currency, deposit_to_type, mt5_account_id, status, admin_notes, created_at, updated_at)
+           VALUES ($1, NULL, $2, $3, 'mt5', $4, 'approved', $5, NOW(), NOW())
+           RETURNING id`,
+          [user.id, balance, userCurrency, mt5_login.toString(), adminNotes]
         );
 
-        if (accountResult.rows.length > 0) {
-          const user = accountResult.rows[0];
-          const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
-          
-          const { sendDepositApprovedEmail } = await import('../services/templateEmail.service.js');
-          await sendDepositApprovedEmail(
-            user.email,
-            userName,
-            login.toString(),
-            `$${balance.toFixed(2)}`,
-            new Date().toLocaleDateString()
-          );
-          console.log(`Deposit email sent to ${user.email}`);
-        }
-      } catch (emailError) {
-        console.error('Failed to send deposit email:', emailError);
-        // Don't fail the request if email fails
+        console.log(`Admin deposit record created: #${depositResult.rows[0].id} for user ${user.email}`);
+
+        // Update trading_accounts balance in DB to keep it synced
+        await pool.query(
+          `UPDATE trading_accounts 
+           SET balance = COALESCE(balance, 0) + $1, 
+               equity = COALESCE(equity, 0) + $1,
+               updated_at = NOW()
+           WHERE account_number = $2 AND platform = 'MT5'`,
+          [balance, mt5_login.toString()]
+        );
+
+        // Send email notification (non-blocking)
+        const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
+        const { sendDepositApprovedEmail } = await import('../services/templateEmail.service.js');
+        sendDepositApprovedEmail(
+          user.email,
+          userName,
+          mt5_login.toString(),
+          `$${balance.toFixed(2)}`,
+          new Date().toLocaleDateString()
+        ).catch(err => console.error('Failed to send deposit email:', err));
+      } else {
+        console.warn(`Could not find user/account for recording admin deposit: ${mt5_login}`);
       }
-    });
+    } catch (recordError) {
+      console.error('Failed to record admin deposit in database:', recordError);
+      // We don't fail the request since MT5 action already succeeded
+    }
 
     res.json({
       success: true,
@@ -5158,38 +5181,63 @@ router.post('/mt5/withdraw', authenticateAdmin, async (req, res, next) => {
       comment || `Withdrawal by admin ${req.admin.email}`
     );
 
-    // Send withdrawal email notification using template (non-blocking)
-    setImmediate(async () => {
-      try {
-        // Get user info from trading account
-        const accountResult = await pool.query(
-          `SELECT u.id, u.email, u.first_name, u.last_name 
-           FROM trading_accounts ta
-           INNER JOIN users u ON ta.user_id = u.id
-           WHERE ta.account_number = $1 AND ta.platform = 'MT5'
-           LIMIT 1`,
-          [login]
+    // Create withdrawal record in database (audit trail)
+    try {
+      // Get user info and account details
+      const accountResult = await pool.query(
+        `SELECT u.id, u.email, u.first_name, u.last_name, ta.currency 
+         FROM trading_accounts ta
+         INNER JOIN users u ON ta.user_id = u.id
+         WHERE ta.account_number = $1 AND ta.platform = 'MT5'
+         LIMIT 1`,
+        [mt5_login.toString()]
+      );
+
+      if (accountResult.rows.length > 0) {
+        const user = accountResult.rows[0];
+        const userCurrency = user.currency || 'USD';
+        const adminComment = comment || `Withdrawal by admin ${req.admin.email}`;
+
+        // Insert into withdrawals
+        // Note: setting method to 'Admin Direct' and status to 'approved'
+        const withdrawalResult = await pool.query(
+          `INSERT INTO withdrawals (
+            user_id, amount, currency, method, status, 
+            mt5_account_id, bank_details, approved_at, created_at, updated_at
+          ) VALUES ($1, $2, $3, 'Admin Direct', 'approved', $4, $5, NOW(), NOW(), NOW())
+          RETURNING id`,
+          [user.id, balance, userCurrency, mt5_login.toString(), `Admin Comment: ${adminComment}`]
         );
 
-        if (accountResult.rows.length > 0) {
-          const user = accountResult.rows[0];
-          const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
-          
-          const { sendWithdrawalApprovedEmail } = await import('../services/templateEmail.service.js');
-          await sendWithdrawalApprovedEmail(
-            user.email,
-            userName,
-            login.toString(),
-            `$${balance.toFixed(2)}`,
-            new Date().toLocaleDateString()
-          );
-          console.log(`Withdrawal email sent to ${user.email}`);
-        }
-      } catch (emailError) {
-        console.error('Failed to send withdrawal email:', emailError);
-        // Don't fail the request if email fails
+        console.log(`Admin withdrawal record created: #${withdrawalResult.rows[0].id} for user ${user.email}`);
+
+        // Update trading_accounts balance in DB to keep it synced
+        await pool.query(
+          `UPDATE trading_accounts 
+           SET balance = COALESCE(balance, 0) - $1, 
+               equity = COALESCE(equity, 0) - $1,
+               updated_at = NOW()
+           WHERE account_number = $2 AND platform = 'MT5'`,
+          [balance, mt5_login.toString()]
+        );
+
+        // Send email notification (non-blocking)
+        const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
+        const { sendWithdrawalApprovedEmail } = await import('../services/templateEmail.service.js');
+        sendWithdrawalApprovedEmail(
+          user.email,
+          userName,
+          mt5_login.toString(),
+          `$${balance.toFixed(2)}`,
+          new Date().toLocaleDateString()
+        ).catch(err => console.error('Failed to send withdrawal email:', err));
+      } else {
+        console.warn(`Could not find user/account for recording admin withdrawal: ${mt5_login}`);
       }
-    });
+    } catch (recordError) {
+      console.error('Failed to record admin withdrawal in database:', recordError);
+      // We don't fail the request since MT5 action already succeeded
+    }
 
     res.json({
       success: true,
@@ -5338,7 +5386,7 @@ router.post('/mt5/credit', authenticateAdmin, async (req, res, next) => {
       if (accountResult.rows.length > 0) {
         const user = accountResult.rows[0];
         const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
-        
+
         await sendBonusAddedEmail(
           user.email,
           userName,
@@ -5602,7 +5650,7 @@ router.post('/mt5/credit/deduct', authenticateAdmin, async (req, res, next) => {
       if (accountResult.rows.length > 0) {
         const user = accountResult.rows[0];
         const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
-        
+
         await sendBonusDeductedEmail(
           user.email,
           userName,
@@ -7040,7 +7088,7 @@ router.post('/deposits/:id/approve', authenticateAdmin, requireAdminFeaturePermi
       try {
         if (userEmail) {
           const accountLogin = deposit.mt5_account_id || deposit.wallet_id || 'N/A';
-          
+
           // Send deposit approved email
           await sendDepositApprovedEmail(
             userEmail,
@@ -7142,7 +7190,7 @@ router.post('/deposits/:id/reject', authenticateAdmin, requireAdminFeaturePermis
             ? `${userDetailsResult.rows[0].first_name || ''} ${userDetailsResult.rows[0].last_name || ''}`.trim() || 'Valued Customer'
             : 'Valued Customer';
           const accountLogin = beforeData.mt5_account_id || beforeData.wallet_id || 'N/A';
-          
+
           await sendDepositRejectedEmail(
             userEmail,
             userName,
@@ -7752,7 +7800,7 @@ router.post('/withdrawals/:id/approve', authenticateAdmin, requireAdminFeaturePe
       try {
         if (userEmail) {
           const accountLogin = withdrawal.mt5_account_id || withdrawal.wallet_id || 'N/A';
-          
+
           // Send withdrawal approved email
           await sendWithdrawalApprovedEmail(
             userEmail,
@@ -7877,7 +7925,7 @@ router.post('/withdrawals/:id/reject', authenticateAdmin, requireAdminFeaturePer
       try {
         if (userEmail) {
           const accountLogin = withdrawal.mt5_account_id || withdrawal.wallet_id || 'N/A';
-          
+
           await sendWithdrawalRejectedEmail(
             userEmail,
             userName,
@@ -8493,7 +8541,7 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
           // Use default template with editable body if no template selected
           const { getDefaultEmailTemplate } = await import('../services/defaultEmailTemplate.js');
           const recipientName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Valued Customer';
-          
+
           // Use default template with header/footer fixed, body editable
           // If body doesn't contain HTML tags, treat as plain text and convert line breaks
           let bodyContent = body;
@@ -8504,7 +8552,7 @@ router.post('/send-emails', authenticateAdmin, async (req, res) => {
             // Plain text mode
             bodyContent = body.replace(/\n/g, '<br>');
           }
-          
+
           htmlContent = getDefaultEmailTemplate(bodyContent, recipientName);
         }
 
