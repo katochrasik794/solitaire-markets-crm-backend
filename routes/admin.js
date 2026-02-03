@@ -4019,6 +4019,53 @@ router.put(
 );
 
 /**
+ * DELETE /api/admin/group-management/:id
+ * Delete a group from mt5_groups table
+ */
+router.delete(
+  '/group-management/:id',
+  authenticateAdmin,
+  async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ ok: false, error: 'Invalid id' });
+      }
+
+      // Check if group is in use by any ib_commissions
+      const checkResult = await pool.query(
+        'SELECT id FROM ib_commissions WHERE group_id = $1 LIMIT 1',
+        [id]
+      );
+
+      if (checkResult.rowCount > 0) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Cannot delete group because it is associated with existing IB commissions'
+        });
+      }
+
+      const result = await pool.query(
+        'DELETE FROM mt5_groups WHERE id = $1 RETURNING id',
+        [id]
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ ok: false, error: 'Group not found' });
+      }
+
+      res.json({ ok: true });
+    } catch (error) {
+      console.error('Delete mt5_group error:', error);
+      res.status(500).json({
+        ok: false,
+        error: error.message || 'Failed to delete group'
+      });
+    }
+  }
+);
+
+/**
  * PUT /api/admin/group-management/:id/limits
  * Update deposit and withdrawal limits for a group
  */
