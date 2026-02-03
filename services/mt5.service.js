@@ -212,6 +212,70 @@ export const deductBalance = async (
 };
 
 /**
+ * POST /Users/{login}/AddClientCredit
+ */
+export const addCredit = async (
+  login,
+  balance,
+  comment = 'Credit via API'
+) => {
+  const payload = {
+    balance,
+    comment
+  };
+
+  const res = await fetch(
+    `${MT5_BASE_URL}/Users/${login}/AddClientCredit`,
+    {
+      method: 'POST',
+      headers: getMT5Headers(),
+      body: JSON.stringify(payload)
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(
+      data.Message ||
+      data.error ||
+      `Failed to add credit: ${res.status}`
+    );
+  }
+  return { success: true, data };
+};
+
+/**
+ * POST /Users/{login}/DeductClientCredit
+ */
+export const deductCredit = async (
+  login,
+  balance,
+  comment = 'Credit deduction via API'
+) => {
+  const payload = {
+    balance,
+    comment
+  };
+
+  const res = await fetch(
+    `${MT5_BASE_URL}/Users/${login}/DeductClientCredit`,
+    {
+      method: 'POST',
+      headers: getMT5Headers(),
+      body: JSON.stringify(payload)
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(
+      data.Message ||
+      data.error ||
+      `Failed to deduct credit: ${res.status}`
+    );
+  }
+  return { success: true, data };
+};
+
+/**
  * POST /Users/{login}/AddClientBonus
  */
 export const addBonus = async (
@@ -377,11 +441,11 @@ export const changePassword = async (login, newPassword, passwordType = 'master'
     // Extract error code if present (e.g., "Invalid account password (3006)")
     const errorMessage = data.Message || data.error || data.message || text || `Failed to change password: ${res.status}`;
     const errorCode = data.ErrorCode || data.errorCode || (errorMessage.match(/\((\d+)\)/) ? errorMessage.match(/\((\d+)\)/)[1] : null);
-    
-    const fullError = errorCode 
+
+    const fullError = errorCode
       ? `${errorMessage} (Error Code: ${errorCode})`
       : errorMessage;
-    
+
     throw new Error(fullError);
   }
   return { success: true, data };
@@ -468,7 +532,7 @@ export const getClosedTrades = async (accountId, fromDate = null, toDate = null,
     page: page.toString(),
     pageSize: pageSize.toString()
   });
-  
+
   if (fromDate) params.append('fromDate', fromDate);
   if (toDate) params.append('toDate', toDate);
 
@@ -501,7 +565,7 @@ export const getAllTrades = async (accountId, fromDate = null, toDate = null, pa
     page: page.toString(),
     pageSize: pageSize.toString()
   });
-  
+
   if (fromDate) params.append('fromDate', fromDate);
   if (toDate) params.append('toDate', toDate);
 

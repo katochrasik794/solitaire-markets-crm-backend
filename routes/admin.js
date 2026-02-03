@@ -5842,6 +5842,151 @@ router.post('/mt5/credit/deduct', authenticateAdmin, async (req, res, next) => {
 });
 
 /**
+ * POST /api/admin/mt5/real-credit/add
+ * Add real credit to MT5 account
+ */
+router.post('/mt5/real-credit/add', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { mt5_login, amount, comment } = req.body;
+
+    if (!mt5_login || !amount) {
+      return res.status(400).json({
+        success: false,
+        message: 'MT5 login and amount are required'
+      });
+    }
+
+    const login = parseInt(mt5_login);
+    const balance = parseFloat(amount);
+
+    if (isNaN(login) || isNaN(balance) || balance <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid login or amount'
+      });
+    }
+
+    const result = await mt5Service.addCredit(
+      login,
+      balance,
+      comment || `Credit addition by admin ${req.admin.email}`
+    );
+
+    // Email notification
+    try {
+      const accountResult = await pool.query(
+        `SELECT u.email, u.first_name, u.last_name 
+         FROM trading_accounts ta
+         INNER JOIN users u ON ta.user_id = u.id
+         WHERE ta.account_number = $1 AND ta.platform = 'MT5'
+         LIMIT 1`,
+        [login.toString()]
+      );
+
+      if (accountResult.rows.length > 0) {
+        const user = accountResult.rows[0];
+        const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
+        // Reusing bonus email as it's similar in nature for credits
+        await sendBonusAddedEmail(
+          user.email,
+          userName,
+          login.toString(),
+          `$${balance.toFixed(2)}`,
+          new Date().toLocaleDateString(),
+          comment || ''
+        );
+      }
+    } catch (e) {
+      console.error('Failed to send credit addition email:', e);
+    }
+
+    res.json({
+      success: true,
+      message: 'Credit added successfully',
+      data: result.data
+    });
+  } catch (error) {
+    console.error('MT5 real-credit add error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to add credit'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/mt5/real-credit/deduct
+ * Deduct real credit from MT5 account
+ */
+router.post('/mt5/real-credit/deduct', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { mt5_login, amount, comment } = req.body;
+
+    if (!mt5_login || !amount) {
+      return res.status(400).json({
+        success: false,
+        message: 'MT5 login and amount are required'
+      });
+    }
+
+    const login = parseInt(mt5_login);
+    const balance = parseFloat(amount);
+
+    if (isNaN(login) || isNaN(balance) || balance <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid login or amount'
+      });
+    }
+
+    const result = await mt5Service.deductCredit(
+      login,
+      balance,
+      comment || `Credit deduction by admin ${req.admin.email}`
+    );
+
+    // Email notification
+    try {
+      const accountResult = await pool.query(
+        `SELECT u.email, u.first_name, u.last_name 
+         FROM trading_accounts ta
+         INNER JOIN users u ON ta.user_id = u.id
+         WHERE ta.account_number = $1 AND ta.platform = 'MT5'
+         LIMIT 1`,
+        [login.toString()]
+      );
+
+      if (accountResult.rows.length > 0) {
+        const user = accountResult.rows[0];
+        const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email;
+        await sendBonusDeductedEmail(
+          user.email,
+          userName,
+          login.toString(),
+          `$${balance.toFixed(2)}`,
+          new Date().toLocaleDateString(),
+          comment || ''
+        );
+      }
+    } catch (e) {
+      console.error('Failed to send credit deduction email:', e);
+    }
+
+    res.json({
+      success: true,
+      message: 'Credit deducted successfully',
+      data: result.data
+    });
+  } catch (error) {
+    console.error('MT5 real-credit deduct error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to deduct credit'
+    });
+  }
+});
+
+/**
  * GET /api/admin/mt5/balance-history
  * Get balance history (placeholder - implement based on your needs)
  */
