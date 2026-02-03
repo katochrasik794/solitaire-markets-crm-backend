@@ -97,10 +97,10 @@ router.post('/', authenticate, async (req, res) => {
       );
 
       for (const existing of duplicateCheck.rows) {
-        const existingDetails = typeof existing.payment_details === 'string' 
-          ? JSON.parse(existing.payment_details) 
+        const existingDetails = typeof existing.payment_details === 'string'
+          ? JSON.parse(existing.payment_details)
           : existing.payment_details;
-        
+
         // Normalize for comparison (trim and lowercase)
         const existingAccountNumber = (existingDetails.accountNumber || '').trim().toLowerCase();
         const existingIfscSwift = (existingDetails.ifscSwiftCode || '').trim().toLowerCase();
@@ -135,10 +135,10 @@ router.post('/', authenticate, async (req, res) => {
       const newWalletAddress = (payment_details.walletAddress || '').trim().toLowerCase();
 
       for (const existing of duplicateCheck.rows) {
-        const existingDetails = typeof existing.payment_details === 'string' 
-          ? JSON.parse(existing.payment_details) 
+        const existingDetails = typeof existing.payment_details === 'string'
+          ? JSON.parse(existing.payment_details)
           : existing.payment_details;
-        
+
         const existingWalletAddress = (existingDetails.walletAddress || '').trim().toLowerCase();
 
         if (existingWalletAddress === newWalletAddress) {
@@ -227,6 +227,157 @@ router.delete('/:id', authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to delete payment details',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * PUT /api/payment-details/:id
+ * Update an existing payment detail (resets status to pending)
+ */
+router.put('/:id', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const paymentDetailId = parseInt(req.params.id);
+    const { payment_method, payment_details } = req.body;
+
+    if (isNaN(paymentDetailId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid payment detail ID'
+      });
+    }
+
+    // Validation
+    if (!payment_method || !['bank_transfer', 'usdt_trc20'].includes(payment_method)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid payment method. Must be "bank_transfer" or "usdt_trc20"'
+      });
+    }
+
+    if (!payment_details || typeof payment_details !== 'object') {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment details must be a valid object'
+      });
+    }
+
+    // Check if payment detail exists and belongs to user
+    const check = await pool.query(
+      'SELECT id, status FROM payment_details WHERE id = $1 AND user_id = $2',
+      [paymentDetailId, userId]
+    );
+
+    if (check.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment detail not found'
+      });
+    }
+
+    // Validate payment details based on method
+    if (payment_method === 'bank_transfer') {
+      const required = ['bankName', 'accountName', 'accountNumber', 'ifscSwiftCode'];
+      for (const field of required) {
+        if (!payment_details[field] || payment_details[field].trim() === '') {
+          return res.status(400).json({
+            success: false,
+            message: `${field} is required for bank transfer`
+          });
+        }
+      }
+
+      // Check for duplicate bank transfer details (excluding current ID)
+      const duplicateCheck = await pool.query(
+        `SELECT id, status, payment_details
+         FROM payment_details
+         WHERE user_id = $1 
+           AND payment_method = 'bank_transfer'
+           AND status IN ('pending', 'approved')
+           AND id != $2`,
+        [userId, paymentDetailId]
+      );
+
+      for (const existing of duplicateCheck.rows) {
+        const existingDetails = typeof existing.payment_details === 'string'
+          ? JSON.parse(existing.payment_details)
+          : existing.payment_details;
+
+        const existingAccountNumber = (existingDetails.accountNumber || '').trim().toLowerCase();
+        const existingIfscSwift = (existingDetails.ifscSwiftCode || '').trim().toLowerCase();
+        const newAccountNumber = (payment_details.accountNumber || '').trim().toLowerCase();
+        const newIfscSwift = (payment_details.ifscSwiftCode || '').trim().toLowerCase();
+
+        if (existingAccountNumber === newAccountNumber && existingIfscSwift === newIfscSwift) {
+          return res.status(400).json({
+            success: false,
+            message: `This payment method already exists with ${existing.status} status.`
+          });
+        }
+      }
+    } else if (payment_method === 'usdt_trc20') {
+      if (!payment_details.walletAddress || payment_details.walletAddress.trim() === '') {
+        return res.status(400).json({
+          success: false,
+          message: 'Wallet address is required'
+        });
+      }
+
+      // Check for duplicate wallet address (excluding current ID)
+      const duplicateCheck = await pool.query(
+        `SELECT id, status, payment_details
+         FROM payment_details
+         WHERE user_id = $1 
+           AND payment_method = 'usdt_trc20'
+           AND status IN ('pending', 'approved')
+           AND id != $2`,
+        [userId, paymentDetailId]
+      );
+
+      const newWalletAddress = (payment_details.walletAddress || '').trim().toLowerCase();
+
+      for (const existing of duplicateCheck.rows) {
+        const existingDetails = typeof existing.payment_details === 'string'
+          ? JSON.parse(existing.payment_details)
+          : existing.payment_details;
+
+        const existingWalletAddress = (existingDetails.walletAddress || '').trim().toLowerCase();
+
+        if (existingWalletAddress === newWalletAddress) {
+          return res.status(400).json({
+            success: false,
+            message: `This wallet address already exists with ${existing.status} status.`
+          });
+        }
+      }
+    }
+
+    // Update payment detail and reset status to 'pending'
+    const result = await pool.query(
+      `UPDATE payment_details 
+       SET payment_method = $1, 
+           payment_details = $2, 
+           status = 'pending',
+           reviewed_at = NULL,
+           rejection_reason = NULL,
+           updated_at = NOW()
+       WHERE id = $3 AND user_id = $4
+       RETURNING id, payment_method, payment_details, status`,
+      [payment_method, JSON.stringify(payment_details), paymentDetailId, userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Payment details updated successfully. Awaiting admin re-approval.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Update payment details error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update payment details',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }

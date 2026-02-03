@@ -3534,25 +3534,139 @@ router.patch('/payment-details/:id/unapprove', authenticateAdmin, async (req, re
 
 /**
  * GET /api/admin/users/:id/payment-methods
- * Placeholder payment methods list for user
+ * Get payment methods for a specific user
  */
 router.get(
   '/users/:id/payment-methods',
   authenticateAdmin,
   async (req, res, next) => {
     try {
-      // When/if you add a payment_methods table, query it here.
+      const { id } = req.params;
+      const result = await pool.query(
+        `SELECT id, payment_method, payment_details, status, created_at as "submittedAt", reviewed_at as "approvedAt", rejection_reason
+         FROM payment_details 
+         WHERE user_id = $1 
+         ORDER BY created_at DESC`,
+        [id]
+      );
+
       res.json({
-        paymentMethods: []
+        ok: true,
+        paymentMethods: result.rows
       });
     } catch (error) {
       console.error('Get user payment methods error:', error);
       res.status(500).json({
+        ok: false,
         paymentMethods: []
       });
     }
   }
 );
+
+/**
+ * POST /api/admin/users/:id/payment-methods
+ * Add a payment method for a specific user
+ */
+router.post(
+  '/users/:id/payment-methods',
+  authenticateAdmin,
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { payment_method, payment_details } = req.body;
+
+      const result = await pool.query(
+        `INSERT INTO payment_details (user_id, payment_method, payment_details, status, reviewed_at, reviewed_by)
+         VALUES ($1, $2, $3, 'approved', NOW(), $4)
+         RETURNING *`,
+        [id, payment_method, JSON.stringify(payment_details), req.admin.id]
+      );
+
+      res.json({
+        ok: true,
+        item: result.rows[0]
+      });
+    } catch (error) {
+      console.error('Add user payment method error:', error);
+      res.status(500).json({
+        ok: false,
+        message: 'Failed to add payment method'
+      });
+    }
+  }
+);
+
+/**
+ * PATCH /api/admin/users/:id/payment-methods/:pmId
+ * Update a payment method for a specific user
+ */
+router.patch(
+  '/users/:id/payment-methods/:pmId',
+  authenticateAdmin,
+  async (req, res, next) => {
+    try {
+      const { id, pmId } = req.params;
+      const { payment_method, payment_details } = req.body;
+
+      const result = await pool.query(
+        `UPDATE payment_details 
+         SET payment_method = $1, payment_details = $2, updated_at = NOW()
+         WHERE id = $3 AND user_id = $4
+         RETURNING *`,
+        [payment_method, JSON.stringify(payment_details), pmId, id]
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ ok: false, message: 'Payment method not found' });
+      }
+
+      res.json({
+        ok: true,
+        item: result.rows[0]
+      });
+    } catch (error) {
+      console.error('Update user payment method error:', error);
+      res.status(500).json({
+        ok: false,
+        message: 'Failed to update payment method'
+      });
+    }
+  }
+);
+
+/**
+ * DELETE /api/admin/users/:id/payment-methods/:pmId
+ * Delete a payment method for a specific user
+ */
+router.delete(
+  '/users/:id/payment-methods/:pmId',
+  authenticateAdmin,
+  async (req, res, next) => {
+    try {
+      const { id, pmId } = req.params;
+
+      const result = await pool.query(
+        `DELETE FROM payment_details WHERE id = $1 AND user_id = $2`,
+        [pmId, id]
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ ok: false, message: 'Payment method not found' });
+      }
+
+      res.json({ ok: true });
+    } catch (error) {
+      console.error('Delete user payment method error:', error);
+      res.status(500).json({
+        ok: false,
+        message: 'Failed to delete payment method'
+      });
+    }
+  }
+);
+
+
 
 /**
  * ============================================
