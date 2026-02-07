@@ -5041,7 +5041,7 @@ router.patch('/mt5/account/:accountId/status', authenticateAdmin, async (req, re
 router.put('/mt5/account/:accountId/password', authenticateAdmin, async (req, res) => {
   try {
     const { accountId } = req.params;
-    const { newPassword } = req.body;
+    const { newPassword, type } = req.body; // type: 'master' or 'investor'
     const login = parseInt(accountId);
 
     if (isNaN(login)) {
@@ -5058,23 +5058,24 @@ router.put('/mt5/account/:accountId/password', authenticateAdmin, async (req, re
       });
     }
 
+    const passwordType = type === 'investor' ? 'investor' : 'master';
+
     // Step 1: Update password in MT5 API first using the correct endpoint
-    // PUT /Security/users/{login}/password/change?passwordType=main
     let mt5Result;
     try {
-      console.log(`[MT5 Password Change] Attempting to change password for account ${login}`);
-      mt5Result = await mt5Service.changePassword(login, newPassword, 'master');
+      console.log(`[MT5 ${passwordType} Password Change] Attempting to change password for account ${login}`);
+      mt5Result = await mt5Service.changePassword(login, newPassword, passwordType);
 
       // Check if the API call was successful
       if (!mt5Result || !mt5Result.success) {
-        const errorMsg = mt5Result?.error || mt5Result?.message || 'Failed to update password in MT5 API';
-        console.error(`[MT5 Password Change] API call failed:`, errorMsg);
+        const errorMsg = mt5Result?.error || mt5Result?.message || `Failed to update ${passwordType} password in MT5 API`;
+        console.error(`[MT5 ${passwordType} Password Change] API call failed:`, errorMsg);
         throw new Error(errorMsg);
       }
 
-      console.log(`[MT5 Password Change] Successfully changed password in MT5 for account ${login}`);
+      console.log(`[MT5 ${passwordType} Password Change] Successfully changed password in MT5 for account ${login}`);
     } catch (mt5Error) {
-      console.error('[MT5 Password Change] MT5 API error:', {
+      console.error(`[MT5 ${passwordType} Password Change] MT5 API error:`, {
         accountId: login,
         error: mt5Error.message,
         stack: mt5Error.stack
@@ -5082,7 +5083,7 @@ router.put('/mt5/account/:accountId/password', authenticateAdmin, async (req, re
       // Return error without updating database
       return res.status(500).json({
         ok: false,
-        error: mt5Error.message || 'Failed to update password in MT5. Please check the password and try again.'
+        error: mt5Error.message || `Failed to update ${passwordType} password in MT5. Please check the password and try again.`
       });
     }
 
@@ -5090,11 +5091,12 @@ router.put('/mt5/account/:accountId/password', authenticateAdmin, async (req, re
     try {
       const { encryptPassword } = await import('../utils/helpers.js');
       const encryptedPassword = encryptPassword(newPassword);
+      const dbField = passwordType === 'investor' ? 'investor_password' : 'master_password';
 
-      // Update master_password in trading_accounts
+      // Update database
       await pool.query(
         `UPDATE trading_accounts 
-         SET master_password = $1, updated_at = NOW()
+         SET ${dbField} = $1, updated_at = NOW()
          WHERE account_number = $2`,
         [encryptedPassword, accountId.toString()]
       );
@@ -5102,9 +5104,10 @@ router.put('/mt5/account/:accountId/password', authenticateAdmin, async (req, re
       // Log activity
       await pool.query(
         `INSERT INTO activity_logs (admin_id, action, details, created_at)
-         VALUES ($1, 'MT5_PASSWORD_CHANGE', $2, NOW())`,
+         VALUES ($1, $2, $3, NOW())`,
         [
           req.admin.id,
+          `MT5_${passwordType.toUpperCase()}_PASSWORD_CHANGE`,
           JSON.stringify({
             accountId: login
           })
@@ -5113,7 +5116,7 @@ router.put('/mt5/account/:accountId/password', authenticateAdmin, async (req, re
 
       res.json({
         ok: true,
-        message: 'MT5 password updated successfully in both MT5 and database'
+        message: `${passwordType.charAt(0).toUpperCase() + passwordType.slice(1)} password updated successfully`
       });
     } catch (dbError) {
       console.error('Database update error after MT5 success:', dbError);

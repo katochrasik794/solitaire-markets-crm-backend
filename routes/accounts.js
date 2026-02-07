@@ -758,7 +758,7 @@ router.post('/create', authenticate, async (req, res, next) => {
 router.put('/:accountNumber/password', authenticate, async (req, res, next) => {
   try {
     const { accountNumber } = req.params;
-    const { password } = req.body;
+    const { password, type } = req.body; // type: 'master' or 'investor'
     const userId = req.user.id;
 
     if (!password) {
@@ -767,6 +767,8 @@ router.put('/:accountNumber/password', authenticate, async (req, res, next) => {
         message: 'Password is required'
       });
     }
+
+    const passwordType = type === 'investor' ? 'investor' : 'master';
 
     // Verify account ownership
     const accountCheck = await pool.query(
@@ -783,12 +785,14 @@ router.put('/:accountNumber/password', authenticate, async (req, res, next) => {
 
     // Call MT5 Service
     try {
-      await mt5Service.changePassword(parseInt(accountNumber, 10), password, 'master');
+      await mt5Service.changePassword(parseInt(accountNumber, 10), password, passwordType);
 
       // Update local DB
       const encryptedPassword = encryptPassword(password);
+      const dbField = passwordType === 'investor' ? 'investor_password' : 'master_password';
+
       await pool.query(
-        'UPDATE trading_accounts SET master_password = $1, updated_at = NOW() WHERE account_number = $2',
+        `UPDATE trading_accounts SET ${dbField} = $1, updated_at = NOW() WHERE account_number = $2`,
         [encryptedPassword, accountNumber]
       );
 
@@ -796,19 +800,19 @@ router.put('/:accountNumber/password', authenticate, async (req, res, next) => {
       await logUserAction({
         userId: req.user.id,
         userEmail: req.user.email,
-        actionType: 'mt5_password_change',
+        actionType: `mt5_${passwordType}_password_change`,
         actionCategory: 'mt5',
         targetType: 'mt5_account',
         targetId: accountCheck.rows[0].id,
         targetIdentifier: accountNumber,
-        description: `Changed password for MT5 account ${accountNumber}`,
+        description: `Changed MT5 ${passwordType} password for account ${accountNumber}`,
         req,
         res
       });
 
       res.json({
         success: true,
-        message: 'Password changed successfully'
+        message: `${passwordType.charAt(0).toUpperCase() + passwordType.slice(1)} password updated successfully`
       });
 
     } catch (mt5Error) {
